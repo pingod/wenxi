@@ -100,11 +100,7 @@ class _VideoOrigin {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
-  final library = [
-    Platform.environment['ASTERLINK_MPV_LIBRARY'],
-    '.local/player-test/libmpv/libmpv-2.dll',
-    'build/windows/x64/runner/Release/libmpv-2.dll',
-  ].whereType<String>().where((path) => File(path).existsSync()).firstOrNull;
+  final library = mpvTestLibrary();
 
   group(
     'Native HTTP playback continuity',
@@ -296,8 +292,8 @@ void main() {
         },
       );
     },
-    skip: !Platform.isWindows
-        ? 'Native media tests currently require Windows.'
+    skip: !Platform.isWindows && !Platform.isLinux
+        ? 'Native media tests currently require Windows or Linux.'
         : library == null
         ? 'A local libmpv test runtime is required.'
         : false,

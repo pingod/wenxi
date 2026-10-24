@@ -14,6 +14,7 @@ import 'package:asterlink/download/download_manager.dart';
 import 'package:asterlink/download/transfer_http.dart';
 import 'package:asterlink/platform/file_access.dart';
 import 'package:asterlink/platform/native_engine.dart';
+import 'package:asterlink/platform/desktop_platform.dart';
 import 'support.dart';
 
 // Local sockets only. Real I/O is necessary to exercise the packaged helper,
@@ -364,7 +365,7 @@ void main() {
         },
       );
     },
-    skip: !Platform.isWindows || !File(executable).existsSync()
+    skip: !isDesktopPlatform || !File(executable).existsSync()
         ? 'Build the Windows Gopeed helper with tool/build-native-windows.ps1 first.'
         : false,
   );

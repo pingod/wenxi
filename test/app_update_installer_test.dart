@@ -21,7 +21,7 @@ void main() {
     directory = await Directory.systemTemp.createTemp('aster-update-package-');
     installer = AppUpdateInstaller(
       platform: 'windows',
-      windows: WindowsActions(supported: false),
+      desktop: WindowsActions(supported: false),
     );
   });
   tearDown(() => directory.delete(recursive: true));

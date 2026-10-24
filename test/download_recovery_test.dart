@@ -350,7 +350,7 @@ void main() {
       });
       final dio = Dio(BaseOptions(validateStatus: (_) => true));
       final native = DesktopGopeedTransport(
-        executable: File('native/bin/asterlink_gopeed.exe').absolute.path,
+        executable: gopeedTestExecutable(),
       );
       final current = makeManager(
         TransferHttp(client: dio),
@@ -411,7 +411,7 @@ void main() {
         } catch (_) {}
       });
       final native = DesktopGopeedTransport(
-        executable: File('native/bin/asterlink_gopeed.exe').absolute.path,
+        executable: gopeedTestExecutable(),
       );
       final current = makeEngine(native);
       Future<void> begin(String id) => current.begin({

@@ -15,6 +15,7 @@ import 'package:asterlink/download/download_manager.dart';
 import 'package:asterlink/download/transfer_http.dart';
 import 'package:asterlink/platform/file_access.dart';
 import 'package:asterlink/platform/native_engine.dart';
+import 'package:asterlink/platform/desktop_platform.dart';
 import 'support.dart';
 
 class _LocalIo extends HttpOverrides {}
@@ -302,7 +303,7 @@ void main() {
         expect(await payload.exists(), isFalse);
       });
     },
-    skip: !Platform.isWindows || !File(executable).existsSync()
+    skip: !isDesktopPlatform || !File(executable).existsSync()
         ? 'Build the Windows Gopeed helper first.'
         : false,
   );

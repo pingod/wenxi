@@ -99,7 +99,7 @@ void main() {
         }),
       http: http ?? FakeHttp(),
       platformFeatures: false,
-      windowsActions: WindowsActions(
+      desktopActions: WindowsActions(
         supported: windowsDownloads,
         start: (_, _) async => fail('Fixture must not open Explorer'),
         run: (_, _) async => fail('Fixture must not shut down Windows'),

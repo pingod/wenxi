@@ -7,6 +7,7 @@ import '../app_services.dart';
 import '../diagnostics/app_log.dart';
 import '../diagnostics/diagnostic_bundle.dart';
 import '../domain/settings.dart';
+import '../platform/desktop_platform.dart';
 import '../platform/native_engine.dart';
 import 'common.dart';
 import 'appearance_page.dart';
@@ -526,7 +527,11 @@ class MinePage extends StatelessWidget {
           context,
           CupertinoIcons.shield_lefthalf_fill,
           '后台下载保护',
-          Platform.isWindows ? '托盘下载与自动休眠保护' : '锁屏下载、通知与系统后台设置',
+          Platform.isWindows
+              ? '托盘下载与自动休眠保护'
+              : Platform.isLinux
+              ? '托盘下载与窗口关闭行为'
+              : '锁屏下载、通知与系统后台设置',
           () => Navigator.push<void>(
             context,
             MaterialPageRoute(builder: (_) => const DownloadProtectionPage()),
@@ -700,7 +705,7 @@ class MinePage extends StatelessWidget {
     builder: (context, _) => LayoutBuilder(
       builder: (context, bounds) {
         final settings = services.settings;
-        final desktop = Theme.of(context).platform == TargetPlatform.windows;
+        final desktop = isDesktopTarget(Theme.of(context).platform);
         final columns =
             desktop &&
             bounds.maxWidth >= 880 &&

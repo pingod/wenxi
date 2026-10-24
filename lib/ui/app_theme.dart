@@ -123,8 +123,19 @@ ThemeData appTheme(
 }) {
   final dark = brightness == Brightness.dark;
   final windows = defaultTargetPlatform == TargetPlatform.windows;
+  // Linux desktops already resolve CJK through fontconfig (Noto Sans CJK on
+  // most distributions), so no bundled family is forced there.
   final resolvedFont = fontFamily ?? (windows ? 'Microsoft YaHei UI' : null);
-  final fallbackFonts = windows ? const ['Microsoft YaHei', 'Segoe UI'] : null;
+  final fallbackFonts = windows
+      ? const ['Microsoft YaHei', 'Segoe UI']
+      : defaultTargetPlatform == TargetPlatform.linux
+      ? const [
+          'Noto Sans CJK SC',
+          'Source Han Sans SC',
+          'WenQuanYi Micro Hei',
+          'sans-serif',
+        ]
+      : null;
   final tones = palette.colors(dark);
   final surface = Color(tones.surface);
   final colors =

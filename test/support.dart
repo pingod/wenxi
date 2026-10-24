@@ -7,9 +7,29 @@ import 'package:asterlink/data/http.dart';
 import 'package:asterlink/platform/native_engine.dart';
 import 'package:asterlink/platform/file_access.dart';
 
+/// Locates a usable libmpv for the native media tests.
+///
+/// Windows tests use the runtime prepared by tool/prepare-player-test.ps1;
+/// Linux links the distribution's libmpv, which media_kit uses at runtime too.
+/// ASTERLINK_MPV_LIBRARY overrides both when set.
+String? mpvTestLibrary() => [
+  Platform.environment['ASTERLINK_MPV_LIBRARY'],
+  '.local/player-test/libmpv/libmpv-2.dll',
+  'build/windows/x64/runner/Release/libmpv-2.dll',
+  if (Platform.isLinux) ...const [
+    '/usr/lib/libmpv.so.2',
+    '/usr/lib/x86_64-linux-gnu/libmpv.so.2',
+    '/usr/lib64/libmpv.so.2',
+  ],
+].whereType<String>().where((path) => File(path).existsSync()).firstOrNull;
+
+/// The helper binary is platform specific: Windows appends `.exe`, Linux keeps
+/// the plain name. ASTERLINK_GOPEED_TEST_EXE overrides both.
 String gopeedTestExecutable() => p.absolute(
   Platform.environment['ASTERLINK_GOPEED_TEST_EXE'] ??
-      'native/bin/asterlink_gopeed.exe',
+      (Platform.isWindows
+          ? 'native/bin/asterlink_gopeed.exe'
+          : 'native/bin/asterlink_gopeed'),
 );
 
 class RecordedRequest {

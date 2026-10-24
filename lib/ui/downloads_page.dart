@@ -11,6 +11,7 @@ import '../domain/downloads.dart';
 import '../domain/baidu_share_route.dart';
 import '../domain/models.dart' show CloudPlatform;
 import '../download/completed_files.dart';
+import '../platform/desktop_platform.dart';
 import '../platform/file_access.dart';
 import '../playback/playback_sources.dart';
 import '../playback/torrent_playback.dart';
@@ -789,7 +790,7 @@ class _DownloadsPageState extends State<DownloadsPage>
                     label: done
                         ? unavailable
                               ? '查看文件异常'
-                              : Platform.isWindows &&
+                              : isDesktopPlatform &&
                                     fileKind(task.spec.fileName) ==
                                         FileKind.video
                               ? '播放视频'
@@ -800,7 +801,7 @@ class _DownloadsPageState extends State<DownloadsPage>
                     icon: done
                         ? unavailable
                               ? CupertinoIcons.exclamationmark_circle
-                              : Platform.isWindows &&
+                              : isDesktopPlatform &&
                                     fileKind(task.spec.fileName) ==
                                         FileKind.video
                               ? CupertinoIcons.play_rectangle
@@ -867,10 +868,10 @@ class _DownloadsPageState extends State<DownloadsPage>
     final path = task.savedPath;
     if (path == null) return;
     final kind = fileKind(task.spec.fileName);
-    if (Platform.isWindows && (reveal || (!play && kind != FileKind.video))) {
+    if (isDesktopPlatform && (reveal || (!play && kind != FileKind.video))) {
       await busy(
         context,
-        () => widget.services.windows.revealFile(path),
+        () => widget.services.desktop.revealFile(path),
         label: '打开资源管理器…',
       );
       return;
@@ -912,18 +913,18 @@ class _DownloadsPageState extends State<DownloadsPage>
 
   Future<void> _share(DownloadTask task) async {
     if (!await _checkOpen(task) || !mounted) return;
-    if (task.savedPath == null) return;
+    final path = task.savedPath;
+    if (path == null) return;
     await busy(context, () async {
       if (Platform.isAndroid) {
-        await nativeChannelOpen(
-          task.savedPath!,
-          name: task.spec.fileName,
-          share: true,
-        );
+        await nativeChannelOpen(path, name: task.spec.fileName, share: true);
+      } else if (Platform.isWindows) {
+        await SharePlus.instance.share(ShareParams(files: [XFile(path)]));
       } else {
-        await SharePlus.instance.share(
-          ShareParams(files: [XFile(task.savedPath!)]),
-        );
+        // Linux has no system share sheet for files; point the file manager at
+        // the downloaded file so the user can drag or copy it manually.
+        await widget.services.desktop.revealFile(path);
+        if (mounted) message(context, '当前系统不支持直接分享，已打开文件所在位置');
       }
     });
   }
@@ -1041,27 +1042,31 @@ class _DownloadsPageState extends State<DownloadsPage>
                         ListTile(
                           leading: const Icon(CupertinoIcons.folder),
                           title: Text(
-                            Platform.isWindows &&
+                            isDesktopPlatform &&
                                     fileKind(task.spec.fileName) ==
                                         FileKind.video
                                 ? '播放视频'
                                 : '打开文件',
                           ),
                           subtitle:
-                              Platform.isWindows &&
+                              isDesktopPlatform &&
                                   fileKind(task.spec.fileName) != FileKind.video
-                              ? const Text('在资源管理器中定位')
+                              ? Text(
+                                  Platform.isWindows
+                                      ? '在资源管理器中定位'
+                                      : '在文件管理器中定位',
+                                )
                               : null,
                           onTap: () => Navigator.pop(context, 'open'),
                         ),
-                        if (Platform.isWindows &&
+                        if (isDesktopPlatform &&
                             fileKind(task.spec.fileName) == FileKind.audio)
                           ListTile(
                             leading: const Icon(CupertinoIcons.play_rectangle),
                             title: const Text('播放音频'),
                             onTap: () => Navigator.pop(context, 'play'),
                           ),
-                        if (Platform.isWindows &&
+                        if (isDesktopPlatform &&
                             fileKind(task.spec.fileName) == FileKind.video)
                           ListTile(
                             leading: const Icon(CupertinoIcons.folder_open),

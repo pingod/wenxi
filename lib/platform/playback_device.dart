@@ -46,6 +46,11 @@ class NativePlaybackDevice extends PlaybackDevice {
   final TargetPlatform _platform;
   bool get _android => _platform == TargetPlatform.android;
   bool get _windows => _platform == TargetPlatform.windows;
+  bool get _linux => _platform == TargetPlatform.linux;
+
+  /// Linux uses the same window-manager fullscreen path as Windows, but the
+  /// picture-in-picture window is Win32 specific and stays disabled there.
+  bool get _desktop => _windows || _linux;
   @override
   bool get supportsOrientation => _android;
   @override
@@ -68,7 +73,7 @@ class NativePlaybackDevice extends PlaybackDevice {
   @override
   bool get supportsBrightness => _android;
   @override
-  bool get inPip => _windows ? _windowsPip.active : _inPip;
+  bool get inPip => _desktop ? _windowsPip.active : _inPip;
   @override
   double get brightness => _brightness;
   @override
@@ -96,9 +101,9 @@ class NativePlaybackDevice extends PlaybackDevice {
       if (_closed) return;
       _supportsPip = values.boolean('pip');
       _brightness = values.number('brightness', .5).clamp(.05, 1).toDouble();
-    } else if (_windows) {
+    } else if (_desktop) {
       _previousWindowsFullscreen = await windowManager.isFullScreen();
-      _supportsPip = video;
+      _supportsPip = _windows && video;
     }
     if (!_closed) notifyListeners();
   }
@@ -113,8 +118,8 @@ class NativePlaybackDevice extends PlaybackDevice {
     bool controlsVisible = true,
   }) async {
     if (_closed || !_started) return;
-    if (_windows) {
-      _windowsPip.videoSize(width, height);
+    if (_desktop) {
+      if (_windows) _windowsPip.videoSize(width, height);
       return;
     }
     if (!_android) return;
@@ -155,7 +160,7 @@ class NativePlaybackDevice extends PlaybackDevice {
     if (_closed) return;
     if (_android) {
       await _invoke<void>('fullscreen', {'enabled': enabled});
-    } else if (_windows) {
+    } else if (_desktop) {
       await exitPip();
       await windowManager.setFullScreen(
         enabled ? true : _previousWindowsFullscreen,
@@ -180,7 +185,7 @@ class NativePlaybackDevice extends PlaybackDevice {
 
   @override
   Future<void> exitPip() async {
-    if (_closed || !_windows) return;
+    if (_closed || !_desktop) return;
     await _windowsPip.exit();
     if (!_closed) notifyListeners();
   }
@@ -193,7 +198,7 @@ class NativePlaybackDevice extends PlaybackDevice {
 
   @override
   Future<bool> queryPip() async {
-    if (!_closed && _windows) {
+    if (!_closed && _desktop) {
       return _windowsPip.active &&
           await windowManager.isVisible() &&
           !await windowManager.isMinimized();
@@ -213,8 +218,8 @@ class NativePlaybackDevice extends PlaybackDevice {
         });
       }
       if (_android && _started) await _invoke<void>('end');
-      if (_windows) await _windowsPip.exit();
-      if (_windows && _fullscreen) {
+      if (_desktop) await _windowsPip.exit();
+      if (_desktop && _fullscreen) {
         await windowManager.setFullScreen(_previousWindowsFullscreen);
       }
     } finally {

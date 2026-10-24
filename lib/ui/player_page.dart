@@ -14,6 +14,7 @@ import '../domain/models.dart';
 import '../domain/auth.dart';
 import '../domain/playback.dart';
 import '../domain/playback_source.dart';
+import '../platform/desktop_platform.dart';
 import '../platform/playback_device.dart';
 import '../platform/player_screenshot.dart';
 import '../playback/playback_controller.dart';
@@ -1689,7 +1690,7 @@ class _PlayerPageState extends State<PlayerPage>
               [
                 '双击两侧前后跳转 15 秒，双击中间播放/暂停。',
                 '横向滑动调整进度，左侧上下滑动调亮度，右侧调音量；长按临时加速。',
-                if (Platform.isWindows)
+                if (isDesktopPlatform)
                   '键盘：空格播放/暂停，←/→跳转，↑/↓音量，F 全屏，Esc 返回，M 静音。',
               ].join('\n\n'),
               style: const TextStyle(

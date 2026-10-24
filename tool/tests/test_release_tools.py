@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
 import zipfile
@@ -206,6 +207,35 @@ class ReleaseFilesTest(unittest.TestCase):
             self.assertIn('data/app.so', archive.namelist())
             self.assertIn('asterlink_gopeed.exe', archive.namelist())
             self.assertFalse(any(name.startswith('Release/') for name in archive.namelist()))
+
+    def test_linux_archive_keeps_the_executable_mode(self):
+        runtime = self.root / 'build/linux/x64/release/bundle'
+        for name in ('asterlink', 'asterlink_gopeed', 'lib/libapp.so', 'lib/libflutter_linux_gtk.so', 'data/icudtl.dat', 'data/flutter_assets/AssetManifest.bin'):
+            file = runtime / name
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_bytes(b'fixture')
+        (runtime / 'asterlink').chmod(0o755)
+        (runtime / 'asterlink_gopeed').chmod(0o755)
+        output = release.stage(self.root, 'linux')
+        archive = output / 'asterlink-1.2.3+4-linux-x64.tar.gz'
+        with tarfile.open(archive) as bundle:
+            members = {member.name: member for member in bundle.getmembers()}
+            self.assertIn('asterlink_gopeed', members)
+            self.assertIn('data/flutter_assets/AssetManifest.bin', members)
+            self.assertTrue(members['asterlink'].mode & 0o100)
+            self.assertEqual(members['asterlink'].uid, 0)
+            self.assertFalse(any(name.startswith('./') for name in members))
+        with self.assertRaises(ValueError):
+            release.stage(self.root, 'linux')
+
+    def test_linux_bundle_without_helper_is_rejected(self):
+        runtime = self.root / 'build/linux/x64/release/bundle'
+        for name in ('asterlink', 'lib/libapp.so', 'lib/libflutter_linux_gtk.so', 'data/icudtl.dat', 'data/flutter_assets/AssetManifest.bin'):
+            file = runtime / name
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_bytes(b'fixture')
+        with self.assertRaises(ValueError):
+            release.stage(self.root, 'linux')
 
     def test_runtime_with_private_key_is_rejected(self):
         runtime = self.root / 'build/windows/x64/runner/Release'

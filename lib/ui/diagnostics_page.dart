@@ -267,7 +267,9 @@ class _DiagnosticsPageState extends State<DiagnosticsPage> {
           label: const Text('反馈地址'),
         ),
         if (lastSavedPath != null &&
-            (Platform.isWindows || widget.openExportLocation != null))
+            (Platform.isWindows ||
+                Platform.isLinux ||
+                widget.openExportLocation != null))
           TextButton.icon(
             key: const Key('diagnostics-open-location'),
             onPressed: working ? null : openLocation,

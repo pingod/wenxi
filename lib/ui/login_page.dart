@@ -18,6 +18,7 @@ import '../domain/aliyun_web_password.dart';
 import '../domain/models.dart';
 import '../domain/weiyun_web_login.dart';
 import '../domain/tianyi_web_login.dart';
+import '../platform/desktop_platform.dart';
 import '../diagnostics/web_login_diagnostics.dart';
 import 'common.dart';
 import 'native_password_login_page.dart';
@@ -71,6 +72,13 @@ Future<void> openLogin(
           CloudPlatform.aliyun ||
           CloudPlatform.ilanzou ||
           CloudPlatform.guangya => PasswordLoginFlow(
+            services,
+            platform,
+            accountId: owner,
+          ),
+          // Linux has no embedded browser component yet, so platforms that
+          // only offer cookie capture fall back to manual credential entry.
+          _ when !supportsWebLoginUi => ManualLoginPage(
             services,
             platform,
             accountId: owner,
@@ -134,9 +142,19 @@ class _PasswordLoginFlowState extends State<PasswordLoginFlow> {
     _LoginMethod.sms => GuangyaSmsLoginPage(
       widget.services,
       accountId: widget.accountId,
+      webLabel: supportsWebLoginUi ? '切换网页登录' : '手动填写登录信息',
       onUsePassword: () => _switch(_LoginMethod.password),
       onUseWeb: () => _switch(_LoginMethod.web),
       onUseManual: () => _switch(_LoginMethod.manual),
+    ),
+    _LoginMethod.web when !supportsWebLoginUi => ManualLoginPage(
+      widget.services,
+      widget.platform,
+      accountId: widget.accountId,
+      onUsePassword: () => _switch(_defaultMethod),
+      nativeLoginLabel: widget.platform == CloudPlatform.guangya
+          ? '切换短信验证码登录'
+          : '切换账号密码登录',
     ),
     _LoginMethod.web => WebLoginPage(
       widget.services,
@@ -161,15 +179,21 @@ class _PasswordLoginFlowState extends State<PasswordLoginFlow> {
       XunleiLoginPage(
         widget.services,
         accountId: widget.accountId,
-        onUseWeb: () => _switch(_LoginMethod.web),
+        webLabel: supportsWebLoginUi ? '网页登录' : '手动填写登录信息',
+        onUseWeb: supportsWebLoginUi
+            ? () => _switch(_LoginMethod.web)
+            : () => _switch(_LoginMethod.manual),
       ),
     _LoginMethod.password => NativePasswordLoginPage(
       widget.services,
       widget.platform,
       accountId: widget.accountId,
+      webLabel: supportsWebLoginUi ? '切换网页登录' : '手动填写登录信息',
       onUseWeb: widget.platform == CloudPlatform.ctfile
           ? null
-          : () => _switch(_LoginMethod.web),
+          : supportsWebLoginUi
+          ? () => _switch(_LoginMethod.web)
+          : () => _switch(_LoginMethod.manual),
       onUseManual: () => _switch(_LoginMethod.manual),
       onUseSms: widget.platform == CloudPlatform.guangya
           ? () => _switch(_LoginMethod.sms)
@@ -1483,10 +1507,15 @@ class XunleiLoginPage extends StatefulWidget {
     super.key,
     this.accountId,
     required this.onUseWeb,
+    this.webLabel = '网页登录',
   });
   final AppServices services;
   final String? accountId;
   final VoidCallback onUseWeb;
+
+  /// Linux has no embedded browser, so the entry leads to manual credentials
+  /// instead and must not claim to open a web page.
+  final String webLabel;
   @override
   State<XunleiLoginPage> createState() => _XunleiLoginPageState();
 }
@@ -1614,6 +1643,10 @@ class _XunleiLoginPageState extends State<XunleiLoginPage> {
   Future<void> _verifyWeb() async {
     final value = verification;
     if (value == null || !XunleiProtocol.trustedPage(value.url)) return;
+    if (!supportsWebLoginUi) {
+      setState(() => error = '当前平台暂不支持网页安全验证，请使用迅雷 App 完成登录后手动提交 Access Token');
+      return;
+    }
     final verified = await Navigator.push<bool>(
       context,
       MaterialPageRoute(
@@ -1630,7 +1663,7 @@ class _XunleiLoginPageState extends State<XunleiLoginPage> {
       TextButton(
         key: const ValueKey('xunlei-login-web'),
         onPressed: _useWeb,
-        child: const Text('网页登录'),
+        child: Text(widget.webLabel),
       ),
     ],
     child: Align(

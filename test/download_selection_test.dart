@@ -11,6 +11,7 @@ import 'package:asterlink/domain/downloads.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/download/transfer_http.dart';
 import 'package:asterlink/main.dart';
+import 'package:asterlink/platform/desktop_platform.dart';
 import 'package:asterlink/platform/file_access.dart';
 import 'support.dart';
 
@@ -53,7 +54,8 @@ class _SelectionFiles extends FakeFiles {
 }
 
 void main() {
-  final openVideoLabel = Platform.isWindows ? '播放视频' : '打开文件';
+  // Desktops play videos in the app, so the row action is labelled accordingly.
+  final openVideoLabel = isDesktopPlatform ? '播放视频' : '打开文件';
   bool systemFont = false;
   Future<void> waitFor(WidgetTester tester, bool Function() ready) async {
     final clock = Stopwatch()..start();

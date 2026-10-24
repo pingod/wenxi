@@ -68,7 +68,7 @@ void main() {
           files: FakeFiles(Directory(p.join(root.path, 'saved'))),
           http: FakeHttp(),
           platformFeatures: false,
-          windowsActions: WindowsActions(
+          desktopActions: WindowsActions(
             supported: true,
             start: (command, arguments) async =>
                 calls.add((command, arguments)),

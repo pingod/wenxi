@@ -55,7 +55,7 @@ class DesktopGopeedTransport extends NativeTransport {
   Future<Process> _start() => _starting.run(() async {
     require(!_disposed, '下载组件已经关闭');
     if (_process != null) return _process!;
-    require(await File(executable).exists(), '缺少 Windows 下载组件，请安装完整版本');
+    require(await File(executable).exists(), '缺少下载组件，请安装完整版本');
     final process =
         await (launchProcess?.call(executable) ??
             Process.start(executable, const [], runInShell: false));

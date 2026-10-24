@@ -16,6 +16,7 @@ import '../domain/baidu_share_route.dart';
 import '../domain/links.dart';
 import '../domain/models.dart';
 import 'cloud_command_page.dart';
+import '../platform/desktop_platform.dart';
 import '../platform/file_access.dart';
 import 'browser_page.dart';
 import 'baidu_share_route_picker.dart';
@@ -983,7 +984,7 @@ class ParsePageState extends State<ParsePage> {
   @override
   Widget build(BuildContext context) {
     final link = current;
-    final desktop = Theme.of(context).platform == TargetPlatform.windows;
+    final desktop = isDesktopTarget(Theme.of(context).platform);
     final hint = Theme.of(context).brightness == Brightness.dark
         ? const Color(0xff77777c)
         : const Color(0xffc4c4c7);

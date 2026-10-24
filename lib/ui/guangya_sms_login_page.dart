@@ -17,12 +17,17 @@ class GuangyaSmsLoginPage extends StatefulWidget {
     required this.onUsePassword,
     required this.onUseWeb,
     required this.onUseManual,
+    this.webLabel = '切换网页登录',
     this.accountId,
     super.key,
   });
   final AppServices services;
   final String? accountId;
   final VoidCallback onUsePassword, onUseWeb, onUseManual;
+
+  /// Linux routes this entry to manual credentials because it has no embedded
+  /// browser component.
+  final String webLabel;
 
   @override
   State<GuangyaSmsLoginPage> createState() => _GuangyaSmsLoginPageState();
@@ -376,7 +381,7 @@ class _GuangyaSmsLoginPageState extends State<GuangyaSmsLoginPage> {
                   key: const ValueKey('native-login-web'),
                   onPressed: () => _switch(widget.onUseWeb),
                   icon: const Icon(CupertinoIcons.globe, size: 18),
-                  label: const Text('切换网页登录'),
+                  label: Text(widget.webLabel),
                 ),
                 TextButton.icon(
                   key: const ValueKey('native-login-manual'),

@@ -5,6 +5,7 @@
   <p>
     <img src="https://img.shields.io/badge/Android-7.0%2B-3DDC84?logo=android&logoColor=white" alt="Android 7.0 及以上">
     <img src="https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4" alt="Windows 10 / 11">
+    <img src="https://img.shields.io/badge/Linux-x64-FCC624?logo=linux&logoColor=black" alt="Linux x64（源码编译）">
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue" alt="AGPL-3.0"></a>
   </p>
   <p>
@@ -15,7 +16,7 @@
 
 ## 项目介绍
 
-**文析助手（AsterLink）** 是一款面向 **Android 和 Windows** 的免费网盘管理与文件传输应用，已接入 **17 个网盘和 GitHub 文件源**。
+**文析助手（AsterLink）** 是一款面向 **Android、Windows 和 Linux** 的免费网盘管理与文件传输应用，已接入 **17 个网盘和 GitHub 文件源**。Linux 版需要从源码编译，步骤见 [Linux 编译说明](docs/BUILDING-LINUX.md)。
 
 粘贴分享链接或口令，就能查看文件、下载或在线播放；登录账号后，还可以搜索网盘、上传文件、整理目录，把常用文件和分享收藏起来。下载与上传集中在「传输」页，手机与电脑可通过局域网互传文字和文件，主题、毛玻璃效果与背景也能按自己的习惯调整。
 
@@ -113,10 +114,11 @@
 | --- | --- | --- |
 | Android | arm64 APK | Android 7.0 及以上 |
 | Windows | x64 安装包 | Windows 10 / 11 |
+| Linux | 源码编译（x64 运行目录） | GTK 3 桌面，见 [Linux 编译说明](docs/BUILDING-LINUX.md) |
 
 ## 编译与反馈
 
-使用 Flutter 3.41.4、Dart 3.11.1 和 Go 1.24.7，详见 [编译说明](docs/BUILDING.md)。
+使用 Flutter 3.41.4、Dart 3.11.1 和 Go 1.24.7，详见 [编译说明](docs/BUILDING.md) 与 [Linux 编译说明](docs/BUILDING-LINUX.md)。
 
 问题和建议欢迎提交 **Issues**，请附上版本、系统、操作步骤及脱敏错误提示，不要上传账号密码、Cookie 或账号备份。
 

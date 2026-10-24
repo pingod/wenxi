@@ -49,6 +49,9 @@ import 'platform/app_update_installer.dart';
 import 'platform/clipboard_links.dart';
 import 'platform/external_open.dart';
 import 'platform/native_engine.dart';
+import 'platform/desktop_actions.dart';
+import 'platform/desktop_platform.dart';
+import 'platform/linux_actions.dart';
 import 'platform/windows_actions.dart';
 import 'data/providers/ilanzou.dart';
 import 'data/providers/lanzou.dart';
@@ -77,7 +80,7 @@ class AppServices extends ChangeNotifier {
     String announcementsUrl = AnnouncementService.buildUrl,
     RemoteControlFetcher? announcementFetcher,
     GitHubUpdateService? githubUpdates,
-    WindowsActions? windowsActions,
+    DesktopActions? desktopActions,
     RandomAccessFile? instanceLock,
     LanService? lanService,
   }) : _instanceLock = instanceLock {
@@ -260,9 +263,11 @@ class AppServices extends ChangeNotifier {
       downloadById: downloads.task,
       uploadById: uploads.task,
     );
-    windows =
-        windowsActions ??
-        WindowsActions(supported: platformFeatures && Platform.isWindows);
+    desktop =
+        desktopActions ??
+        _defaultDesktopActions(
+          supported: platformFeatures && isDesktopPlatform,
+        );
     appUpdates = AppUpdateService(
       platform: control.platform,
       cloud: cloud,
@@ -270,21 +275,21 @@ class AppServices extends ChangeNotifier {
       files: files,
       installer: AppUpdateInstaller(
         platform: control.platform,
-        windows: windows,
+        desktop: desktop,
       ),
       currentUpdate: () => control.availableUpdate,
       inForeground: () => control.inForeground,
       openDownloads: requestDownloadManager,
     );
     downloadShutdown = DownloadShutdown(
-      supported: windows.supported,
+      supported: desktop.supported,
       changes: Listenable.merge([downloads, uploads, lan]),
       tasks: () => downloads.tasks,
       busy: () =>
           downloads.activeCount > 0 ||
           uploads.activeCount > 0 ||
           lan.activeConnections > 0,
-      shutdown: windows.shutdown,
+      shutdown: desktop.shutdown,
       flush: store.flush,
     );
     downloadOverlay = DownloadOverlay(
@@ -333,7 +338,7 @@ class AppServices extends ChangeNotifier {
   late final NavigationTransfers navigationTransfers;
   final transferTab = ValueNotifier<int>(0);
   late final AppUpdateService appUpdates;
-  late final WindowsActions windows;
+  late final DesktopActions desktop;
   late final DownloadShutdown downloadShutdown;
   late final DownloadOverlay downloadOverlay;
   late final TransferHttp transfer;
@@ -395,6 +400,11 @@ class AppServices extends ChangeNotifier {
   Future<WebViewEnvironment?>? _webStarting;
   AppSettings get settings => AppSettings.fromJson(store.data.obj('settings'));
 
+  static DesktopActions _defaultDesktopActions({required bool supported}) =>
+      Platform.isWindows
+      ? WindowsActions(supported: supported)
+      : LinuxActions(supported: supported);
+
   static Future<AppServices> open() async {
     Directory data, cache, destination;
     NativeTransport transport;
@@ -409,7 +419,7 @@ class AppServices extends ChangeNotifier {
       destination = cache;
       transport = AndroidGopeedTransport();
     } else {
-      require(Platform.isWindows, '当前版本支持 Android 和 Windows');
+      require(isDesktopPlatform, '当前版本支持 Android、Windows 和 Linux');
       data = Directory(
         p.join((await getApplicationSupportDirectory()).path, 'AsterLink'),
       );
@@ -425,7 +435,7 @@ class AppServices extends ChangeNotifier {
       transport = DesktopGopeedTransport(
         executable: p.join(
           p.dirname(Platform.resolvedExecutable),
-          'asterlink_gopeed.exe',
+          desktopHelperName(),
         ),
       );
     }
@@ -801,6 +811,9 @@ class AppServices extends ChangeNotifier {
     ];
   });
   Future<WebViewEnvironment?> webEnvironment() async {
+    // Only the Windows WebView2 build needs an explicitly shared environment
+    // (shared cookie jar plus popup windows). Android uses the default
+    // platform view, and Linux has no embedded browser yet.
     if (!Platform.isWindows) return null;
     if (_webEnvironment != null) return _webEnvironment;
     return _webStarting ??= (() async {

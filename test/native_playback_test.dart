@@ -13,15 +13,7 @@ class _RealHttp extends HttpOverrides {}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
-  final libraries = [
-    Platform.environment['ASTERLINK_MPV_LIBRARY'],
-    '.local/player-test/libmpv/libmpv-2.dll',
-    'build/windows/x64/runner/Release/libmpv-2.dll',
-  ];
-  final library = libraries
-      .whereType<String>()
-      .where((path) => File(path).existsSync())
-      .firstOrNull;
+  final library = mpvTestLibrary();
   group(
     'Real libmpv playback',
     () {
@@ -598,10 +590,10 @@ void main() {
         },
       );
     },
-    skip: !Platform.isWindows
-        ? 'Native media tests currently require Windows.'
+    skip: !Platform.isWindows && !Platform.isLinux
+        ? 'Native media tests currently require Windows or Linux.'
         : library == null
-        ? 'Run tool/prepare-player-test.ps1 or set ASTERLINK_MPV_LIBRARY to libmpv-2.dll.'
+        ? 'Run tool/prepare-player-test.ps1, install libmpv, or set ASTERLINK_MPV_LIBRARY.'
         : false,
   );
 }

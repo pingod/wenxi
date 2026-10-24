@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/cupertino.dart';
+import 'package:path/path.dart' as p;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -37,6 +38,7 @@ import 'ui/guest_download_prompt.dart';
 import 'ui/player_page.dart';
 import 'platform/external_open.dart';
 import 'playback/external_playback.dart';
+import 'platform/desktop_platform.dart';
 import 'platform/windows_pip.dart';
 import 'platform/windows_window_theme.dart';
 
@@ -59,7 +61,7 @@ Future<void> main() async {
       }
     });
     MediaKit.ensureInitialized();
-    if (Platform.isWindows) {
+    if (isDesktopPlatform) {
       await windowManager.ensureInitialized();
       unawaited(
         windowManager.waitUntilReadyToShow(
@@ -244,7 +246,7 @@ class _MainShellState extends State<MainShell>
       _externalAvailable();
       if (widget.services.lanNavigation.value > 0) _showLan();
     });
-    if (Platform.isWindows && widget.services.platformFeatures) {
+    if (isDesktopPlatform && widget.services.platformFeatures) {
       windowManager.addListener(this);
       trayManager.addListener(this);
       _desktop();
@@ -429,7 +431,19 @@ class _MainShellState extends State<MainShell>
   Future<void> _desktop() async {
     try {
       await windowManager.setPreventClose(true);
-      await trayManager.setIcon('assets/icons/app.ico');
+      // AppIndicator reads PNG/SVG icons; .ico is a Windows-only container.
+      await trayManager.setIcon(
+        Platform.isWindows
+            ? 'assets/icons/app.ico'
+            : p.join(
+                p.dirname(Platform.resolvedExecutable),
+                'data',
+                'flutter_assets',
+                'assets',
+                'icons',
+                'app.png',
+              ),
+      );
       await trayManager.setToolTip('文析助手');
       await trayManager.setContextMenu(
         Menu(
@@ -455,7 +469,9 @@ class _MainShellState extends State<MainShell>
 
   @override
   void onTrayIconRightMouseDown() {
-    trayManager.popUpContextMenu();
+    // AppIndicator owns the menu on Linux and has no popUpContextMenu method;
+    // calling it there only raises a missing-implementation error.
+    if (Platform.isWindows) unawaited(trayManager.popUpContextMenu());
   }
 
   @override
@@ -540,7 +556,7 @@ class _MainShellState extends State<MainShell>
     widget.services.clipboard.setForeground(false);
     widget.services.control.setForeground(false);
     widget.services.announcements.setForeground(false);
-    if (Platform.isWindows && widget.services.platformFeatures) {
+    if (isDesktopPlatform && widget.services.platformFeatures) {
       windowManager.removeListener(this);
       trayManager.removeListener(this);
     }
@@ -704,7 +720,7 @@ class _MainShellState extends State<MainShell>
                 final rail = constraints.maxWidth >= 820;
                 final desktopHeader =
                     (selected == 0 || selected == 3) &&
-                    Theme.of(context).platform == TargetPlatform.windows;
+                    isDesktopTarget(Theme.of(context).platform);
                 final content = Scaffold(
                   extendBody: !rail,
                   backgroundColor: BackgroundScope.of(context)?.active == true
@@ -769,7 +785,7 @@ class _MainShellState extends State<MainShell>
                               widget.services.downloadShutdown,
                               showWindow:
                                   widget.services.platformFeatures &&
-                                      Platform.isWindows
+                                      isDesktopPlatform
                                   ? () async {
                                       await windowManager.show();
                                       await windowManager.focus();

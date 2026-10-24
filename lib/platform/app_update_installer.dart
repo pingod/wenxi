@@ -5,12 +5,12 @@ import 'package:open_filex/open_filex.dart';
 import '../core/json.dart';
 import '../domain/downloads.dart';
 import '../domain/remote_control.dart';
-import 'windows_actions.dart';
+import 'desktop_actions.dart';
 
 class AppUpdateInstaller {
-  AppUpdateInstaller({required this.platform, required this.windows});
+  AppUpdateInstaller({required this.platform, required this.desktop});
   final String platform;
-  final WindowsActions windows;
+  final DesktopActions desktop;
   static const _channel = MethodChannel('com.asterlink.app/native');
 
   static bool supportsName(String name, String platform) {
@@ -96,7 +96,7 @@ class AppUpdateInstaller {
         throw AppException(error.message ?? '无法打开系统安装器');
       }
     } else if (name.toLowerCase().endsWith('.zip')) {
-      await windows.revealFile(path);
+      await desktop.revealFile(path);
     } else {
       final result = await OpenFilex.open(path);
       require(result.type == ResultType.done, '无法打开安装器，请到下载管理中打开文件');

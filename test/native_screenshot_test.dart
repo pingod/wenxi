@@ -7,11 +7,11 @@ import 'support.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
-  final library = File('.local/player-test/libmpv/libmpv-2.dll');
+  final library = mpvTestLibrary();
   test(
     'Native screenshot and close serialize access to the mpv handle',
     () async {
-      MediaKit.ensureInitialized(libmpv: library.path);
+      MediaKit.ensureInitialized(libmpv: library);
       final player = Player(
         configuration: const PlayerConfiguration(vo: 'null', libass: true),
       );
@@ -45,7 +45,7 @@ void main() {
       await closing;
       expect(await backend.screenshot(), isNull);
     },
-    skip: !Platform.isWindows || !library.existsSync(),
+    skip: library == null ? 'A local libmpv runtime is required.' : false,
     timeout: const Timeout(Duration(seconds: 30)),
   );
 }

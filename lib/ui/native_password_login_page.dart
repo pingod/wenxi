@@ -25,6 +25,7 @@ class NativePasswordLoginPage extends StatefulWidget {
     this.services,
     this.platform, {
     this.onUseWeb,
+    this.webLabel = '切换网页登录',
     this.onUseManual,
     this.onUseSms,
     this.onSubmitWebPassword,
@@ -45,6 +46,10 @@ class NativePasswordLoginPage extends StatefulWidget {
   final CloudPlatform platform;
   final String? accountId;
   final VoidCallback? onUseWeb;
+
+  /// Entry caption; Linux routes this to manual credentials because it has no
+  /// embedded browser component.
+  final String webLabel;
   final VoidCallback? onUseManual;
   final VoidCallback? onUseSms;
   final void Function(String username, String password)? onSubmitWebPassword;
@@ -401,7 +406,7 @@ class _NativePasswordLoginPageState extends State<NativePasswordLoginPage> {
                         key: const ValueKey('native-login-web'),
                         onPressed: () => _switchMethod(widget.onUseWeb),
                         icon: const Icon(CupertinoIcons.globe, size: 18),
-                        label: const Text('切换网页登录'),
+                        label: Text(widget.webLabel),
                       ),
                     ],
                     if (widget.onUseManual != null)
