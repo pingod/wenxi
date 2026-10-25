@@ -4,7 +4,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../diagnostics/app_log.dart';
 
-/// Keeps the native caption and its buttons in the app's effective theme.
+/// Keeps the native window chrome in the app's effective theme.
+///
+/// Windows repaints its Win32 caption; on Linux the GTK runner paints the
+/// header bar it creates, because GTK themes (commonly light while the app is
+/// dark) would otherwise leave a bright strip above the UI.
 class WindowsWindowTheme extends StatefulWidget {
   const WindowsWindowTheme({
     super.key,
@@ -23,6 +27,8 @@ class _WindowsWindowThemeState extends State<WindowsWindowTheme> {
   static const _channel = MethodChannel('com.asterlink.app/window_theme');
   Brightness? _lastSent;
 
+  bool get _supported => Platform.isWindows || Platform.isLinux;
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -39,7 +45,7 @@ class _WindowsWindowThemeState extends State<WindowsWindowTheme> {
   }
 
   void _sync() {
-    if (!widget.enabled || !Platform.isWindows) return;
+    if (!widget.enabled || !_supported) return;
     final brightness = Theme.of(context).brightness;
     if (_lastSent == brightness) return;
     _lastSent = brightness;

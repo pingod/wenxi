@@ -35,20 +35,32 @@ class LinuxActions implements DesktopActions {
     require(result.exitCode == 0, '未能打开文件管理器，请手动前往下载目录');
   }
 
-  /// `ShowItems` takes an array of URIs plus the startup id, which may be empty.
+  /// Selects one file through `FileManager1.ShowItems`.
+  ///
+  /// `dbus-send`'s `array:string:` syntax splits its argument on commas, so a
+  /// file named `a,b.mp4` would be delivered as two URIs and the call still
+  /// exits 0. `gdbus` takes a GVariant literal instead, which keeps the path
+  /// intact; the literal is escaped below for quotes and backslashes.
   Future<bool> _showItems(Uri uri) async {
-    final result = await _run('dbus-send', [
+    final result = await _run('gdbus', [
+      'call',
       '--session',
-      '--type=method_call',
-      '--dest=org.freedesktop.FileManager1',
-      '--print-reply',
+      '--dest',
+      'org.freedesktop.FileManager1',
+      '--object-path',
       '/org/freedesktop/FileManager1',
+      '--method',
       'org.freedesktop.FileManager1.ShowItems',
-      'array:string:$uri',
-      'string:',
+      '[${_gvariantString(uri.toString())}]',
+      "''",
     ]);
     return result.exitCode == 0;
   }
+
+  /// Builds a single-quoted GVariant string. `gdbus` parses these literals
+  /// itself, so backslashes are doubled and single quotes escaped.
+  static String _gvariantString(String value) =>
+      "'${value.replaceAll(r'\', r'\\').replaceAll("'", r"\'")}'";
 
   @override
   Future<void> shutdown() async {

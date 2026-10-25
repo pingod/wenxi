@@ -527,11 +527,7 @@ class MinePage extends StatelessWidget {
           context,
           CupertinoIcons.shield_lefthalf_fill,
           '后台下载保护',
-          Platform.isWindows
-              ? '托盘下载与自动休眠保护'
-              : Platform.isLinux
-              ? '托盘下载与窗口关闭行为'
-              : '锁屏下载、通知与系统后台设置',
+          Platform.isWindows ? '托盘下载与自动休眠保护' : '锁屏下载、通知与系统后台设置',
           () => Navigator.push<void>(
             context,
             MaterialPageRoute(builder: (_) => const DownloadProtectionPage()),

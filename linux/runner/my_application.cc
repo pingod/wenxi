@@ -10,6 +10,8 @@
 struct _MyApplication {
   GtkApplication parent_instance;
   char** dart_entrypoint_arguments;
+  FlMethodChannel* theme_channel;
+  GtkCssProvider* theme_provider;
 };
 
 G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
@@ -17,6 +19,91 @@ G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
 // Called when first Flutter frame received.
 static void first_frame_cb(MyApplication* self, FlView* view) {
   gtk_widget_show(gtk_widget_get_toplevel(GTK_WIDGET(view)));
+}
+
+
+// The header bar is drawn by GTK, so it follows the GTK theme rather than the
+// Flutter UI. Distributions ship very different GTK themes (a light Material
+// You GTK theme under a dark app looks like a stray white strip), so the bar is
+// painted from the app's effective brightness. Buttons and symbolic icons are
+// left to the theme except for their colour, which must contrast with the bar.
+static const char* kThemeCssDark =
+    "headerbar, headerbar:backdrop {"
+    "  background-image: none;"
+    "  background-color: #1b1b1f;"
+    "  color: #e8e8ea;"
+    "  box-shadow: none;"
+    "  border-color: rgba(255, 255, 255, 0.08);"
+    "}"
+    "headerbar label, headerbar .title { color: #e8e8ea; }"
+    "headerbar image { color: #e8e8ea; -gtk-icon-style: symbolic; }"
+    "headerbar button image { color: #e8e8ea; }"
+    "headerbar button:hover { background-color: rgba(255, 255, 255, 0.10); }";
+
+static const char* kThemeCssLight =
+    "headerbar, headerbar:backdrop {"
+    "  background-image: none;"
+    "  background-color: #f3f3f6;"
+    "  color: #1a1a1c;"
+    "  box-shadow: none;"
+    "  border-color: rgba(0, 0, 0, 0.10);"
+    "}"
+    "headerbar label, headerbar .title { color: #1a1a1c; }"
+    "headerbar image { color: #1a1a1c; -gtk-icon-style: symbolic; }"
+    "headerbar button image { color: #1a1a1c; }"
+    "headerbar button:hover { background-color: rgba(0, 0, 0, 0.08); }";
+
+static void apply_header_bar_theme(MyApplication* self, gboolean dark) {
+  if (self->theme_provider == nullptr) {
+    self->theme_provider = gtk_css_provider_new();
+    gtk_style_context_add_provider_for_screen(
+        gdk_screen_get_default(), GTK_STYLE_PROVIDER(self->theme_provider),
+        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+  }
+  GError* error = nullptr;
+  gtk_css_provider_load_from_data(self->theme_provider,
+                                  dark ? kThemeCssDark : kThemeCssLight, -1,
+                                  &error);
+  if (error != nullptr) {
+    g_warning("Failed to apply the window theme: %s", error->message);
+    g_clear_error(&error);
+  }
+}
+
+// Dart sends the effective brightness after each theme change, matching the
+// Windows `com.asterlink.app/window_theme` channel.
+static void theme_method_call_cb(FlMethodChannel* channel,
+                                 FlMethodCall* method_call, gpointer user_data) {
+  MyApplication* self = MY_APPLICATION(user_data);
+  g_autoptr(FlMethodResponse) response = nullptr;
+  const gchar* name = fl_method_call_get_name(method_call);
+  if (g_strcmp0(name, "setTheme") != 0) {
+    response = FL_METHOD_RESPONSE(fl_method_not_implemented_response_new());
+    fl_method_call_respond(method_call, response, nullptr);
+    return;
+  }
+
+  FlValue* args = fl_method_call_get_args(method_call);
+  gboolean dark = FALSE;
+  if (args != nullptr && fl_value_get_type(args) == FL_VALUE_TYPE_MAP) {
+    FlValue* value = fl_value_lookup_string(args, "dark");
+    if (value != nullptr && fl_value_get_type(value) == FL_VALUE_TYPE_BOOL) {
+      dark = fl_value_get_bool(value);
+    }
+  }
+  apply_header_bar_theme(self, dark);
+  response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
+  fl_method_call_respond(method_call, response, nullptr);
+}
+
+static void setup_theme_channel(MyApplication* self, FlView* view) {
+  FlEngine* engine = fl_view_get_engine(view);
+  g_autoptr(FlStandardMethodCodec) codec = fl_standard_method_codec_new();
+  self->theme_channel =
+      fl_method_channel_new(fl_engine_get_binary_messenger(engine),
+                            "com.asterlink.app/window_theme", FL_METHOD_CODEC(codec));
+  fl_method_channel_set_method_call_handler(
+      self->theme_channel, theme_method_call_cb, self, nullptr);
 }
 
 // Implements GApplication::activate.
@@ -94,6 +181,16 @@ static void my_application_activate(GApplication* application) {
 
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
 
+  setup_theme_channel(self, view);
+
+  // The app defaults to the system brightness; the Dart side refines this as
+  // soon as the theme resolves, including a forced light or dark setting.
+  GtkSettings* settings = gtk_settings_get_default();
+  gboolean prefer_dark = FALSE;
+  g_object_get(settings, "gtk-application-prefer-dark-theme", &prefer_dark,
+               nullptr);
+  apply_header_bar_theme(self, prefer_dark);
+
   gtk_widget_grab_focus(GTK_WIDGET(view));
 }
 
@@ -139,6 +236,8 @@ static void my_application_shutdown(GApplication* application) {
 // Implements GObject::dispose.
 static void my_application_dispose(GObject* object) {
   MyApplication* self = MY_APPLICATION(object);
+  g_clear_object(&self->theme_channel);
+  g_clear_object(&self->theme_provider);
   g_clear_pointer(&self->dart_entrypoint_arguments, g_strfreev);
   G_OBJECT_CLASS(my_application_parent_class)->dispose(object);
 }

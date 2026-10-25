@@ -32,13 +32,45 @@ void main() {
       );
       await actions.revealFile(file.path);
       expect(calls.length, 2);
-      expect(calls.first.$1, 'dbus-send');
+      expect(calls.first.$1, 'gdbus');
       expect(
         calls.first.$2,
-        contains('array:string:${Uri.file(p.normalize(file.path))}'),
+        contains("[${_literal(Uri.file(p.normalize(file.path)).toString())}]"),
       );
       expect(calls.last.$1, 'xdg-open');
       expect(calls.last.$2, [p.normalize(root.path)]);
+    },
+  );
+
+  test(
+    'File names containing commas quote or backslashes reach D-Bus intact',
+    () async {
+      // dbus-send's `array:string:` splits on commas, which silently turned
+      // `a,b.mp4` into two URIs while still exiting 0.
+      for (final name in [
+        'a,b.mp4',
+        "it's a video.mp4",
+        r'back\slash.mp4',
+        'quote".mp4',
+      ]) {
+        final file = await File(p.join(root.path, name)).writeAsString('x');
+        late List<String> arguments;
+        final actions = LinuxActions(
+          supported: true,
+          run: (command, args) async {
+            expect(command, 'gdbus');
+            arguments = args;
+            return ProcessResult(0, 0, const <String>[], const <String>[]);
+          },
+        );
+        await actions.revealFile(file.path);
+        final uri = Uri.file(p.normalize(file.path)).toString();
+        // gdbus puts the GVariant array right after --method <name>.
+        final literal = arguments[arguments.length - 2];
+        expect(literal, '[${_literal(uri)}]');
+        // Exactly one array element: no unescaped separator survives.
+        expect(literal, isNot(contains("', '")));
+      }
     },
   );
 
@@ -85,3 +117,7 @@ void main() {
     await expectLater(actions.shutdown(), throwsA(isA<AppException>()));
   });
 }
+
+/// Mirrors the GVariant single-quoted literal built by LinuxActions.
+String _literal(String value) =>
+    "'${value.replaceAll(r'\', r'\\').replaceAll("'", r"\'")}'";
