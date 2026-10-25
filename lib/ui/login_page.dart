@@ -135,7 +135,13 @@ class _PasswordLoginFlowState extends State<PasswordLoginFlow> {
         CloudPlatform.quark,
         CloudPlatform.baidu,
       }.contains(widget.platform)
-      ? _LoginMethod.sms
+      // Baidu is the only entry whose SMS method is a web view rather than a
+      // native page, so on Linux it would open a login page that can never
+      // load. Start on manual entry instead; the guide there walks the user
+      // through the system browser.
+      ? (!supportsWebLoginUi && widget.platform == CloudPlatform.baidu
+            ? _LoginMethod.manual
+            : _LoginMethod.sms)
       : _LoginMethod.password;
   AliyunWebPassword? _webPassword;
 
@@ -191,7 +197,9 @@ class _PasswordLoginFlowState extends State<PasswordLoginFlow> {
       widget.services,
       widget.platform,
       accountId: widget.accountId,
-      onUsePassword: () => _switch(_defaultMethod),
+      onUsePassword: _defaultMethod == _LoginMethod.manual
+          ? null
+          : () => _switch(_defaultMethod),
       nativeLoginLabel: widget.platform == CloudPlatform.guangya
           ? '切换短信验证码登录'
           : '切换账号密码登录',
@@ -213,7 +221,11 @@ class _PasswordLoginFlowState extends State<PasswordLoginFlow> {
       widget.services,
       widget.platform,
       accountId: widget.accountId,
-      onUsePassword: () => _switch(_defaultMethod),
+      // Baidu on a platform with no web view opens manual entry directly, so
+      // there is no other method to switch back to.
+      onUsePassword: _defaultMethod == _LoginMethod.manual
+          ? null
+          : () => _switch(_defaultMethod),
       nativeLoginLabel:
           {CloudPlatform.quark, CloudPlatform.baidu}.contains(widget.platform)
           ? '切换手机号或扫码登录'

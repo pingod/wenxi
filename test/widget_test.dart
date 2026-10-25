@@ -821,6 +821,31 @@ void main() {
     }
   });
 
+  testWidgets(
+    'Linux opens Baidu on the manual page, not the missing web view',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+      try {
+        final services = await render(tester, const Size(393, 864), 1);
+        await tester.pumpWidget(
+          MaterialApp(home: PasswordLoginFlow(services, CloudPlatform.baidu)),
+        );
+        await tester.pumpAndSettle();
+        // Baidu's SMS method is the only one backed by a web view, so on Linux
+        // the flow used to open a page that could never load and only reached
+        // manual entry after the failure screen.
+        expect(find.text('百度登录信息'), findsOneWidget);
+        expect(find.text('在浏览器里登录百度'), findsOneWidget);
+        expect(find.text('无法打开登录页面'), findsNothing);
+        // There is no other method to switch back to, so no switch button.
+        expect(find.text('切换手机号或扫码登录'), findsNothing);
+        expect(tester.takeException(), isNull);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    },
+  );
+
   testWidgets('platforms with a web view show no browser walk-through', (
     tester,
   ) async {
