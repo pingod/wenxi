@@ -530,7 +530,12 @@ class _MainShellState extends State<MainShell>
                   'app.png',
                 ),
         );
-        await trayManager.setToolTip('文析助手 · 单击打开，右键菜单');
+        // The Linux implementation only handles icon, title and context menu;
+        // a tooltip call raises MissingPluginException and would abort the
+        // menu setup that follows.
+        if (Platform.isWindows) {
+          await trayManager.setToolTip('文析助手 · 单击打开，右键菜单');
+        }
         await trayManager.setContextMenu(
           Menu(
             items: [
