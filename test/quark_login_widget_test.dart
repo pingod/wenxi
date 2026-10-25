@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -339,14 +340,41 @@ void main() {
     },
   );
 
-  testWidgets('expired QR offers refresh without changing the saved account', (
+  testWidgets(
+    'an expiring QR is renewed in place without changing the saved account',
+    (tester) async {
+      await render(tester);
+      await qrMode(tester);
+      int issued() => f.http.calls
+          .where((r) => r.uri.path.endsWith('/getTokenForQrcodeLogin'))
+          .length;
+      expect(issued(), 1);
+      f.expired = true;
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+      expect(issued(), 2);
+      expect(find.byKey(const ValueKey('quark-login-qr')), findsOneWidget);
+      expect(find.text('二维码已过期，请重新获取'), findsNothing);
+      expect(find.textContaining('二维码已刷新'), findsOneWidget);
+      expect(services.vault.credential(CloudPlatform.quark), isNull);
+      f.expired = false;
+      await tap(tester, 'quark-qr-refresh');
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('quark-login-qr')), findsOneWidget);
+      expect(issued(), 3);
+    },
+  );
+
+  testWidgets('a QR that keeps expiring finally asks for a fresh scan', (
     tester,
   ) async {
     await render(tester);
     await qrMode(tester);
     f.expired = true;
-    await tester.pump(const Duration(seconds: 2));
-    await tester.pumpAndSettle();
+    for (var round = 0; round < 14; round++) {
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+    }
     expect(find.text('二维码已过期，请重新获取'), findsOneWidget);
     expect(find.byKey(const ValueKey('quark-login-qr')), findsNothing);
     expect(services.vault.credential(CloudPlatform.quark), isNull);
@@ -354,10 +382,30 @@ void main() {
     await tap(tester, 'quark-qr-refresh');
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('quark-login-qr')), findsOneWidget);
-    expect(
-      f.http.calls.where((r) => r.uri.path.endsWith('/getTokenForQrcodeLogin')),
-      hasLength(2),
-    );
+  });
+
+  testWidgets('a platform without a browser only offers QR login', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+    try {
+      await render(tester);
+      expect(find.byType(QuarkLoginPage), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('quark-sms-unavailable')),
+        findsOneWidget,
+      );
+      expect(find.byKey(const ValueKey('quark-sms-mobile')), findsNothing);
+      expect(find.byKey(const ValueKey('quark-login-qr')), findsOneWidget);
+      await mobileMode(tester);
+      expect(find.byKey(const ValueKey('quark-sms-mobile')), findsNothing);
+      expect(
+        f.http.calls.any((r) => r.uri.path.endsWith('/sendSmsCode')),
+        false,
+      );
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
   });
 
   for (final action in ['switch', 'back']) {

@@ -10,6 +10,7 @@ import '../data/http.dart';
 import '../data/providers/quark.dart';
 import '../data/providers/quark_login.dart';
 import '../domain/models.dart';
+import '../platform/desktop_platform.dart';
 import 'common.dart';
 import 'quark_sms_verification_page.dart';
 
@@ -20,12 +21,16 @@ class QuarkLoginPage extends StatefulWidget {
     required this.onUseManual,
     this.accountId,
     this.verifyCaptcha,
+    this.now,
     super.key,
   });
   final AppServices services;
   final String? accountId;
   final VoidCallback onUseWeb, onUseManual;
   final QuarkCaptchaPrompt? verifyCaptcha;
+
+  /// Test hook: the QR countdown has to be advanced without waiting minutes.
+  final int Function()? now;
 
   @override
   State<QuarkLoginPage> createState() => _QuarkLoginPageState();
@@ -34,8 +39,15 @@ class QuarkLoginPage extends StatefulWidget {
 class _QuarkLoginPageState extends State<QuarkLoginPage>
     with WidgetsBindingObserver {
   static const _platform = CloudPlatform.quark;
+
+  /// The QR is renewed in place a few times before the login is given up, so a
+  /// slow scan never lands on a dead page. 12 rounds cover roughly 35 minutes.
+  static const _maxQrRounds = 12;
   final _mobile = TextEditingController(), _code = TextEditingController();
-  late final _login = QuarkLoginService(widget.services.cloud.http);
+  late final _login = QuarkLoginService(
+    widget.services.cloud.http,
+    now: widget.now,
+  );
   late final String? _selection;
   QuarkSmsChallenge? _sms;
   QuarkQrChallenge? _qr;
@@ -44,18 +56,28 @@ class _QuarkLoginPageState extends State<QuarkLoginPage>
   DateTime? _resendAt;
   bool _qrMode = false, _busy = false, _agreed = false, _visible = true;
   bool _leaving = false, _completed = false, _polling = false;
-  int _generation = 0;
+  int _generation = 0, _qrRounds = 0;
   String _error = '', _status = '';
 
   bool get _active => mounted && !_leaving && !_completed;
+
+  /// Linux has no embedded browser, so the official security-verification page
+  /// (which guards Quark's SMS code) cannot be shown. QR login needs no browser
+  /// and becomes the default there.
+  bool get _smsUnavailable =>
+      !supportsWebLoginUi && widget.verifyCaptcha == null;
+  int get _nowMillis =>
+      widget.now?.call() ?? DateTime.now().millisecondsSinceEpoch;
   int get _seconds => _resendAt == null
       ? 0
       : ((_resendAt!.difference(DateTime.now()).inMilliseconds + 999) ~/ 1000)
             .clamp(0, 60);
   int get _qrSeconds => _qr == null
       ? 0
-      : ((_qr!.expiresAt - DateTime.now().millisecondsSinceEpoch + 999) ~/ 1000)
-            .clamp(0, 120);
+      : ((_qr!.expiresAt - _nowMillis + 999) ~/ 1000).clamp(
+          0,
+          QuarkLoginService.qrLifetimeSeconds,
+        );
 
   @override
   void initState() {
@@ -69,17 +91,37 @@ class _QuarkLoginPageState extends State<QuarkLoginPage>
     final username = saved?.field('username') ?? '';
     if (QuarkLoginService.validMobile(username)) _mobile.text = username;
     _mobile.addListener(_mobileChanged);
+    if (_smsUnavailable) {
+      // Without a browser the SMS code page cannot be shown at all, so lead
+      // with the QR flow instead of blocking on a page that cannot load.
+      _qrMode = true;
+      _status = '正在获取登录二维码…';
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_active) unawaited(_startQr());
+      });
+    }
     _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!_active) return;
       final resendExpired = _resendAt != null && _seconds == 0;
       if (_qr != null && _qrSeconds == 0 && _error.isEmpty && !_busy) {
-        _qrFailed(const QuarkQrExpired());
+        _qrExpired();
       } else if (_seconds > 0 || resendExpired || _qr != null) {
         setState(() {
           if (resendExpired) _resendAt = null;
         });
       }
     });
+  }
+
+  /// The server forgets a login token after roughly three minutes, so a slow
+  /// scan would otherwise end on a dead QR image. Renew it in place while the
+  /// user is still looking at the page.
+  void _qrExpired() {
+    if (_qrRounds < _maxQrRounds) {
+      unawaited(_startQr(renew: true));
+      return;
+    }
+    _qrFailed(const QuarkQrExpired());
   }
 
   void _mobileChanged() {
@@ -140,6 +182,7 @@ class _QuarkLoginPageState extends State<QuarkLoginPage>
 
   void _mode(bool qr) {
     if (!_active || qr == _qrMode) return;
+    if (!qr && _smsUnavailable) return;
     _cancelRequests();
     _code.clear();
     FocusScope.of(context).unfocus();
@@ -199,7 +242,12 @@ class _QuarkLoginPageState extends State<QuarkLoginPage>
   }
 
   Future<void> _send() async {
-    if (!_active || _qrMode || _busy || _seconds > 0 || !_validateMobile()) {
+    if (!_active ||
+        _qrMode ||
+        _smsUnavailable ||
+        _busy ||
+        _seconds > 0 ||
+        !_validateMobile()) {
       return;
     }
     final mobile = _mobile.text.trim(), generation = _generation;
@@ -292,15 +340,17 @@ class _QuarkLoginPageState extends State<QuarkLoginPage>
     }
   }
 
-  Future<void> _startQr() async {
+  Future<void> _startQr({bool renew = false}) async {
     if (!_active || !_qrMode || _busy) return;
     _cancelRequests();
+    if (!renew) _qrRounds = 0;
+    _qrRounds++;
     final generation = _generation, request = RequestScope();
     _request = request;
     setState(() {
       _busy = true;
       _error = '';
-      _status = '正在获取登录二维码…';
+      _status = renew ? '二维码已刷新，请重新扫码' : '正在获取登录二维码…';
     });
     try {
       final qr = await _run(request, generation, _login.createQr);
@@ -310,7 +360,9 @@ class _QuarkLoginPageState extends State<QuarkLoginPage>
       }
       setState(() {
         _qr = qr;
-        _status = '请使用夸克或夸克网盘 App 扫码，并在手机上确认登录';
+        _status = renew
+            ? '二维码已刷新，请重新扫码并在手机上确认登录'
+            : '请使用夸克或夸克网盘 App 扫码，并在手机上确认登录';
       });
       _pollTimer = Timer.periodic(
         const Duration(seconds: 2),
@@ -362,7 +414,13 @@ class _QuarkLoginPageState extends State<QuarkLoginPage>
         if (_active && generation == _generation) _finish();
       });
     } catch (error) {
-      if (_active && generation == _generation) _qrFailed(error);
+      if (_active && generation == _generation) {
+        if (error is QuarkQrExpired) {
+          _qrExpired();
+        } else {
+          _qrFailed(error);
+        }
+      }
     } finally {
       if (identical(_request, request)) _request = null;
       if (generation == _generation) _polling = false;
@@ -460,13 +518,14 @@ class _QuarkLoginPageState extends State<QuarkLoginPage>
                 const SizedBox(height: 28),
                 SegmentedButton<bool>(
                   key: const ValueKey('quark-login-method'),
-                  segments: const [
+                  segments: [
                     ButtonSegment(
                       value: false,
-                      label: Text('手机号登录'),
-                      icon: Icon(CupertinoIcons.phone),
+                      label: const Text('手机号登录'),
+                      icon: const Icon(CupertinoIcons.phone),
+                      enabled: !_smsUnavailable,
                     ),
-                    ButtonSegment(
+                    const ButtonSegment(
                       value: true,
                       label: Text('扫码登录'),
                       icon: Icon(CupertinoIcons.qrcode),
@@ -476,6 +535,16 @@ class _QuarkLoginPageState extends State<QuarkLoginPage>
                   showSelectedIcon: false,
                   onSelectionChanged: (value) => _mode(value.first),
                 ),
+                if (_smsUnavailable)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 12),
+                    child: Text(
+                      '当前系统没有内嵌浏览器，夸克的安全验证页无法打开，'
+                      '因此手机号登录在此平台不可用。请使用扫码登录。',
+                      key: const ValueKey('quark-sms-unavailable'),
+                      style: TextStyle(fontSize: 13, color: secondary(context)),
+                    ),
+                  ),
                 const SizedBox(height: 28),
                 if (!_qrMode) ...[
                   TextField(

@@ -1084,6 +1084,28 @@ void main() {
     },
   );
 
+  testWidgets('Guangya verification says a browser is missing on Linux', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+    try {
+      final challenge = GuangyaCaptchaChallenge(
+        'https://captcha.guangyapan.com/verify',
+      );
+      await tester.pumpWidget(
+        MaterialApp(home: GuangyaVerificationPage(services, challenge)),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(InAppWebView), findsNothing);
+      expect(find.text('验证页面不可用'), findsOneWidget);
+      expect(find.textContaining('没有内嵌浏览器'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
   testWidgets(
     'Aliyun waits for a clean browser, submits once, then validates and saves tokens',
     (tester) async {

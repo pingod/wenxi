@@ -88,6 +88,13 @@ class QuarkLoginService {
 
   static const clientId = '532';
   static const accountOrigin = 'https://uop.quark.cn';
+
+  /// How long the server keeps a scanned-login token alive.
+  ///
+  /// `getServiceTicketByQrcodeToken` answers `50004001` (still waiting) for the
+  /// first ~180 s and only switches to `50004002` (token not found) after that,
+  /// so the countdown has to follow the server instead of expiring early.
+  static const qrLifetimeSeconds = 175;
   static const mobilePage =
       '$accountOrigin/cas/custom/login?custom_login_type=mobile&client_id=$clientId&display=pc';
   static const serviceAgreement =
@@ -186,7 +193,11 @@ class QuarkLoginService {
         data.integer('status') == 2000000 && _validTicket(token),
         '夸克登录二维码获取失败，请重试或切换网页登录',
       );
-      return QuarkQrChallenge._(token, now() + 120000, attempt);
+      return QuarkQrChallenge._(
+        token,
+        now() + qrLifetimeSeconds * 1000,
+        attempt,
+      );
     } catch (_) {
       attempt.close();
       rethrow;

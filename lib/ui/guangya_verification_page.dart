@@ -5,6 +5,7 @@ import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import '../app_services.dart';
 import '../data/providers/guangya_login.dart';
 import '../domain/models.dart';
+import '../platform/desktop_platform.dart';
 import 'common.dart';
 import 'login_webview.dart';
 
@@ -29,7 +30,18 @@ class _GuangyaVerificationPageState extends State<GuangyaVerificationPage> {
     _initialize();
   }
 
+  /// The official verification page only renders inside an embedded browser,
+  /// which the desktop Linux build does not ship. Say so instead of leaving an
+  /// empty frame behind.
+  static const _noBrowser =
+      '当前系统没有内嵌浏览器，光鸭的安全验证页无法打开。'
+      '请返回后选择「手动填写登录信息」，或先在浏览器里登录再用手动方式粘贴凭据。';
+
   Future<void> _initialize() async {
+    if (!supportsWebLoginUi) {
+      if (mounted) setState(() => _error = _noBrowser);
+      return;
+    }
     try {
       widget.services.control.checkCloud(CloudPlatform.guangya);
       _environment = await widget.services.webEnvironment();
