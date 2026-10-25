@@ -768,6 +768,45 @@ void main() {
     },
   );
 
+  testWidgets('Linux manual login leads the user through the system browser', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+    try {
+      final services = await render(tester, const Size(393, 864), 1);
+      await tester.pumpWidget(
+        MaterialApp(home: ManualLoginPage(services, CloudPlatform.baidu)),
+      );
+      await tester.pumpAndSettle();
+      // Without an embedded web view the page must explain the browser route
+      // instead of only offering an empty Cookie box.
+      expect(find.text('在浏览器里登录百度'), findsOneWidget);
+      expect(find.textContaining('F12'), findsOneWidget);
+      expect(find.byKey(const ValueKey('login-guide-open')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  testWidgets('platforms with a web view show no browser walk-through', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    try {
+      final services = await render(tester, const Size(393, 864), 1);
+      await tester.pumpWidget(
+        MaterialApp(home: ManualLoginPage(services, CloudPlatform.baidu)),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('在浏览器里登录百度'), findsNothing);
+      expect(find.byKey(const ValueKey('login-guide-open')), findsNothing);
+      expect(tester.takeException(), isNull);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
   testWidgets('UC login page saves cookies renewed during validation', (
     tester,
   ) async {

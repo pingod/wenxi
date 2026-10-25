@@ -15,6 +15,7 @@ import '../data/providers/xunlei_login.dart';
 import '../data/providers/xunlei_protocol.dart';
 import '../domain/auth.dart';
 import '../domain/aliyun_web_password.dart';
+import '../domain/login_guide.dart';
 import '../domain/models.dart';
 import '../domain/weiyun_web_login.dart';
 import '../domain/tianyi_web_login.dart';
@@ -24,6 +25,7 @@ import 'common.dart';
 import 'native_password_login_page.dart';
 import 'github_login_page.dart';
 import 'guangya_sms_login_page.dart';
+import 'login_guide_panel.dart';
 import 'login_webview.dart';
 import 'uc_tv_authorization_page.dart';
 import 'cloud_accounts_page.dart';
@@ -1237,12 +1239,18 @@ class ManualLoginPage extends StatefulWidget {
     this.accountId,
     this.onUsePassword,
     this.nativeLoginLabel = '切换账号密码登录',
+    this.guide,
   });
   final AppServices services;
   final CloudPlatform platform;
   final String? accountId;
   final VoidCallback? onUsePassword;
   final String nativeLoginLabel;
+
+  /// Browser walk-through shown above the fields. Defaults to the platform's
+  /// guide on platforms without an embedded web view, where copying from a
+  /// browser is the only way to log in.
+  final LoginGuide? guide;
   @override
   State<ManualLoginPage> createState() => _ManualLoginPageState();
 }
@@ -1258,6 +1266,9 @@ class _ManualLoginPageState extends State<ManualLoginPage> {
       visible = false,
       passwordMode = false,
       completed = false;
+  late final LoginGuide? _guide =
+      widget.guide ??
+      (supportsWebLoginUi ? null : LoginGuide.forPlatform(widget.platform));
   String error = '';
   @override
   void initState() {
@@ -1381,6 +1392,9 @@ class _ManualLoginPageState extends State<ManualLoginPage> {
   @override
   Widget build(BuildContext context) {
     final platform = widget.platform;
+    // The browser walk-through only makes sense while the cookie or token is
+    // still what the page is asking for; the 123 password mode hides it.
+    final guide = passwordMode ? null : _guide;
     return PageFrame(
       title: '${platform.shortName}登录信息',
       child: Align(
@@ -1405,6 +1419,15 @@ class _ManualLoginPageState extends State<ManualLoginPage> {
                 ],
               ),
               const SizedBox(height: 24),
+              if (guide != null)
+                LoginGuidePanel(
+                  guide: guide,
+                  enabled: !working,
+                  onFill: (value) => setState(() {
+                    primary.text = value;
+                    error = '';
+                  }),
+                ),
               if (platform == CloudPlatform.pan123)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 20),

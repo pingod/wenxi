@@ -14,6 +14,7 @@
 
 - 新增 Linux 桌面版：与 Windows 共用 Flutter 界面和 Gopeed 下载内核，提供 `tool/build-linux.sh` 与 `tool/build-native-linux.sh`，编译方式见 [Linux 编译说明](docs/BUILDING-LINUX.md)。
 - Linux 使用 `FileManager1`/`xdg-open` 定位下载文件、`systemctl poweroff` 完成下载后关机；缺少内嵌浏览器时账号密码与手动登录照常可用，网页登录入口自动隐藏。
+- Linux 手动登录页新增「系统浏览器登录」引导：一键用系统浏览器打开网盘官网，说明各平台 Cookie / Local Storage / Token 的位置，并自动识别剪贴板里复制回来的凭据填入输入框（不读取浏览器数据、不联网上传）。
 - 新增城通网盘：邮箱密码 / Session Token 登录、文件管理、上传下载及分享链接解析。
 - 优化 UC、夸克分享直链的凭证刷新与登录保底流程。
 
