@@ -5,7 +5,9 @@ int main() {
   const std::string signed_url = "https://example.test/app.apk?token=a%2Bb&x=2";
   if (DownloadLaunchArgument({"--download", signed_url}) != signed_url ||
       DownloadLaunchArgument({signed_url}) != signed_url ||
-      DownloadLaunchArgument({"wenxi://download?url=https%3A%2F%2Fexample.test"}).empty()) {
+      DownloadLaunchArgument({"wenxi://download?url=https%3A%2F%2Fexample.test"}).empty() ||
+      DownloadLaunchArgument({"wenxi://resolve?url=https%3A%2F%2Fpan.quark.cn%2Fs%2Fabc&pwd=1234"}).empty() ||
+      DownloadLaunchArgument({"--open", "wenxi://resolve/?url=https%3A%2F%2Fpan.baidu.com%2Fs%2F1abc"}).empty()) {
     std::cerr << "valid download invocation was lost\n";
     return 1;
   }

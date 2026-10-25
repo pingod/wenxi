@@ -361,7 +361,7 @@ class GuangyaConnector extends CloudConnector {
     return result;
   }
 
-  static CloudFile file(Json data, String parent) {
+  static CloudFile file(Json data, String parent, {bool share = false}) {
     String first(List<String> names) {
       for (final name in names) {
         if (data.str(name).isNotEmpty) return data.str(name);
@@ -419,11 +419,15 @@ class GuangyaConnector extends CloudConnector {
         'fileSize',
         data.integer('size', data.integer('file_size')),
       ),
-      parentId: first([
-        'parentId',
-        'parentFileId',
-        'parent_id',
-      ]).ifEmpty(parent),
+      // A share root can expose the owner's private parentId. Only the folder
+      // used to list this share can be reopened when a queued download starts.
+      parentId: share
+          ? parent
+          : first([
+              'parentId',
+              'parentFileId',
+              'parent_id',
+            ]).ifEmpty(parent),
       modifiedAt: personalCloudDate(modified),
       thumbnailUrl: first([
         'thumbnail',
@@ -478,7 +482,7 @@ class GuangyaConnector extends CloudConnector {
       require(entries.length == (raw as List).length, '光鸭文件列表包含无效项目，请重试');
       var added = 0;
       for (final item in entries) {
-        final value = file(item, parentId);
+        final value = file(item, parentId, share: share);
         if (ids.add(value.id)) {
           result.add(value);
           added++;

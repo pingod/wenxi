@@ -1,8 +1,16 @@
 import 'package:path/path.dart' as p;
 
 class PlaybackSubtitle {
-  const PlaybackSubtitle(this.id, this.name);
+  const PlaybackSubtitle(
+    this.id,
+    this.name, {
+    this.uri = '',
+    this.provider = '',
+    this.language = '',
+  });
   final String id, name;
+  final String uri, provider, language;
+  bool get online => uri.isNotEmpty;
 }
 
 String _stem(String name) {

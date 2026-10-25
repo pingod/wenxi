@@ -10,6 +10,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 import 'app_services.dart';
+import 'core/json.dart' show AsyncGate;
 import 'diagnostics/app_log.dart';
 import 'diagnostics/diagnostic_runtime.dart';
 import 'ui/startup_failure_page.dart';
@@ -23,18 +24,22 @@ import 'ui/cloud_accounts_page.dart';
 import 'ui/clipboard_link_banner.dart';
 import 'ui/common.dart';
 import 'ui/app_theme.dart';
+import 'ui/app_text_scale.dart';
 import 'ui/app_background.dart';
 export 'ui/app_theme.dart' show appTheme;
 import 'ui/startup_loading_page.dart';
 import 'ui/transfers_page.dart';
 import 'ui/mine_page.dart';
 import 'ui/parse_page.dart';
+import 'ui/resource_home_page.dart';
+import 'ui/search_security_dialog.dart';
 import 'ui/announcements_page.dart';
 import 'ui/device_link_page.dart';
 import 'ui/donate_page.dart';
 import 'ui/about_dialog.dart';
 import 'ui/download_shutdown_prompt.dart';
 import 'ui/guest_download_prompt.dart';
+import 'ui/mobile_data_download_prompt.dart';
 import 'ui/player_page.dart';
 import 'platform/external_open.dart';
 import 'playback/external_playback.dart';
@@ -49,6 +54,7 @@ Future<void> main() async {
     LicenseRegistry.addLicense(() async* {
       for (final entry in {
         'Gopeed': 'Gopeed-LICENSE.txt',
+        'QuickJS-NG': 'QuickJS-NG-LICENSE.txt',
         'Android NDK / LLVM': 'android-ndk-NOTICE.txt',
         'media_kit native build': 'media-native-build-LICENSE.txt',
         'Noto Sans SC': 'NotoSansCJK-OFL.txt',
@@ -185,11 +191,17 @@ class AsterLinkApp extends StatelessWidget {
           'Dark' => ThemeMode.dark,
           _ => ThemeMode.system,
         },
-        builder: (context, child) => WindowsWindowTheme(
-          enabled: services.platformFeatures,
-          child: child!,
+        builder: (context, child) => AppTextScale(
+          percent: settings.fontScalePercent,
+          child: WindowsWindowTheme(
+            enabled: services.platformFeatures,
+            child: child!,
+          ),
         ),
-        home: MainShell(services, initialTab: initialTab),
+        home: SearchSecurityHost(
+          services,
+          child: MainShell(services, initialTab: initialTab),
+        ),
       );
     },
   );
@@ -213,16 +225,71 @@ class _MainShellState extends State<MainShell>
     with WindowListener, TrayListener, WidgetsBindingObserver {
   late int selected = widget.initialTab;
   final parseKey = GlobalKey<ParsePageState>();
+  final _windowVisibility = AsyncGate();
   bool trayReady = false, closing = false;
+  bool _exiting = false;
   bool _openingExternal = false, _externalScheduled = false;
   bool _openingLan = false;
-  static const titles = ['分享解析', '网盘列表', '传输管理', '我的'];
+  bool _usingClipboard = false;
+  late bool _hideResourceNavigation =
+      widget.services.settings.hideResourceNavigation;
+  double _pageSwipeDistance = 0;
+  static const titles = ['分享解析', '资源', '网盘列表', '传输管理', '我的'];
+
+  List<int> get _navigationTabs =>
+      AppNavigation.visibleIndices(hideResources: _hideResourceNavigation);
+
+  bool get _hiddenResourcePage => _hideResourceNavigation && selected == 1;
+
+  void _navigationSettingsChanged() {
+    final hidden = widget.services.settings.hideResourceNavigation;
+    if (mounted && hidden != _hideResourceNavigation) {
+      setState(() => _hideResourceNavigation = hidden);
+    }
+  }
+
+  void _selectTab(int index) {
+    if (index == selected) return;
+    FocusManager.instance.primaryFocus?.unfocus();
+    DiagnosticLog.event(
+      'ui.tab',
+      fields: {
+        'tab': ['parse', 'resources', 'cloud', 'downloads', 'mine'][index],
+      },
+    );
+    setState(() => selected = index);
+  }
+
+  void _swipePage(DragEndDetails details) {
+    final distance = _pageSwipeDistance;
+    _pageSwipeDistance = 0;
+    final threshold = (MediaQuery.sizeOf(context).width * .18).clamp(48, 96);
+    final velocity = details.primaryVelocity ?? 0;
+    if (distance.abs() < threshold &&
+        (distance.abs() < 24 || velocity.abs() < 450)) {
+      return;
+    }
+    final direction =
+        (distance < 0 ? 1 : -1) *
+        (Directionality.of(context) == TextDirection.rtl ? -1 : 1);
+    final tabs = _navigationTabs;
+    final position = tabs.indexOf(selected);
+    _selectTab(
+      tabs[((position < 0 ? 0 : position) + direction).clamp(
+        0,
+        tabs.length - 1,
+      )],
+    );
+  }
+
   @override
   void initState() {
     super.initState();
     widget.services.sharedText.addListener(_shared);
-    if (widget.services.downloadNavigation.value > 0) selected = 2;
+    widget.services.store.addListener(_navigationSettingsChanged);
+    if (widget.services.downloadNavigation.value > 0) selected = 3;
     widget.services.downloadNavigation.addListener(_showDownloads);
+    widget.services.resourceNavigation.addListener(_showResources);
     widget.services.lanNavigation.addListener(_showLan);
     widget.services.transferTab.addListener(_transferTabChanged);
     widget.services.externalOpens.addListener(_externalAvailable);
@@ -340,7 +407,7 @@ class _MainShellState extends State<MainShell>
           final url = request.downloadUrl;
           if (url != null) {
             widget.services.transferTab.value = 0;
-            setState(() => selected = 2);
+            setState(() => selected = 3);
             await directDownloadDialog(
               context,
               widget.services,
@@ -380,12 +447,22 @@ class _MainShellState extends State<MainShell>
     widget.services.announcements.setForeground(false);
   }
 
-  void _useClipboard() {
+  Future<void> _useClipboard() async {
     final suggestion = widget.services.clipboard.suggestion;
-    if (suggestion == null) return;
-    setState(() => selected = 0);
-    parseKey.currentState?.acceptClipboard(suggestion.text);
-    unawaited(widget.services.clipboard.acknowledge(suggestion));
+    if (!mounted || suggestion == null || _usingClipboard) return;
+    _usingClipboard = true;
+    try {
+      setState(() => selected = 0);
+      unawaited(widget.services.clipboard.acknowledge(suggestion));
+      // Let the parser become active when opening from another tab.
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted || selected != 0) return;
+      final parser = parseKey.currentState;
+      parser?.acceptClipboard(suggestion.text);
+      await parser?.parse();
+    } finally {
+      _usingClipboard = false;
+    }
   }
 
   void _shared() {
@@ -397,8 +474,15 @@ class _MainShellState extends State<MainShell>
   void _showDownloads() {
     if (!mounted) return;
     Navigator.of(context).popUntil((route) => route.isFirst);
-    setState(() => selected = 2);
+    setState(() => selected = 3);
     DiagnosticLog.event('ui.tab', fields: {'tab': 'downloads'});
+  }
+
+  void _showResources() {
+    if (!mounted) return;
+    Navigator.of(context).popUntil((route) => route.isFirst);
+    setState(() => selected = 1);
+    DiagnosticLog.event('ui.tab', fields: {'tab': 'resources'});
   }
 
   void _showLan() => unawaited(_openLan());
@@ -430,41 +514,79 @@ class _MainShellState extends State<MainShell>
 
   Future<void> _desktop() async {
     try {
-      await windowManager.setPreventClose(true);
-      // AppIndicator reads PNG/SVG icons; .ico is a Windows-only container.
-      await trayManager.setIcon(
-        Platform.isWindows
-            ? 'assets/icons/app.ico'
-            : p.join(
-                p.dirname(Platform.resolvedExecutable),
-                'data',
-                'flutter_assets',
-                'assets',
-                'icons',
-                'app.png',
-              ),
-      );
-      await trayManager.setToolTip('文析助手');
-      await trayManager.setContextMenu(
-        Menu(
-          items: [
-            MenuItem(key: 'show', label: '打开文析助手'),
-            MenuItem.separator(),
-            MenuItem(key: 'pause', label: '停止全部传输'),
-            MenuItem(key: 'exit', label: '退出'),
-          ],
-        ),
-      );
-      trayReady = true;
-    } catch (_) {
-      /* Closing still offers a visible pause-and-exit path. */
+      await _windowVisibility.run(() async {
+        if (!mounted || _exiting) return;
+        await windowManager.setPreventClose(true);
+        // AppIndicator reads PNG/SVG icons; .ico is a Windows-only container.
+        await trayManager.setIcon(
+          Platform.isWindows
+              ? 'assets/icons/app.ico'
+              : p.join(
+                  p.dirname(Platform.resolvedExecutable),
+                  'data',
+                  'flutter_assets',
+                  'assets',
+                  'icons',
+                  'app.png',
+                ),
+        );
+        await trayManager.setToolTip('文析助手 · 单击打开，右键菜单');
+        await trayManager.setContextMenu(
+          Menu(
+            items: [
+              MenuItem(key: 'show', label: '打开文析助手'),
+              MenuItem.separator(),
+              MenuItem(key: 'pause', label: '停止全部传输'),
+              MenuItem(key: 'exit', label: '退出'),
+            ],
+          ),
+        );
+        trayReady = true;
+      });
+      // Also handles a minimize that happened while the tray was starting.
+      onWindowMinimize();
+    } catch (error, stack) {
+      DiagnosticLog.error('app.tray_init_failed', error, stack);
     }
+  }
+
+  Future<void> _hideToTray({bool minimizedOnly = false}) =>
+      _windowVisibility.run(() async {
+        if (!mounted || !trayReady || _exiting) return;
+        if (minimizedOnly) {
+          if (closing || !await windowManager.isMinimized()) return;
+          if (!mounted || closing || _exiting) return;
+        }
+        await windowManager.hide();
+      });
+
+  Future<void> _showWindow() => _windowVisibility.run(() async {
+    if (!mounted || _exiting) return;
+    // show() restores only minimized windows, preserving maximized/PiP bounds.
+    await windowManager.show();
+    if (!mounted || _exiting) return;
+    await windowManager.focus();
+  });
+
+  @override
+  void onWindowMinimize() {
+    unawaited(
+      _hideToTray(minimizedOnly: true).catchError((
+        Object error,
+        StackTrace stack,
+      ) {
+        DiagnosticLog.error('app.tray_hide_failed', error, stack);
+      }),
+    );
   }
 
   @override
   void onTrayIconMouseDown() {
-    windowManager.show();
-    windowManager.focus();
+    unawaited(
+      _showWindow().catchError((Object error, StackTrace stack) {
+        DiagnosticLog.error('app.tray_restore_failed', error, stack);
+      }),
+    );
   }
 
   @override
@@ -476,6 +598,7 @@ class _MainShellState extends State<MainShell>
 
   @override
   void onTrayMenuItemClick(MenuItem item) {
+    if (!mounted || _exiting) return;
     if (item.key == 'show') onTrayIconMouseDown();
     if (item.key == 'pause') {
       busy(context, widget.services.stopTransfers, label: '停止传输…');
@@ -489,7 +612,7 @@ class _MainShellState extends State<MainShell>
   }
 
   Future<void> _close({bool forceExit = false}) async {
-    if (closing || !mounted) return;
+    if (closing || _exiting || !mounted) return;
     closing = true;
     try {
       final active =
@@ -497,8 +620,7 @@ class _MainShellState extends State<MainShell>
           widget.services.uploads.activeCount > 0 ||
           widget.services.lan.running;
       if (active) {
-        await windowManager.show();
-        await windowManager.focus();
+        await _showWindow();
         if (!mounted) return;
         final action = await showDialog<String>(
           context: context,
@@ -528,15 +650,22 @@ class _MainShellState extends State<MainShell>
         );
         if (action == null) return;
         if (action == 'background') {
-          await windowManager.hide();
+          await _hideToTray();
           return;
         }
       }
-      await widget.services.close();
-      if (trayReady) await trayManager.destroy();
-      DiagnosticRuntime.stop();
-      await windowManager.destroy();
+      _exiting = true;
+      await _windowVisibility.run(() async {
+        await widget.services.close();
+        if (trayReady) {
+          await trayManager.destroy();
+          trayReady = false;
+        }
+        DiagnosticRuntime.stop();
+        await windowManager.destroy();
+      });
     } catch (e, stack) {
+      _exiting = false;
       DiagnosticLog.error('app.close_failed', e, stack);
       if (mounted) message(context, errorText(e));
     } finally {
@@ -547,7 +676,9 @@ class _MainShellState extends State<MainShell>
   @override
   void dispose() {
     widget.services.sharedText.removeListener(_shared);
+    widget.services.store.removeListener(_navigationSettingsChanged);
     widget.services.downloadNavigation.removeListener(_showDownloads);
+    widget.services.resourceNavigation.removeListener(_showResources);
     widget.services.lanNavigation.removeListener(_showLan);
     widget.services.transferTab.removeListener(_transferTabChanged);
     widget.services.externalOpens.removeListener(_externalAvailable);
@@ -561,6 +692,100 @@ class _MainShellState extends State<MainShell>
       trayManager.removeListener(this);
     }
     super.dispose();
+  }
+
+  Future<void> _clearDownloads({bool failedOnly = false}) async {
+    final tasks = widget.services.downloads.tasks
+        .where((task) => !failedOnly || task.status == DownloadStatus.failed)
+        .toList(growable: false);
+    if (tasks.isEmpty) {
+      message(context, failedOnly ? '暂无可清理的失败任务' : '暂无可清理的下载记录');
+      return;
+    }
+    // Fix the selection before confirmation so a newly added download is kept.
+    final ids = tasks.map((task) => task.id).toList(growable: false);
+    final unfinished = tasks.any(
+      (task) => task.status != DownloadStatus.completed,
+    );
+    var deleteFiles = false;
+    final choice = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, update) => AlertDialog(
+          title: Text(failedOnly ? '清理失败任务' : '清理下载记录'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  failedOnly
+                      ? '将清理当前 ${ids.length} 个失败任务。下载目录中的文件默认保留。'
+                      : '将清理当前全部 ${ids.length} 条下载记录。下载目录中的文件默认保留。',
+                ),
+                if (unfinished) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    failedOnly
+                        ? '失败任务的临时缓存将自动清理，清理后无法续传。'
+                        : '未完成任务会先停止，临时缓存将自动清理，清理后无法续传。',
+                  ),
+                ],
+                const SizedBox(height: 8),
+                CheckboxListTile(
+                  key: const Key('downloads-clear-files'),
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('同时删除文件'),
+                  subtitle: const Text('删除对应的已下载文件和残留文件'),
+                  value: deleteFiles,
+                  onChanged: (value) =>
+                      update(() => deleteFiles = value ?? false),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              key: const Key('downloads-confirm-clear'),
+              onPressed: () => Navigator.pop(context, deleteFiles),
+              child: const Text('清理'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (choice == null || !mounted) return;
+    final selected = ids
+        .where(
+          (id) =>
+              !failedOnly ||
+              widget.services.downloads.task(id)?.status ==
+                  DownloadStatus.failed,
+        )
+        .toList(growable: false);
+    if (selected.isEmpty) {
+      message(context, '暂无可清理的失败任务');
+      return;
+    }
+    final result = await busy(
+      context,
+      () => widget.services.downloads.batch(
+        selected,
+        DownloadBatchAction.delete,
+        deleteFiles: choice,
+      ),
+      label: failedOnly ? '正在清理失败任务…' : '正在清理下载记录…',
+    );
+    if (mounted && result != null && result.failed.isNotEmpty) {
+      message(
+        context,
+        '已清理 ${result.succeeded.length} 条记录，${result.failed.length} 条暂未清理，请稍后重试',
+      );
+    }
   }
 
   Future<void> _menu(String action) async {
@@ -590,16 +815,9 @@ class _MainShellState extends State<MainShell>
       case 'resume':
         await busy(context, widget.services.downloads.resumeAll);
       case 'clear':
-        if (await confirm(context, '清理完成记录', '仅移除已完成记录，已下载的文件会保留。') &&
-            mounted) {
-          await busy(context, () async {
-            for (final task in widget.services.downloads.tasks.where(
-              (t) => t.status == DownloadStatus.completed,
-            )) {
-              await widget.services.downloads.delete(task.id);
-            }
-          });
-        }
+        await _clearDownloads();
+      case 'clear-failed':
+        await _clearDownloads(failedOnly: true);
       case 'about':
         await showWenxiAbout(context, widget.services.control);
       case 'donate':
@@ -617,7 +835,7 @@ class _MainShellState extends State<MainShell>
   }
 
   List<AppMenuAction<String>> get menu => switch (selected) {
-    1 => const [
+    2 => const [
       AppMenuAction(
         value: 'cloud-layout',
         label: '排序与隐藏',
@@ -634,7 +852,7 @@ class _MainShellState extends State<MainShell>
         icon: CupertinoIcons.arrow_clockwise,
       ),
     ],
-    2 when widget.services.transferTab.value == 1 => const [
+    3 when widget.services.transferTab.value == 1 => const [
       AppMenuAction(
         value: 'stop-uploads',
         label: '停止全部上传',
@@ -646,7 +864,7 @@ class _MainShellState extends State<MainShell>
         icon: CupertinoIcons.trash,
       ),
     ],
-    2 => const [
+    3 => const [
       AppMenuAction(
         value: 'new',
         label: '新建下载',
@@ -660,8 +878,13 @@ class _MainShellState extends State<MainShell>
       ),
       AppMenuAction(
         value: 'clear',
-        label: '清理完成记录',
+        label: '清理下载记录',
         icon: CupertinoIcons.trash,
+      ),
+      AppMenuAction(
+        value: 'clear-failed',
+        label: '清理失败任务',
+        icon: CupertinoIcons.exclamationmark_circle,
       ),
     ],
     _ => const [
@@ -676,33 +899,27 @@ class _MainShellState extends State<MainShell>
   Widget _navigation(BuildContext context, {required bool rail}) =>
       AppNavigation(
         selectedIndex: selected,
+        hideResources: _hideResourceNavigation,
         transfers: widget.services.navigationTransfers,
         rail: rail,
-        onSelected: (index) {
-          DiagnosticLog.event(
-            'ui.tab',
-            fields: {
-              'tab': ['parse', 'cloud', 'downloads', 'mine'][index],
-            },
-          );
-          setState(() => selected = index);
-        },
+        onSelected: _selectTab,
       );
 
   @override
   Widget build(BuildContext context) => CallbackShortcuts(
     bindings: {
-      for (var i = 0; i < 4; i++)
+      for (var i = 0; i < _navigationTabs.length; i++)
         SingleActivator(
           [
             LogicalKeyboardKey.digit1,
             LogicalKeyboardKey.digit2,
             LogicalKeyboardKey.digit3,
             LogicalKeyboardKey.digit4,
+            LogicalKeyboardKey.digit5,
           ][i],
           control: true,
         ): () =>
-            setState(() => selected = i),
+            _selectTab(_navigationTabs[i]),
       const SingleActivator(LogicalKeyboardKey.keyL, control: true): () {
         setState(() => selected = 0);
         parseKey.currentState?.focusInput();
@@ -719,7 +936,7 @@ class _MainShellState extends State<MainShell>
               builder: (context) {
                 final rail = constraints.maxWidth >= 820;
                 final desktopHeader =
-                    (selected == 0 || selected == 3) &&
+                    (selected == 0 || selected == 4) &&
                     isDesktopTarget(Theme.of(context).platform);
                 final content = Scaffold(
                   extendBody: !rail,
@@ -730,6 +947,12 @@ class _MainShellState extends State<MainShell>
                       : const Color(0xfff7f8fb),
                   appBar: AppBar(
                     backgroundColor: backgroundSurface(context),
+                    leading: _hiddenResourcePage
+                        ? BackButton(
+                            key: const Key('resource-back-to-parse'),
+                            onPressed: () => _selectTab(0),
+                          )
+                        : null,
                     title: Text(titles[selected]),
                     centerTitle: desktopHeader ? false : null,
                     titleSpacing: desktopHeader ? 28 : null,
@@ -755,17 +978,20 @@ class _MainShellState extends State<MainShell>
                             ),
                           ),
                         ),
-                      Padding(
-                        padding: const EdgeInsets.only(right: 8),
-                        child: selected == 0
-                            ? AnnouncementButton(widget.services.announcements)
-                            : AppPopupMenuButton<String>(
-                                tooltip: '更多操作',
-                                onSelected: _menu,
-                                actions: menu,
-                                icon: CupertinoIcons.ellipsis,
-                              ),
-                      ),
+                      if (selected != 1)
+                        Padding(
+                          padding: const EdgeInsets.only(right: 8),
+                          child: selected == 0
+                              ? AnnouncementButton(
+                                  widget.services.announcements,
+                                )
+                              : AppPopupMenuButton<String>(
+                                  tooltip: '更多操作',
+                                  onSelected: _menu,
+                                  actions: menu,
+                                  icon: CupertinoIcons.ellipsis,
+                                ),
+                        ),
                     ],
                   ),
                   body: SafeArea(
@@ -781,15 +1007,15 @@ class _MainShellState extends State<MainShell>
                               updater: widget.services.appUpdates,
                             ),
                             GuestDownloadPrompt(widget.services),
+                            MobileDataDownloadPrompt(
+                              widget.services.mobileDataDownloads,
+                            ),
                             DownloadShutdownPrompt(
                               widget.services.downloadShutdown,
                               showWindow:
                                   widget.services.platformFeatures &&
                                       isDesktopPlatform
-                                  ? () async {
-                                      await windowManager.show();
-                                      await windowManager.focus();
-                                    }
+                                  ? _showWindow
                                   : null,
                             ),
                             if (widget.services.clipboard.suggestion
@@ -804,33 +1030,55 @@ class _MainShellState extends State<MainShell>
                                 ),
                               ),
                             Expanded(
-                              child: IndexedStack(
-                                index: selected,
-                                children: [
-                                  ParsePage(
-                                    widget.services,
-                                    key: parseKey,
-                                    active: selected == 0,
-                                  ),
-                                  CloudPage(
-                                    widget.services,
-                                    onParseShare: () {
-                                      setState(() => selected = 0);
-                                      WidgetsBinding.instance
-                                          .addPostFrameCallback((_) {
-                                            if (mounted && selected == 0) {
-                                              parseKey.currentState?.focus
-                                                  .requestFocus();
-                                            }
-                                          });
-                                    },
-                                  ),
-                                  TransfersPage(
-                                    widget.services,
-                                    active: selected == 2,
-                                  ),
-                                  MinePage(widget.services),
-                                ],
+                              child: GestureDetector(
+                                key: const Key('main-page-swipe-area'),
+                                behavior: HitTestBehavior.translucent,
+                                onHorizontalDragStart: (_) =>
+                                    _pageSwipeDistance = 0,
+                                onHorizontalDragUpdate: (details) =>
+                                    _pageSwipeDistance += details.delta.dx,
+                                onHorizontalDragEnd: _swipePage,
+                                onHorizontalDragCancel: () =>
+                                    _pageSwipeDistance = 0,
+                                child: IndexedStack(
+                                  index: selected,
+                                  children: [
+                                    ParsePage(
+                                      widget.services,
+                                      key: parseKey,
+                                      active: selected == 0,
+                                      resourceActive: selected == 1,
+                                    ),
+                                    ResourceHomePage(
+                                      widget.services,
+                                      active: selected == 1,
+                                      onOpen: (hit) async {
+                                        final parser = parseKey.currentState;
+                                        if (parser != null) {
+                                          await parser.openResource(hit);
+                                        }
+                                      },
+                                    ),
+                                    CloudPage(
+                                      widget.services,
+                                      onParseShare: () {
+                                        setState(() => selected = 0);
+                                        WidgetsBinding.instance
+                                            .addPostFrameCallback((_) {
+                                              if (mounted && selected == 0) {
+                                                parseKey.currentState?.focus
+                                                    .requestFocus();
+                                              }
+                                            });
+                                      },
+                                    ),
+                                    TransfersPage(
+                                      widget.services,
+                                      active: selected == 3,
+                                    ),
+                                    MinePage(widget.services),
+                                  ],
+                                ),
                               ),
                             ),
                           ],
@@ -842,17 +1090,20 @@ class _MainShellState extends State<MainShell>
                       ? null
                       : _navigation(context, rail: false),
                 );
-                return rail
-                    ? Row(
-                        children: [
-                          Material(
-                            color: backgroundSurface(context),
-                            child: _navigation(context, rail: true),
-                          ),
-                          Expanded(child: content),
-                        ],
-                      )
-                    : content;
+                return PopScope(
+                  canPop: !_hiddenResourcePage,
+                  onPopInvokedWithResult: (didPop, _) {
+                    if (!didPop && _hiddenResourcePage) _selectTab(0);
+                  },
+                  child: rail
+                      ? Row(
+                          children: [
+                            _navigation(context, rail: true),
+                            Expanded(child: content),
+                          ],
+                        )
+                      : content,
+                );
               },
             ),
           );

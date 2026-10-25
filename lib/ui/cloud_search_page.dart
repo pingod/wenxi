@@ -11,6 +11,7 @@ class CloudSearchPage extends BrowserPage {
     super.services,
     super.session, {
     super.key,
+    super.poolPreview,
     List<CloudFile>? currentItems,
     List<(String, String)>? currentTrail,
   }) : super(

@@ -87,8 +87,23 @@ void main() {
     () {
       const defaults = PlaybackPreferences();
       expect(defaults.connections, 8);
-      expect(defaults.segmentSizeMiB, 3);
-      expect(defaults.connectionsFor(CloudPlatform.quark), 8);
+      expect(defaults.segmentSizeMiB, 4);
+      expect(defaults.connectionsFor(CloudPlatform.quark), 128);
+      expect(
+        defaults
+            .copyWith(driveConnections: {CloudPlatform.uc.key: 32})
+            .connectionsFor(CloudPlatform.quark),
+        128,
+      );
+      final custom = defaults.copyWith(
+        driveConnections: {CloudPlatform.quark.key: 256},
+      );
+      expect(
+        PlaybackPreferences.fromJson(
+          custom.toJson(),
+        ).connectionsFor(CloudPlatform.quark),
+        256,
+      );
       final legacy = PlaybackPreferences.fromJson({
         'connections': 4,
         'rate': 1.5,
@@ -110,7 +125,7 @@ void main() {
         'skipIntroSeconds': -1,
         'skipOutroSeconds': 99999,
       });
-      expect(invalid.connections, 32);
+      expect(invalid.connections, 512);
       expect(invalid.connectionsFor(CloudPlatform.uc), 1);
       expect(invalid.connectionsFor(CloudPlatform.quark), 16);
       expect(invalid.connectionsFor(CloudPlatform.baidu), 8);
@@ -132,17 +147,17 @@ void main() {
       );
       addTearDown(fixture.controller.close);
       await fixture.controller.start();
-      expect(fixture.current.connections, 8);
-      await fixture.controller.setConnections(16);
-      expect(fixture.current.connections, 16);
+      expect(fixture.current.connections, 128);
+      await fixture.controller.setConnections(96);
+      expect(fixture.current.connections, 96);
       expect(
         fixture.history.preferences.connectionsFor(CloudPlatform.quark),
-        16,
+        96,
       );
       await fixture.controller.next();
       expect(fixture.current.connections, 8);
       await fixture.controller.next();
-      expect(fixture.current.connections, 16);
+      expect(fixture.current.connections, 96);
     },
   );
 

@@ -82,6 +82,12 @@ func (d *Downloader) PauseAndSave(id string) error {
 	task.lock.Lock()
 	defer task.lock.Unlock()
 	if task.Status == base.DownloadStatusDone {
+		// Direct output leases may be closed or rebound after this call. BT
+		// still owns a torrent client and an upload watcher after completion.
+		// Finish both before the caller releases its output descriptor.
+		if task.fetcher != nil {
+			return task.fetcher.Close()
+		}
 		return nil
 	}
 	task.updateStatus(base.DownloadStatusPause)

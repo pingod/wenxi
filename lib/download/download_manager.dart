@@ -98,12 +98,16 @@ class DownloadManager extends ChangeNotifier {
     this.foreground,
     this.checkNewCloudTask,
     this.onGuestDownload,
+    this.confirmDownload,
     this.transferClock = Stopwatch.new,
   }) {
     space = SpaceBudget(
       () => files.freeBytes(engine.cache.path),
-      availableOnVolume: (volume) =>
-          files.freeBytes(_volumePaths[volume] ?? engine.cache.path),
+      availableOnVolume: (volume) {
+        final path = _volumePaths[volume];
+        require(path != null, '无法确认下载磁盘，请重新开始任务');
+        return files.freeBytes(path!);
+      },
     );
   }
   final StateStore store;
@@ -114,6 +118,7 @@ class DownloadManager extends ChangeNotifier {
   final Future<DownloadSpec> Function(DownloadSpec) refreshSource;
   final void Function(CloudPlatform)? checkNewCloudTask;
   final VoidCallback? onGuestDownload;
+  final Future<void> Function()? confirmDownload;
   @visibleForTesting
   final Stopwatch Function() transferClock;
   final Future<void> Function(DownloadActivity activity)? foreground;
@@ -132,6 +137,7 @@ class DownloadManager extends ChangeNotifier {
   final _playbackHolds = <String, int>{};
   final _cacheAccess = <String, AsyncGate>{};
   final _readable = <String, DownloadReadableState>{};
+  final _directTargets = <String, DirectDownloadTarget>{};
   int _torrentPlaybackHolds = 0;
   bool _postBusy = false;
   Timer? _progressFlush;
@@ -175,7 +181,10 @@ class DownloadManager extends ChangeNotifier {
     require(!_closing, '应用正在退出');
     final current = _tasks[id];
     require(current != null && canStream(current), '此下载任务无法边下边播');
-    _playbackHolds[id] = (_playbackHolds[id] ?? 0) + 1;
+    await (_cacheAccess[id] ??= AsyncGate()).run(() async {
+      require(!_closing && _tasks.containsKey(id), '下载任务已关闭');
+      _playbackHolds[id] = (_playbackHolds[id] ?? 0) + 1;
+    });
     DownloadSpec? source;
     var released = false;
     Future<void> release() async {
@@ -192,6 +201,12 @@ class DownloadManager extends ChangeNotifier {
         await cleanups.ready(source.cleanup);
       }
       if (!_closing) {
+        await _pumpGate.run(() async {
+          if (!_playbackHolds.containsKey(id) && !_running.containsKey(id)) {
+            await engine.pause(id);
+            await _releaseDirectTarget(id, onlyIfUnused: true);
+          }
+        });
         await _drainCompletedCaches();
         _background(cleanups.drain());
       }
@@ -249,14 +264,22 @@ class DownloadManager extends ChangeNotifier {
     }
     RandomAccessFile? handle;
     try {
-      final directory = await engine.checkedTaskDirectory(id);
-      if (directory == null) return null;
-      final path = p.join(directory.path, 'payload.gopeed');
-      if (await FileSystemEntity.type(path, followLinks: false) !=
-          FileSystemEntityType.file) {
-        return null;
+      File file;
+      if (_tasks[id]?.directOutput == true) {
+        final target = _directTargets[id];
+        if (target == null) return null;
+        file = target.file;
+      } else {
+        final directory = await engine.checkedTaskDirectory(id);
+        if (directory == null) return null;
+        final path = p.join(directory.path, 'payload.gopeed');
+        if (await FileSystemEntity.type(path, followLinks: false) !=
+            FileSystemEntityType.file) {
+          return null;
+        }
+        file = File(path);
       }
-      handle = await File(path).open();
+      handle = await file.open();
       if (await handle.length() < end + 1) return null;
       await handle.setPosition(start);
       final bytes = await handle.read(end - start + 1);
@@ -391,6 +414,7 @@ class DownloadManager extends ChangeNotifier {
     Json cacheRoots = const {},
     bool changeDestination = false,
     String? destination,
+    String? completedDownload,
     String? removedDownload,
     List<String> removedDownloads = const [],
     List<DownloadCleanup?> removedCleanups = const [],
@@ -416,6 +440,13 @@ class DownloadManager extends ChangeNotifier {
         draft['settings'] = AppSettings.fromJson(
           draft.obj('settings'),
         ).update({'destination': destination}).toJson();
+      }
+      if (completedDownload != null) {
+        draft['completedCacheRemovals'] = <String>{
+          ...(draft['completedCacheRemovals'] as List? ?? [])
+              .whereType<String>(),
+          completedDownload,
+        }.toList();
       }
       final used = retained
           .where((t) => t.spec.isTorrent)
@@ -475,6 +506,17 @@ class DownloadManager extends ChangeNotifier {
   Future<String> enqueue(DownloadSpec spec, {int? connections}) async =>
       (await enqueueAll([spec], connections: connections)).single;
 
+  bool _usesInternet(DownloadSpec spec) =>
+      spec.profile != 'lan' || spec.platform != null;
+
+  Future<void> _confirmDownload() async {
+    require(!_closing, '应用正在退出');
+    RequestScope.checkpoint();
+    await confirmDownload?.call();
+    RequestScope.checkpoint();
+    require(!_closing, '应用正在退出');
+  }
+
   void _notifyGuestDownload(String id, {bool attempted = false}) {
     final task = _tasks[id];
     if (_closing || task == null || (!attempted && !task.spec.guestDownload)) {
@@ -498,14 +540,30 @@ class DownloadManager extends ChangeNotifier {
     List<DownloadSpec> specs, {
     String? destination,
     int? connections,
-  }) => _pumpGate.run(() async {
-    require(!_closing, '应用正在退出');
-    RequestScope.checkpoint();
+  }) async {
     require(specs.isNotEmpty && specs.length <= 10000, '请选择 1–10000 个文件');
     require(
       connections == null || connections >= 1 && connections <= 512,
       '线程数请输入 1–512 之间的整数',
     );
+    final selected = List<DownloadSpec>.of(specs, growable: false);
+    if (confirmDownload != null && selected.any(_usesInternet)) {
+      await _confirmDownload();
+    }
+    return _enqueueAll(
+      selected,
+      destination: destination,
+      connections: connections,
+    );
+  }
+
+  Future<List<String>> _enqueueAll(
+    List<DownloadSpec> specs, {
+    String? destination,
+    int? connections,
+  }) => _pumpGate.run(() async {
+    require(!_closing, '应用正在退出');
+    RequestScope.checkpoint();
     final watch = Stopwatch()..start();
     final options = settings;
     // Capture a one-task choice without changing global preferences. Provider
@@ -557,6 +615,7 @@ class DownloadManager extends ChangeNotifier {
           retries: options.retries,
           speedLimit: options.speedLimit,
           destination: target,
+          directOutput: files.directDownloads,
           phase: spec.needsPreparation ? '等待获取下载链接' : '',
           connectionOptions: spec.needsPreparation
               ? {
@@ -622,6 +681,11 @@ class DownloadManager extends ChangeNotifier {
   });
 
   void _validateDownloadUrl(DownloadSpec spec) {
+    require(
+      spec.source?['kind'] != 'remoteSource' || spec.networkPolicy != null,
+      '来源下载权限缺失，请重新解析链接',
+    );
+    spec.networkPolicy?.checkedUrl(spec.url);
     final uri = Uri.tryParse(spec.url);
     require(
       uri != null &&
@@ -632,16 +696,25 @@ class DownloadManager extends ChangeNotifier {
     );
   }
 
-  Future<List<String>> enqueueTorrent(TorrentInfo info, List<int> selected) =>
+  Future<List<String>> enqueueTorrent(
+    TorrentInfo info,
+    List<int> selected,
+  ) async {
+    final indices = selected.toSet().toList()..sort();
+    require(
+      indices.isNotEmpty &&
+          indices.length <= 1000 &&
+          indices.every((i) => i >= 0 && i < info.files.length),
+      '每次请选择 1–1000 个文件',
+    );
+    if (confirmDownload != null) await _confirmDownload();
+    return _enqueueTorrent(info, indices);
+  }
+
+  Future<List<String>> _enqueueTorrent(TorrentInfo info, List<int> indices) =>
       _pumpGate.run(() async {
         require(!_closing, '应用正在退出');
-        final indices = selected.toSet().toList()..sort();
-        require(
-          indices.isNotEmpty &&
-              indices.length <= 1000 &&
-              indices.every((i) => i >= 0 && i < info.files.length),
-          '每次请选择 1–1000 个文件',
-        );
+        RequestScope.checkpoint();
         require(
           !_tasks.values.any(
             (t) =>
@@ -675,6 +748,7 @@ class DownloadManager extends ChangeNotifier {
             retries: options.retries,
             speedLimit: options.speedLimit,
             destination: options.destination,
+            directOutput: files.directDownloads,
           );
         }
         try {
@@ -795,6 +869,20 @@ class DownloadManager extends ChangeNotifier {
 
   /// Changing destinations never moves a live payload or discards a native
   /// checkpoint. Only tasks that have no cache yet adopt the new cache root.
+  Future<bool> _canChangeCacheRoot(DownloadTask task, String cacheRoot) async =>
+      !task.directOutput &&
+      !p.equals(engine.taskCacheRoot(task.id).path, cacheRoot) &&
+      task.downloaded == 0 &&
+      !task.payloadReady &&
+      await FileSystemEntity.type(
+            engine.taskDirectory(task.id).path,
+            followLinks: false,
+          ) ==
+          FileSystemEntityType.notFound &&
+      await Directory(
+        p.rootPrefix(engine.taskCacheRoot(task.id).absolute.path),
+      ).exists();
+
   Future<int> changeDestination(
     String? destination, {
     bool includeUnfinished = false,
@@ -848,20 +936,18 @@ class DownloadManager extends ChangeNotifier {
             }
             final task = _tasks[id];
             if (task == null || task.terminal) continue;
+            if (task.directOutput) {
+              final target = await files.inspectDownloadTarget(id);
+              if (target != null && target['destination'] != destination) {
+                // The native checkpoint belongs to this document. A settings
+                // change must not pair those ranges with a new empty file.
+                continue;
+              }
+            }
             originals[id] = task;
             replacements[id] = task.update({'destination': destination});
             if (cacheRoot != null &&
-                !p.equals(engine.taskCacheRoot(id).path, cacheRoot) &&
-                task.downloaded == 0 &&
-                !task.payloadReady &&
-                await FileSystemEntity.type(
-                      engine.taskDirectory(id).path,
-                      followLinks: false,
-                    ) ==
-                    FileSystemEntityType.notFound &&
-                await Directory(
-                  p.rootPrefix(engine.taskCacheRoot(id).absolute.path),
-                ).exists()) {
+                await _canChangeCacheRoot(task, cacheRoot)) {
               roots[id] = cacheRoot;
             }
           }
@@ -945,7 +1031,23 @@ class DownloadManager extends ChangeNotifier {
     };
   }
 
-  Future<void> resume(String id) => _control(id, () async {
+  Future<void> resume(String id) async {
+    if (confirmDownload == null) return _resume(id);
+    DownloadTask? candidate;
+    // Observe a preceding pause after it commits, then release the task gate
+    // before waiting for UI. A quick pause/resume must still request consent.
+    await _control(id, () async {
+      candidate = _tasks[id];
+    });
+    final current = candidate;
+    if (current == null || current.terminal || current.active) return;
+    if (_usesInternet(current.spec)) await _confirmDownload();
+    return _resume(id);
+  }
+
+  Future<void> _resume(String id) => _control(id, () async {
+    require(!_closing, '应用正在退出');
+    RequestScope.checkpoint();
     _interrupted.remove(id);
     final current = _tasks[id];
     if (current == null || current.terminal || current.active) return;
@@ -1172,6 +1274,16 @@ class DownloadManager extends ChangeNotifier {
   }) async {
     require(!_closing, '应用正在退出');
     final selected = ids.toSet().toList(growable: false);
+    if (confirmDownload != null &&
+        action == DownloadBatchAction.resume &&
+        selected.any((id) {
+          final task = _tasks[id];
+          return task != null &&
+              action.accepts(task) &&
+              _usesInternet(task.spec);
+        })) {
+      await _confirmDownload();
+    }
     try {
       // Hold scheduling so stopping one writer cannot start another selected
       // queued task before its pause or deletion is processed.
@@ -1237,59 +1349,68 @@ class DownloadManager extends ChangeNotifier {
     }
   }
 
-  Future<void> delete(String id, {bool deleteFile = false}) =>
-      _control(id, () async {
-        _interrupted.remove(id);
-        var current = _tasks[id];
-        if (current == null) return;
-        require(!_playbackHolds.containsKey(id), '请先关闭此任务的播放器再删除');
-        DiagnosticLog.event(
-          'download.remove_start',
-          fields: {
-            'ref': DiagnosticLog.reference(id),
-            'status': current.status.name,
-            'deleteFile': deleteFile,
-          },
-        );
-        if (current.active) {
-          _running[id]?.stop();
-          await _update(id, {'status': 'paused', 'speed': 0});
+  Future<void> delete(
+    String id, {
+    bool deleteFile = false,
+  }) => _control(id, () async {
+    _interrupted.remove(id);
+    var current = _tasks[id];
+    if (current == null) return;
+    require(!_playbackHolds.containsKey(id), '请先关闭此任务的播放器再删除');
+    DiagnosticLog.event(
+      'download.remove_start',
+      fields: {
+        'ref': DiagnosticLog.reference(id),
+        'status': current.status.name,
+        'deleteFile': deleteFile,
+      },
+    );
+    if (current.active) {
+      _running[id]?.stop();
+      await _update(id, {'status': 'paused', 'speed': 0});
+    }
+    try {
+      // Completed exports have no file writer left. Their run may still
+      // be waiting for native/cache cleanup, which must not block history.
+      if (current.status != DownloadStatus.completed) await _stop(id);
+      current = _tasks[id]!;
+      if (deleteFile) {
+        var savedPath = current.savedPath;
+        if (savedPath == null && current.directOutput) {
+          final target = await files.inspectDownloadTarget(id);
+          if (target != null &&
+              (target.boolean('published') || target.boolean('publishing'))) {
+            savedPath = await _finishStoredTarget(id, target);
+          }
         }
-        try {
-          // Completed exports have no file writer left. Their run may still
-          // be waiting for native/cache cleanup, which must not block history.
-          if (current.status != DownloadStatus.completed) await _stop(id);
-          current = _tasks[id]!;
-          if (deleteFile) await files.delete(current.savedPath);
-          _tasks.remove(id);
-          // Once writers are stopped, persist removal before slow native or
-          // filesystem cleanup. The durable markers retry after a restart.
-          await _persist(removedDownload: id);
-          _guestDownloadBatches.remove(id);
-          DiagnosticLog.event(
-            'download.record_removed',
-            fields: {'ref': DiagnosticLog.reference(id)},
-          );
-          notifyListeners();
-          _background(_drainRemovedDownloads());
-          _background(_readyRemovedCleanup(current.spec.cleanup));
-        } catch (e, stack) {
-          DiagnosticLog.error(
-            'download.remove_failed',
-            e,
-            stack,
-            fields: {
-              'ref': DiagnosticLog.reference(id),
-              'deleteFile': deleteFile,
-            },
-          );
-          _tasks[id] ??= current!;
-          await _update(id, {
-            'error': e is AppException ? e.message : '删除未完成，记录已保留，请重试',
-          });
-          rethrow;
-        }
+        await files.delete(savedPath);
+      }
+      _tasks.remove(id);
+      // Once writers are stopped, persist removal before slow native or
+      // filesystem cleanup. The durable markers retry after a restart.
+      await _persist(removedDownload: id);
+      _guestDownloadBatches.remove(id);
+      DiagnosticLog.event(
+        'download.record_removed',
+        fields: {'ref': DiagnosticLog.reference(id)},
+      );
+      notifyListeners();
+      _background(_drainRemovedDownloads());
+      _background(_readyRemovedCleanup(current.spec.cleanup));
+    } catch (e, stack) {
+      DiagnosticLog.error(
+        'download.remove_failed',
+        e,
+        stack,
+        fields: {'ref': DiagnosticLog.reference(id), 'deleteFile': deleteFile},
+      );
+      _tasks[id] ??= current!;
+      await _update(id, {
+        'error': e is AppException ? e.message : '删除未完成，记录已保留，请重试',
       });
+      rethrow;
+    }
+  });
 
   Future<DownloadBatchResult?> _deleteIdleRecords(List<String> ids) async {
     bool idle() => ids.every((id) {
@@ -1391,6 +1512,7 @@ class DownloadManager extends ChangeNotifier {
       try {
         await engine.remove(id);
         if (_tasks.containsKey(id)) continue;
+        await _cleanRemovedTarget(id);
         await _deleteCache(id);
         await store.change((draft) {
           draft['downloadRemovals'] = (draft['downloadRemovals'] as List? ?? [])
@@ -1427,14 +1549,7 @@ class DownloadManager extends ChangeNotifier {
         continue;
       }
       try {
-        await engine.remove(id);
-        await _deleteCache(id);
-        await store.change((draft) {
-          draft['completedCacheRemovals'] =
-              (draft['completedCacheRemovals'] as List? ?? [])
-                  .where((value) => value != id)
-                  .toList();
-        });
+        await _cleanCompletedDownload(id);
       } catch (error, stack) {
         DiagnosticLog.error('download.playback_cache_cleanup', error, stack);
       }
@@ -1442,12 +1557,165 @@ class DownloadManager extends ChangeNotifier {
   });
 
   Future<void> _deleteCache(String id) =>
-      (_cacheAccess[id] ??= AsyncGate()).run(() async {
-        _readable.remove(id);
-        final directory = await engine.checkedTaskDirectory(id);
-        if (directory == null) return;
-        await directory.delete(recursive: true);
-      });
+      (_cacheAccess[id] ??= AsyncGate()).run(() => _deleteCacheUnlocked(id));
+
+  Future<void> _deleteCacheUnlocked(String id) async {
+    _readable.remove(id);
+    final directory = await engine.checkedTaskDirectory(id);
+    if (directory == null) return;
+    await directory.delete(recursive: true);
+  }
+
+  /// Preserve checkpoints made by older versions. Only tasks with no cached
+  /// payload can adopt direct output without moving an in-progress file.
+  Future<Json?> _prepareDirectOutput(String id) async {
+    final task = _tasks[id]!;
+    if (!files.directDownloads) {
+      require(!task.directOutput, '此任务需要在安卓设备上继续下载');
+      return null;
+    }
+    final target = await files.inspectDownloadTarget(id);
+    if (target == null) {
+      final directory = await engine.checkedTaskDirectory(id);
+      final hasCache =
+          directory != null &&
+          !await directory.list(followLinks: false).isEmpty;
+      if (!task.directOutput &&
+          (hasCache || task.downloaded > 0 || task.payloadReady)) {
+        return null;
+      }
+      require(
+        !task.directOutput ||
+            !hasCache && task.downloaded == 0 && !task.payloadReady,
+        '下载目标记录已丢失，请重新添加任务；已有文件未被删除',
+      );
+    }
+    if (!task.directOutput) await _update(id, {'directOutput': true});
+    return target;
+  }
+
+  Future<DirectDownloadTarget?> _openDirectTarget(String id, _Run run) async {
+    if (!_tasks[id]!.directOutput) return null;
+    await engine.requireDirectOutput();
+    return (_cacheAccess[id] ??= AsyncGate()).run(() async {
+      run.check();
+      final task = _tasks[id]!;
+      final target = _directTargets[id] ??= await files.openDownloadTarget(
+        id: id,
+        name: task.spec.fileName,
+        relativePath: task.spec.relativePath,
+        destination: task.destination,
+      );
+      // Keep the lease registered even if a pause arrived while opening it;
+      // the run's finally block releases it after every writer has stopped.
+      run.check();
+      return target;
+    });
+  }
+
+  Future<void> _releaseDirectTarget(
+    String id, {
+    bool forget = false,
+    bool onlyIfUnused = false,
+  }) => (_cacheAccess[id] ??= AsyncGate()).run(() async {
+    if (onlyIfUnused && _playbackHolds.containsKey(id)) return;
+    await _releaseDirectTargetUnlocked(id, forget: forget);
+  });
+
+  Future<void> _releaseDirectTargetUnlocked(
+    String id, {
+    bool forget = false,
+  }) async {
+    final target = _directTargets[id];
+    if (target != null) {
+      await files.releaseDownloadTarget(id, target);
+      _directTargets.remove(id);
+      _readable.remove(id);
+    }
+    if (forget) await files.forgetDownloadTarget(id);
+  }
+
+  Future<void> _markCompleted(String id, String savedPath) async {
+    final task = _tasks[id];
+    if (task == null) return;
+    _tasks[id] = task.update({
+      'status': 'completed',
+      'savedPath': savedPath,
+      'error': '',
+      'phase': '',
+      'speed': 0,
+    });
+    notifyListeners();
+    // The journal acknowledgement is retried after a crash. Never forget the
+    // only durable reference to a published file before recording its URI.
+    await _persist(completedDownload: id);
+  }
+
+  Future<void> _cleanCompletedDownload(String id) async {
+    await engine.remove(id);
+    final cleaned = await (_cacheAccess[id] ??= AsyncGate()).run(() async {
+      if (_playbackHolds.containsKey(id)) return false;
+      await _deleteCacheUnlocked(id);
+      await _releaseDirectTargetUnlocked(id, forget: files.directDownloads);
+      return true;
+    });
+    if (!cleaned) return;
+    await store.change((draft) {
+      draft['completedCacheRemovals'] =
+          (draft['completedCacheRemovals'] as List? ?? [])
+              .where((value) => value != id)
+              .toList();
+    });
+  }
+
+  Future<void> _afterCompleted(String id, DownloadSpec spec) async {
+    try {
+      if (!_playbackHolds.containsKey(id)) await _cleanCompletedDownload(id);
+    } catch (_) {
+      await _update(id, {'phase': '已完成，下载记录稍后清理'});
+    }
+    await cleanups.ready(spec.cleanup);
+    _background(cleanups.drain());
+  }
+
+  Future<String> _finishStoredTarget(String id, Json state) async {
+    if (state.boolean('published')) return state.str('uri');
+    final target = await (_cacheAccess[id] ??= AsyncGate()).run(
+      () async => _directTargets[id] ??= await files.openDownloadTarget(
+        id: id,
+        name: state.str('name'),
+        relativePath: state.str('relativePath'),
+        destination: state['destination'] as String?,
+      ),
+    );
+    try {
+      return await files.finishDownloadTarget(id, target, state.str('name'));
+    } finally {
+      await _releaseDirectTarget(id);
+    }
+  }
+
+  /// A removed row may have been published just before its Dart state write
+  /// failed. Finish that publication and keep the file; only partial output
+  /// is discarded when removing history without requesting file deletion.
+  Future<void> _cleanRemovedTarget(String id) async {
+    if (!files.directDownloads) return;
+    var state = await files.inspectDownloadTarget(id);
+    if (state == null) {
+      await _releaseDirectTarget(id);
+      return;
+    }
+    if (state.boolean('publishing') && !state.boolean('published')) {
+      await _finishStoredTarget(id, state);
+      state = {...state, 'published': true};
+    }
+    if (state.boolean('published')) {
+      await _releaseDirectTarget(id, forget: true);
+    } else {
+      await _releaseDirectTarget(id);
+      await files.discardDownloadTarget(id);
+    }
+  }
 
   Future<void> _run(String id, _Run run) async {
     String? newSaved;
@@ -1457,10 +1725,51 @@ class DownloadManager extends ChangeNotifier {
       await _update(id, {'status': 'running', 'error': '', 'phase': '连接中'});
       await _syncForeground();
       run.check();
+      final recordedTarget = await _prepareDirectOutput(id);
+      run.check();
+      if (recordedTarget != null &&
+          (recordedTarget.boolean('published') ||
+              recordedTarget.boolean('publishing'))) {
+        // Verification and fsync preceded the publication journal. A restart
+        // here must finish locally, even if the original URL has expired.
+        if (recordedTarget.boolean('published')) {
+          newSaved = recordedTarget.str('uri');
+        } else {
+          final target = (await _openDirectTarget(id, run))!;
+          await engine.pause(id);
+          run.check();
+          newSaved = await files.finishDownloadTarget(
+            id,
+            target,
+            _tasks[id]!.spec.fileName,
+          );
+        }
+        require(newSaved.isNotEmpty, '下载目标记录无效，文件已保留');
+        final spec = _tasks[id]!.spec;
+        await _markCompleted(id, newSaved);
+        committed = true;
+        await _afterCompleted(id, spec);
+        return;
+      }
+      final task = _tasks[id]!;
+      if (!task.directOutput && task.downloaded == 0 && !task.payloadReady) {
+        // Tasks restored from older versions may have a selected destination
+        // but no per-task cache root. Adopt it before checking disk capacity,
+        // while retaining every existing payload and native checkpoint.
+        final cacheRoot = await files.downloadCacheRoot(task.destination);
+        if (cacheRoot != null && await _canChangeCacheRoot(task, cacheRoot)) {
+          run.check();
+          await _persist(cacheRoots: {id: cacheRoot});
+        }
+      }
+      run.check();
       run.storage = await files.storagePlan(
         engine.taskCacheRoot(id).path,
         _tasks[id]!.destination,
       );
+      if (_tasks[id]!.directOutput) {
+        run.storage = run.storage.forDirectOutput();
+      }
       _volumePaths[run.storage.cache.id] = run.storage.cache.path;
       _volumePaths.putIfAbsent(
         run.storage.target.id,
@@ -1473,13 +1782,16 @@ class DownloadManager extends ChangeNotifier {
       File? output;
       final old = _tasks[id]!;
       if (old.payloadReady) {
-        await engine.checkedTaskDirectory(id);
-        final cached = File(
-          p.join(
-            engine.taskDirectory(id).path,
-            old.hls.isEmpty ? 'payload.gopeed' : 'payload.hls',
-          ),
-        );
+        final target = await _openDirectTarget(id, run);
+        if (target == null) await engine.checkedTaskDirectory(id);
+        final cached =
+            target?.file ??
+            File(
+              p.join(
+                engine.taskDirectory(id).path,
+                old.hls.isEmpty ? 'payload.gopeed' : 'payload.hls',
+              ),
+            );
         if (await cached.exists() && await cached.length() == old.total) {
           output = cached;
         }
@@ -1539,6 +1851,10 @@ class DownloadManager extends ChangeNotifier {
         }
       }
       run.check();
+      // A completed BT task can still seed. Join native writers before
+      // checking/publishing a target whose descriptor will then be released.
+      await engine.pause(id);
+      run.check();
       final readyLength = await output.length();
       await _reserve(id, run, readyLength, readyLength, waitForExport: true);
       run.networkActive = false;
@@ -1552,42 +1868,53 @@ class DownloadManager extends ChangeNotifier {
         if (task.hls.isEmpty) await _verify(output, task.spec, run);
         run.check();
         final length = await output.length();
+        final target = _directTargets[id];
         await _update(id, {
           'payloadReady': true,
           'total': length,
           'downloaded': length,
-          'phase': '保存文件',
+          'phase': target != null ? '完成下载' : '保存文件',
         });
         await _reserve(id, run, length, length);
         var copied = 0, lastUi = 0;
         final saveClock = Stopwatch()..start();
-        _exportProgress[id] = 0;
-        newSaved = await files.save(
-          id: id,
-          source: output,
-          name: task.spec.fileName,
-          relativePath: task.spec.relativePath,
-          destination: task.destination,
-          checkpoint: run.check,
-          onProgress: (written, total) {
-            if (run.stopped) return;
-            final current = written.clamp(copied, length);
-            space.consume(id, run.storage.target.id, current - copied);
-            copied = current;
-            _exportProgress[id] = length == 0 ? 1 : copied / length;
-            if (saveClock.elapsedMilliseconds - lastUi >= 250 ||
-                copied == length) {
-              lastUi = saveClock.elapsedMilliseconds;
-              final task = _tasks[id];
-              if (task != null) {
-                _tasks[id] = task.update({
-                  'phase': '保存文件 ${(_exportProgress[id]! * 100).round()}%',
-                });
-                notifyListeners();
+        if (target != null) {
+          run.check();
+          newSaved = await files.finishDownloadTarget(
+            id,
+            target,
+            task.spec.fileName,
+          );
+        } else {
+          _exportProgress[id] = 0;
+          newSaved = await files.save(
+            id: id,
+            source: output,
+            name: task.spec.fileName,
+            relativePath: task.spec.relativePath,
+            destination: task.destination,
+            checkpoint: run.check,
+            onProgress: (written, total) {
+              if (run.stopped) return;
+              final current = written.clamp(copied, length);
+              space.consume(id, run.storage.target.id, current - copied);
+              copied = current;
+              _exportProgress[id] = length == 0 ? 1 : copied / length;
+              if (saveClock.elapsedMilliseconds - lastUi >= 250 ||
+                  copied == length) {
+                lastUi = saveClock.elapsedMilliseconds;
+                final task = _tasks[id];
+                if (task != null) {
+                  _tasks[id] = task.update({
+                    'phase': '保存文件 ${(_exportProgress[id]! * 100).round()}%',
+                  });
+                  notifyListeners();
+                }
               }
-            }
-          },
-        );
+            },
+          );
+          run.check();
+        }
         DiagnosticLog.event(
           'download.saved',
           fields: {
@@ -1595,39 +1922,13 @@ class DownloadManager extends ChangeNotifier {
             'bytes': length,
             'saveMs': saveClock.elapsedMilliseconds,
             'retries': run.networkRetries,
+            'directOutput': target != null,
             'sameVolume': run.storage.cache.id == run.storage.target.id,
           },
         );
-        run.check();
-        await _update(id, {
-          'status': 'completed',
-          'savedPath': newSaved,
-          'error': '',
-          'phase': '',
-          'speed': 0,
-        });
+        await _markCompleted(id, newSaved);
         committed = true;
-        // Export is already durable. Cache/remote cleanup failures do not undo it.
-        try {
-          if (_playbackHolds.containsKey(id)) {
-            await store.change((draft) {
-              draft['completedCacheRemovals'] = <String>{
-                ...(draft['completedCacheRemovals'] as List? ?? []).map(
-                  (value) => '$value',
-                ),
-                id,
-              }.toList();
-            });
-          } else {
-            await engine.remove(id);
-            await _deleteCache(id);
-          }
-        } catch (_) {
-          await _update(id, {'phase': '已保存，缓存稍后清理'});
-        }
-        // History can be removed while post-export cleanup is still pending.
-        await cleanups.ready(task.spec.cleanup);
-        _background(cleanups.drain());
+        await _afterCompleted(id, task.spec);
       } finally {
         _releasePost();
       }
@@ -1642,11 +1943,12 @@ class DownloadManager extends ChangeNotifier {
             'phase': _tasks[id]?.phase,
             if (e is HttpRequestFailure) 'kind': e.kind,
             if (e is HttpRequestFailure) 'status': e.status ?? 0,
+            if (e is DownloadSpaceException) 'volume': e.volume,
           },
         );
       }
       if (!committed) {
-        if (newSaved != null) {
+        if (newSaved != null && _tasks[id]?.directOutput != true) {
           try {
             await files.delete(newSaved);
           } catch (_) {
@@ -1668,6 +1970,8 @@ class DownloadManager extends ChangeNotifier {
             ? '发送方的源文件已修改，请重新分享后接收'
             : _tasks[id]?.spec.profile == 'lan' && e is DownloadNetworkException
             ? '无法连接发送设备，请确认处于同一局域网且对方保持分享开启'
+            : e is DownloadSpaceException
+            ? _spaceFailureMessage(run, e)
             : e is AppException
             ? e.message
             : e is FileSystemException
@@ -1686,6 +1990,7 @@ class DownloadManager extends ChangeNotifier {
     } finally {
       try {
         await engine.pause(id);
+        await _releaseDirectTarget(id, onlyIfUnused: !_closing);
       } catch (_) {
         if (!committed) lastError = '暂停下载组件失败，重试前请重新打开应用';
       }
@@ -1750,6 +2055,18 @@ class DownloadManager extends ChangeNotifier {
     }
   }
 
+  String _spaceFailureMessage(_Run run, DownloadSpaceException error) {
+    if (!Platform.isWindows || error.volume == null) return error.message;
+    final cacheOnly =
+        error.volume == run.storage.cache.id &&
+        run.storage.cache.id != run.storage.target.id;
+    final volume = cacheOnly ? run.storage.cache : run.storage.target;
+    final disk = p.rootPrefix(volume.path).replaceFirst(RegExp(r'[\\/]+$'), '');
+    if (disk.isEmpty) return error.message;
+    final location = cacheOnly ? '下载缓存' : '下载目录';
+    return '$location所在磁盘（$disk）空间不足，进度已保留，请释放空间后继续';
+  }
+
   Future<void> _prepareSource(
     String id,
     _Run run, {
@@ -1773,7 +2090,9 @@ class DownloadManager extends ChangeNotifier {
               fresh.profile == 'baidu_preview',
           '预览通道暂不可用，保留当前下载地址',
         );
-        final probe = await http.probe(fresh.url, fresh.headers);
+        final probe = await http.probeDownload(
+          settings.githubAcceleration.apply(fresh),
+        );
         run.check();
         require(
           !probe.hls &&
@@ -1884,9 +2203,8 @@ class DownloadManager extends ChangeNotifier {
     }
   }
 
-  Future<Probe> _probe(String id, _Run run) async {
-    final spec = _tasks[id]!.spec;
-    if (spec.profile != 'wopan') return http.probe(spec.url, spec.headers);
+  Future<Probe> _probe(String id, _Run run, DownloadSpec spec) async {
+    if (spec.profile != 'wopan') return http.probeDownload(spec);
     // Use the same TLS implementation as the actual Wopan file transfer.
     // Each native call returns promptly so pause/delete can cancel the probe.
     try {
@@ -1927,9 +2245,16 @@ class DownloadManager extends ChangeNotifier {
     run.httpConnections = null;
     var task = _tasks[id]!;
     if (task.spec.isTorrent) return _torrent(id, run);
-    final probe = await _probe(id, run);
+    _validateDownloadUrl(task.spec);
+    // Choose once per transfer so the probe and native engine use the same
+    // endpoint even if settings change while the connection is being opened.
+    final transferSpec = settings.githubAcceleration.apply(task.spec);
+    final probe = await _probe(id, run, transferSpec);
     run.check();
-    if (probe.hls) return _hls(id, run);
+    if (probe.hls) {
+      require(task.spec.networkPolicy == null, '该来源暂不支持流媒体清单下载');
+      return _hls(id, run);
+    }
     final aliyun = _isAliyun(task.spec);
     require(
       !(task.spec.expectedSize > 0 &&
@@ -1937,7 +2262,8 @@ class DownloadManager extends ChangeNotifier {
           task.spec.expectedSize != probe.identity.total),
       '远端文件长度已变化，请重新添加下载',
     );
-    if (!task.identity.canResume(probe.identity)) {
+    final reset = !task.identity.canResume(probe.identity);
+    if (reset) {
       require(
         !aliyun || task.downloaded == 0,
         '阿里文件的断点信息发生变化，已保留下载进度，请刷新文件列表后确认',
@@ -1973,14 +2299,27 @@ class DownloadManager extends ChangeNotifier {
       if (probe.identity.ifRange != null) 'If-Range': probe.identity.ifRange!,
     };
     run.check();
+    final target = await _openDirectTarget(id, run);
     // The native resume can discard an evicted or truncated payload. Do not
     // reuse the previous run's intervals until its new snapshot arrives.
     await (_cacheAccess[id] ??= AsyncGate()).run(() async {
+      run.check();
       _readable.remove(id);
+      if (reset && target != null) {
+        final handle = await target.file.open(mode: FileMode.append);
+        try {
+          await handle.truncate(0);
+        } finally {
+          await handle.close();
+        }
+      }
+      run.check();
       await engine.begin({
         'id': id,
-        'url': task.spec.url,
+        'url': transferSpec.url,
         'headers': headers,
+        if (task.spec.networkPolicy != null)
+          'networkPolicy': task.spec.networkPolicy!.toJson(),
         'connections': aliyun
             ? run.aliyunRecovery.connections(task.connections)
             : task.connections,
@@ -1991,6 +2330,7 @@ class DownloadManager extends ChangeNotifier {
         'retries': task.retries,
         'speedLimit': task.speedLimit,
         if (aliyun) 'aliyunGroup': _aliyunAccountGroup(task.spec),
+        if (target != null) ...target.engineArguments,
       });
     });
     var persisted = 0;
@@ -2098,13 +2438,20 @@ class DownloadManager extends ChangeNotifier {
         }, persist: false);
       }
       if (state.str('status') == 'done') {
-        final file = File(state.str('path')),
-            parent = await engine.taskDirectory(id).resolveSymbolicLinks();
-        require(
-          await file.exists() &&
-              p.equals(p.dirname(await file.resolveSymbolicLinks()), parent),
-          '下载结果路径无效',
-        );
+        final file = target?.file ?? File(state.str('path'));
+        if (target != null) {
+          require(
+            state.str('path') == target.path && await file.exists(),
+            '下载目标已失效',
+          );
+        } else {
+          final parent = await engine.taskDirectory(id).resolveSymbolicLinks();
+          require(
+            await file.exists() &&
+                p.equals(p.dirname(await file.resolveSymbolicLinks()), parent),
+            '下载结果路径无效',
+          );
+        }
         require(
           currentTotal <= 0 || await file.length() == currentTotal,
           '下载文件长度不完整',
@@ -2221,6 +2568,8 @@ class DownloadManager extends ChangeNotifier {
       overhead: boundaryBytes,
     );
     run.check();
+    final target = await _openDirectTarget(id, run);
+    run.check();
     await engine.begin({
       'id': id,
       'url': task.spec.url,
@@ -2229,6 +2578,7 @@ class DownloadManager extends ChangeNotifier {
       'connections': task.connections,
       'retries': task.retries,
       'speedLimit': task.speedLimit,
+      if (target != null) ...target.engineArguments,
     });
     var persisted = 0;
     while (true) {
@@ -2262,6 +2612,15 @@ class DownloadManager extends ChangeNotifier {
         progress: true,
       );
       if (state.str('status') == 'done') {
+        if (target != null) {
+          require(
+            state.str('path') == target.path &&
+                await target.file.exists() &&
+                await target.file.length() == task.total,
+            'BT 下载结果不完整或目标已失效',
+          );
+          return target.file;
+        }
         final file = File(state.str('path')),
             directory = engine.taskDirectory(id);
         final root = await directory.resolveSymbolicLinks();
@@ -2327,8 +2686,15 @@ class DownloadManager extends ChangeNotifier {
     final fingerprint = sha256
         .convert(utf8.encode(jsonEncode(media.urls)))
         .toString();
+    final extension = media.fragmentedMp4 ? '.mp4' : '.ts';
+    final spec = task.spec.copyWith(
+      fileName: '${p.basenameWithoutExtension(task.spec.fileName)}$extension',
+    );
+    // Choose the final container name before creating the durable document.
+    await _update(id, {'spec': spec.toJson()});
+    final target = await _openDirectTarget(id, run);
     final directory = engine.taskDirectory(id);
-    final output = File(p.join(directory.path, 'payload.hls'));
+    final output = target?.file ?? File(p.join(directory.path, 'payload.hls'));
     var index = task.hls.integer('index'), retained = task.hls.integer('bytes');
     if (task.hls.str('fingerprint') != fingerprint ||
         !await output.exists() ||
@@ -2339,14 +2705,7 @@ class DownloadManager extends ChangeNotifier {
       index = 0;
       retained = 0;
     }
-    await engine.checkedTaskDirectory(id, create: true);
-    final handle = await output.open(mode: FileMode.append);
-    await handle.truncate(retained);
-    await handle.setPosition(retained);
-    final extension = media.fragmentedMp4 ? '.mp4' : '.ts';
-    final spec = task.spec.copyWith(
-      fileName: '${p.basenameWithoutExtension(task.spec.fileName)}$extension',
-    );
+    if (target == null) await engine.checkedTaskDirectory(id, create: true);
     await _update(id, {
       'spec': spec.toJson(),
       'total': 0,
@@ -2357,7 +2716,11 @@ class DownloadManager extends ChangeNotifier {
     });
     final speedClock = Stopwatch()..start();
     var received = 0;
+    run.check();
+    final handle = await output.open(mode: FileMode.append);
     try {
+      await handle.truncate(retained);
+      await handle.setPosition(retained);
       for (; index < media.urls.length; index++) {
         var success = false;
         for (var attempt = 0; attempt <= task.retries; attempt++) {
@@ -2433,6 +2796,9 @@ class DownloadManager extends ChangeNotifier {
     _guestDownloadBatches.clear();
     await _removalGate.run(() async {});
     await engine.close();
+    for (final id in _directTargets.keys.toList()) {
+      await _releaseDirectTarget(id);
+    }
     await store.flush();
   }
 

@@ -102,6 +102,7 @@ void main() {
     double scale = 1,
     bool missingFiles = false,
     bool blockedInspection = false,
+    bool unfinishedSavedFile = false,
   }) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = size;
@@ -124,7 +125,8 @@ void main() {
         ('failed', '等待重试的文件.zip', DownloadStatus.failed, 1),
       ]) {
         String? savedPath;
-        if (status == DownloadStatus.completed) {
+        if (status == DownloadStatus.completed ||
+            unfinishedSavedFile && status == DownloadStatus.failed) {
           savedPath = p.join(root.path, '$id.mp4');
           await File(savedPath).writeAsBytes([1, 2, 3, 4]);
           if (missingFiles) {
@@ -175,7 +177,7 @@ void main() {
         key: const Key('selection-capture'),
         child: AsterLinkApp(
           services,
-          initialTab: 2,
+          initialTab: 3,
           fontFamily: systemFont ? 'FixtureUI' : null,
         ),
       ),
@@ -624,6 +626,251 @@ void main() {
       );
       await tester.runAsync(() async {
         expect(await File(keep).exists(), isFalse);
+      });
+    },
+  );
+
+  testWidgets(
+    'Overflow cleanup removes all download records and keeps saved files by default',
+    (tester) async {
+      final (services, _, files) = await render(tester);
+      final paths = [
+        'completed-a',
+        'completed-b',
+      ].map((id) => services.downloads.task(id)!.savedPath!).toList();
+      await tester.tap(find.byTooltip('更多操作'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('清理下载记录'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('全部 4 条下载记录'), findsOneWidget);
+      expect(
+        tester
+            .widget<CheckboxListTile>(
+              find.byKey(const Key('downloads-clear-files')),
+            )
+            .value,
+        isFalse,
+      );
+      await tester.tap(find.byKey(const Key('downloads-confirm-clear')));
+      await waitFor(tester, () => services.downloads.tasks.isEmpty);
+      expect(files.deletes, 0);
+      await tester.runAsync(() async {
+        for (final path in paths) {
+          expect(await File(path).exists(), true);
+        }
+      });
+    },
+  );
+
+  for (final label in ['清理下载记录', '清理失败任务']) {
+    testWidgets('Cancelling $label preserves every task and file', (
+      tester,
+    ) async {
+      final (services, _, files) = await render(tester);
+      await tester.tap(find.byTooltip('更多操作'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(label));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('downloads-clear-files')));
+      await tester.tap(find.widgetWithText(TextButton, '取消'));
+      await tester.pumpAndSettle();
+      expect(services.downloads.tasks.length, 4);
+      expect(files.deletes, 0);
+    });
+  }
+
+  for (final deleteFiles in [false, true]) {
+    testWidgets(
+      'Failed cleanup only removes failed tasks; delete files=$deleteFiles',
+      (tester) async {
+        final (services, _, files) = await render(
+          tester,
+          unfinishedSavedFile: true,
+        );
+        final residual = services.downloads.task('failed')!.savedPath!;
+        final completed = services.downloads.task('completed-a')!.savedPath!;
+        await tester.tap(find.byTooltip('更多操作'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('清理失败任务'));
+        await tester.pumpAndSettle();
+        expect(find.textContaining('当前 1 个失败任务'), findsOneWidget);
+        expect(
+          tester
+              .widget<CheckboxListTile>(
+                find.byKey(const Key('downloads-clear-files')),
+              )
+              .value,
+          false,
+        );
+        if (deleteFiles) {
+          await tester.tap(find.byKey(const Key('downloads-clear-files')));
+        }
+        await tester.tap(find.byKey(const Key('downloads-confirm-clear')));
+        await waitFor(tester, () => services.downloads.task('failed') == null);
+        expect(
+          services.downloads.tasks.map((task) => task.id),
+          unorderedEquals(['completed-a', 'completed-b', 'paused']),
+        );
+        expect(files.deletes, deleteFiles ? 1 : 0);
+        await tester.runAsync(() async {
+          expect(await File(residual).exists(), !deleteFiles);
+          expect(await File(completed).exists(), true);
+        });
+        await tester.tap(find.byTooltip('更多操作'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('清理失败任务'));
+        await tester.pumpAndSettle();
+        expect(find.byType(AlertDialog), findsNothing);
+        expect(find.text('暂无可清理的失败任务'), findsOneWidget);
+      },
+    );
+  }
+
+  testWidgets(
+    'Failed cleanup keeps tasks resumed while confirmation was open',
+    (tester) async {
+      final (services, native, files) = await render(tester);
+      await tester.tap(find.byTooltip('更多操作'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('清理失败任务'));
+      await tester.pumpAndSettle();
+      final resume = services.downloads.resume('failed');
+      await waitFor(tester, () => native.begins.isNotEmpty);
+      await resume;
+      await tester.tap(find.byKey(const Key('downloads-clear-files')));
+      await tester.tap(find.byKey(const Key('downloads-confirm-clear')));
+      await tester.pumpAndSettle();
+      expect(services.downloads.tasks, hasLength(4));
+      expect(services.downloads.task('failed')!.active, true);
+      expect(files.deletes, 0);
+      expect(find.text('暂无可清理的失败任务'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'Failed cleanup retains a task whose residual file cannot be removed',
+    (tester) async {
+      final (services, _, files) = await render(
+        tester,
+        unfinishedSavedFile: true,
+      );
+      final residual = services.downloads.task('failed')!.savedPath!;
+      files.failPaths.add(residual);
+      await tester.tap(find.byTooltip('更多操作'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('清理失败任务'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('downloads-clear-files')));
+      await tester.tap(find.byKey(const Key('downloads-confirm-clear')));
+      await waitFor(
+        tester,
+        () => services.downloads.task('failed')!.error == '文件正在使用',
+      );
+      expect(services.downloads.tasks, hasLength(4));
+      expect(files.deletes, 1);
+      expect(find.textContaining('1 条暂未清理'), findsOneWidget);
+      await tester.runAsync(
+        () async => expect(await File(residual).exists(), true),
+      );
+    },
+  );
+
+  testWidgets(
+    'Cleanup can delete downloaded and residual files while retaining a deletion failure',
+    (tester) async {
+      final (services, _, files) = await render(
+        tester,
+        unfinishedSavedFile: true,
+      );
+      final retained = services.downloads.task('completed-a')!.savedPath!;
+      final removed = [
+        'completed-b',
+        'failed',
+      ].map((id) => services.downloads.task(id)!.savedPath!).toList();
+      files.failPaths.add(retained);
+      await tester.tap(find.byTooltip('更多操作'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('清理下载记录'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('downloads-clear-files')));
+      await tester.tap(find.byKey(const Key('downloads-confirm-clear')));
+      await waitFor(tester, () => services.downloads.tasks.length == 1);
+      expect(services.downloads.tasks.single.id, 'completed-a');
+      expect(services.downloads.tasks.single.error, '文件正在使用');
+      await tester.runAsync(() async {
+        expect(await File(retained).exists(), isTrue);
+        for (final path in removed) {
+          expect(await File(path).exists(), isFalse);
+        }
+      });
+    },
+  );
+
+  testWidgets(
+    'A failed task without an exported path still offers local file deletion',
+    (tester) async {
+      final (services, _, _) = await render(tester);
+      expect(services.downloads.task('failed')!.savedPath, isNull);
+      await tester.tap(row('failed'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('downloads-remove-record')));
+      await tester.pumpAndSettle();
+      expect(find.text('同时删除本地文件'), findsOneWidget);
+      expect(find.textContaining('自动清理未完成缓存'), findsOneWidget);
+      expect(
+        tester.widget<CheckboxListTile>(find.byType(CheckboxListTile)).value,
+        false,
+      );
+      await tester.tap(find.byType(CheckboxListTile));
+      await tester.tap(
+        find.byKey(const Key('downloads-confirm-single-delete')),
+      );
+      await waitFor(tester, () => services.downloads.task('failed') == null);
+      expect(services.downloads.task('paused'), isNotNull);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'Failed and paused tasks show the batch prompt and remove only selected residual files',
+    (tester) async {
+      final (services, _, _) = await render(tester, unfinishedSavedFile: true);
+      final residual = services.downloads.task('failed')!.savedPath!;
+      final kept = services.downloads.task('completed-a')!.savedPath!;
+      await select(tester, 'failed');
+      await tester.tap(row('paused'));
+      await tester.tap(action('delete'));
+      await tester.pumpAndSettle();
+      expect(find.text('同时删除本地文件'), findsOneWidget);
+      expect(
+        tester.widget<CheckboxListTile>(find.byType(CheckboxListTile)).value,
+        false,
+      );
+      await tester.tap(find.byType(CheckboxListTile));
+      await tester.tap(find.byKey(const Key('downloads-confirm-delete')));
+      await waitFor(tester, () => services.downloads.tasks.length == 2);
+      await tester.runAsync(() async {
+        expect(await File(residual).exists(), false);
+        expect(await File(kept).exists(), true);
+      });
+    },
+  );
+
+  testWidgets(
+    'Unchecking file deletion keeps a failed task residual while removing its record',
+    (tester) async {
+      final (services, _, _) = await render(tester, unfinishedSavedFile: true);
+      final residual = services.downloads.task('failed')!.savedPath!;
+      await tester.tap(row('failed'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('downloads-remove-record')));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const Key('downloads-confirm-single-delete')),
+      );
+      await waitFor(tester, () => services.downloads.task('failed') == null);
+      await tester.runAsync(() async {
+        expect(await File(residual).exists(), true);
       });
     },
   );

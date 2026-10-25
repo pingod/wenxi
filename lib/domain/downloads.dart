@@ -1,4 +1,5 @@
 import '../core/json.dart';
+import 'download_retries.dart';
 import 'models.dart';
 
 enum DownloadStatus {
@@ -114,7 +115,7 @@ class DownloadTask {
     this.total = 0,
     this.speed = 0,
     this.connections = 64,
-    this.retries = 3,
+    this.retries = defaultDownloadRetries,
     this.speedLimit = 0,
     this.destination,
     this.savedPath,
@@ -123,6 +124,7 @@ class DownloadTask {
     this.phase = '',
     this.identity = const RemoteIdentity(0, null, null),
     this.payloadReady = false,
+    this.directOutput = false,
     this.hls = const {},
     this.connectionOptions = const {},
   });
@@ -141,6 +143,7 @@ class DownloadTask {
   final DownloadRecoveryAction recoveryAction;
   final RemoteIdentity identity;
   final bool payloadReady;
+  final bool directOutput;
   final Json hls;
   final Map<String, int> connectionOptions;
   bool get active =>
@@ -174,6 +177,7 @@ class DownloadTask {
     'phase': phase,
     'identity': identity.toJson(),
     'payloadReady': payloadReady,
+    if (directOutput) 'directOutput': true,
     'hls': hls,
     if (connectionOptions.isNotEmpty) 'connectionOptions': connectionOptions,
   };
@@ -189,7 +193,9 @@ class DownloadTask {
     total: j.integer('total'),
     speed: j.integer('speed'),
     connections: j.integer('connections', 64).clamp(1, 512),
-    retries: j.integer('retries', 3).clamp(0, 3),
+    retries: j
+        .integer('retries', defaultDownloadRetries)
+        .clamp(0, maxDownloadRetries),
     speedLimit: j.integer('speedLimit'),
     destination: j['destination'] as String?,
     savedPath: j['savedPath'] as String?,
@@ -201,6 +207,7 @@ class DownloadTask {
     phase: j.str('phase'),
     identity: RemoteIdentity.fromJson(j.obj('identity')),
     payloadReady: j.boolean('payloadReady'),
+    directOutput: j.boolean('directOutput'),
     hls: j.obj('hls'),
     connectionOptions: {
       for (final entry in j.obj('connectionOptions').entries)

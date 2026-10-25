@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'dart:collection';
 import 'dart:convert';
 import 'package:flutter/cupertino.dart';
@@ -16,6 +17,7 @@ import '../data/providers/xunlei_protocol.dart';
 import '../domain/auth.dart';
 import '../domain/aliyun_web_password.dart';
 import '../domain/login_guide.dart';
+import '../domain/baidu_web_login.dart';
 import '../domain/models.dart';
 import '../domain/weiyun_web_login.dart';
 import '../domain/tianyi_web_login.dart';
@@ -26,6 +28,9 @@ import 'native_password_login_page.dart';
 import 'github_login_page.dart';
 import 'guangya_sms_login_page.dart';
 import 'login_guide_panel.dart';
+import 'quark_login_page.dart';
+import 'baidu_login_panel.dart';
+import 'wopan_sms_login_page.dart';
 import 'login_webview.dart';
 import 'uc_tv_authorization_page.dart';
 import 'cloud_accounts_page.dart';
@@ -73,6 +78,9 @@ Future<void> openLogin(
           CloudPlatform.tianyi ||
           CloudPlatform.aliyun ||
           CloudPlatform.ilanzou ||
+          CloudPlatform.wopan ||
+          CloudPlatform.quark ||
+          CloudPlatform.baidu ||
           CloudPlatform.guangya => PasswordLoginFlow(
             services,
             platform,
@@ -120,7 +128,13 @@ enum _LoginMethod { password, sms, web, manual }
 
 class _PasswordLoginFlowState extends State<PasswordLoginFlow> {
   late _LoginMethod _method = _defaultMethod;
-  _LoginMethod get _defaultMethod => widget.platform == CloudPlatform.guangya
+  _LoginMethod get _defaultMethod =>
+      {
+        CloudPlatform.guangya,
+        CloudPlatform.wopan,
+        CloudPlatform.quark,
+        CloudPlatform.baidu,
+      }.contains(widget.platform)
       ? _LoginMethod.sms
       : _LoginMethod.password;
   AliyunWebPassword? _webPassword;
@@ -141,6 +155,30 @@ class _PasswordLoginFlowState extends State<PasswordLoginFlow> {
 
   @override
   Widget build(BuildContext context) => switch (_method) {
+    _LoginMethod.sms when widget.platform == CloudPlatform.baidu =>
+      WebLoginPage(
+        widget.services,
+        WebLoginTarget.targets[CloudPlatform.baidu]!,
+        key: const ValueKey('baidu-native-login'),
+        accountId: widget.accountId,
+        baiduNativeLogin: true,
+        onUsePassword: () => _switch(_LoginMethod.web),
+        nativeLoginLabel: '其他登录方式（网页）',
+      ),
+    _LoginMethod.sms when widget.platform == CloudPlatform.quark =>
+      QuarkLoginPage(
+        widget.services,
+        accountId: widget.accountId,
+        onUseWeb: () => _switch(_LoginMethod.web),
+        onUseManual: () => _switch(_LoginMethod.manual),
+      ),
+    _LoginMethod.sms when widget.platform == CloudPlatform.wopan =>
+      WopanSmsLoginPage(
+        widget.services,
+        accountId: widget.accountId,
+        onUseWeb: () => _switch(_LoginMethod.web),
+        onUseManual: () => _switch(_LoginMethod.manual),
+      ),
     _LoginMethod.sms => GuangyaSmsLoginPage(
       widget.services,
       accountId: widget.accountId,
@@ -164,7 +202,10 @@ class _PasswordLoginFlowState extends State<PasswordLoginFlow> {
       accountId: widget.accountId,
       passwordLogin: _webPassword,
       onUsePassword: () => _switch(_defaultMethod),
-      nativeLoginLabel: widget.platform == CloudPlatform.guangya
+      nativeLoginLabel:
+          {CloudPlatform.quark, CloudPlatform.baidu}.contains(widget.platform)
+          ? '切换手机号或扫码登录'
+          : _defaultMethod == _LoginMethod.sms
           ? '切换短信验证码登录'
           : '切换账号密码登录',
     ),
@@ -173,7 +214,10 @@ class _PasswordLoginFlowState extends State<PasswordLoginFlow> {
       widget.platform,
       accountId: widget.accountId,
       onUsePassword: () => _switch(_defaultMethod),
-      nativeLoginLabel: widget.platform == CloudPlatform.guangya
+      nativeLoginLabel:
+          {CloudPlatform.quark, CloudPlatform.baidu}.contains(widget.platform)
+          ? '切换手机号或扫码登录'
+          : _defaultMethod == _LoginMethod.sms
           ? '切换短信验证码登录'
           : '切换账号密码登录',
     ),
@@ -216,8 +260,9 @@ class _PasswordLoginFlowState extends State<PasswordLoginFlow> {
 Future<void> accountMenu(
   BuildContext context,
   AppServices services,
-  CloudPlatform platform,
-) async {
+  CloudPlatform platform, {
+  String? command,
+}) async {
   if (!platform.requiresAccount) {
     message(context, '支持不登录解析');
     return;
@@ -228,79 +273,87 @@ Future<void> accountMenu(
     services.vault.credentialFor(platform, accountId),
   );
   final loginInfo = savedAccountLoginInfo(services.vault, platform, accountId);
-  final action = await showModalBottomSheet<String>(
-    context: context,
-    showDragHandle: true,
-    builder: (context) => SafeArea(
-      child: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: PlatformMark(platform: platform, size: 32),
-              title: Text(platform.label),
-            ),
-            ListTile(
-              leading: const Icon(CupertinoIcons.slider_horizontal_3),
-              title: const Text('账号配置'),
-              subtitle: const Text('查看与复制 Cookie、Token 等登录信息'),
-              onTap: () => Navigator.pop(context, 'info'),
-            ),
-            ListTile(
-              leading: const Icon(CupertinoIcons.arrow_clockwise),
-              title: Text(
-                platform == CloudPlatform.github ? '刷新账号信息' : '刷新账号容量',
-              ),
-              onTap: () => Navigator.pop(context, 'refresh'),
-            ),
-            ListTile(
-              leading: const Icon(CupertinoIcons.person_crop_circle),
-              title: Text(stored ? '重新登录当前账号' : '登录账号'),
-              onTap: () => Navigator.pop(context, 'login'),
-            ),
-            ListTile(
-              leading: const Icon(CupertinoIcons.person_2),
-              title: const Text('多账号管理'),
-              subtitle: Text(
-                '已保存 ${services.vault.profiles(platform).length} 个账号',
-              ),
-              onTap: () => Navigator.pop(context, 'accounts'),
-            ),
-            ListTile(
-              leading: const Icon(CupertinoIcons.doc_on_clipboard),
-              title: const Text('手动填写登录信息'),
-              onTap: () => Navigator.pop(context, 'manual'),
-            ),
-            if (services.vault.credentialFor(platform, accountId) != null)
-              ListTile(
-                leading: const Icon(CupertinoIcons.doc_on_doc),
-                title: Text(loginInfo.copyLabel),
-                onTap: () => Navigator.pop(context, 'copyLogin'),
-              ),
-            if (platform == CloudPlatform.uc && stored)
-              ListTile(
-                leading: const Icon(CupertinoIcons.tv),
-                title: const Text('TV 播放授权'),
-                subtitle: Text(
-                  UcTvService.status(services.vault.credential(platform)),
+  final action =
+      command ??
+      await showModalBottomSheet<String>(
+        context: context,
+        showDragHandle: true,
+        builder: (context) => SafeArea(
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ListTile(
+                  leading: PlatformMark(platform: platform, size: 32),
+                  title: Text(platform.label),
                 ),
-                onTap: () => Navigator.pop(context, 'ucTv'),
-              ),
-            if (stored)
-              ListTile(
-                leading: const Icon(
-                  CupertinoIcons.square_arrow_right,
-                  color: Colors.red,
+                ListTile(
+                  leading: const Icon(CupertinoIcons.slider_horizontal_3),
+                  title: const Text('账号配置'),
+                  subtitle: const Text('查看与复制 Cookie、Token 等登录信息'),
+                  onTap: () => Navigator.pop(context, 'info'),
                 ),
-                title: const Text('退出账号', style: TextStyle(color: Colors.red)),
-                onTap: () => Navigator.pop(context, 'logout'),
-              ),
-          ],
+                ListTile(
+                  leading: const Icon(CupertinoIcons.arrow_clockwise),
+                  title: Text(
+                    platform == CloudPlatform.github ? '刷新账号信息' : '刷新账号容量',
+                  ),
+                  onTap: () => Navigator.pop(context, 'refresh'),
+                ),
+                ListTile(
+                  leading: const Icon(CupertinoIcons.person_crop_circle),
+                  title: Text(stored ? '重新登录当前账号' : '登录账号'),
+                  onTap: () => Navigator.pop(context, 'login'),
+                ),
+                ListTile(
+                  leading: const Icon(CupertinoIcons.person_2),
+                  title: const Text('多账号管理'),
+                  subtitle: Text(
+                    '已保存 ${services.vault.profiles(platform).length} 个账号',
+                  ),
+                  onTap: () => Navigator.pop(context, 'accounts'),
+                ),
+                ListTile(
+                  leading: const Icon(CupertinoIcons.doc_on_clipboard),
+                  title: const Text('手动填写登录信息'),
+                  onTap: () => Navigator.pop(context, 'manual'),
+                ),
+                if (services.vault.credentialFor(platform, accountId) != null)
+                  ListTile(
+                    leading: const Icon(CupertinoIcons.doc_on_doc),
+                    title: Text(loginInfo.copyLabel),
+                    onTap: () => Navigator.pop(context, 'copyLogin'),
+                  ),
+                if (platform == CloudPlatform.uc && stored)
+                  ListTile(
+                    leading: const Icon(CupertinoIcons.tv),
+                    title: const Text('TV 播放授权'),
+                    subtitle: Text(
+                      UcTvService.status(services.vault.credential(platform)),
+                    ),
+                    onTap: () => Navigator.pop(context, 'ucTv'),
+                  ),
+                if (stored)
+                  ListTile(
+                    leading: const Icon(
+                      CupertinoIcons.square_arrow_right,
+                      color: Colors.red,
+                    ),
+                    title: const Text(
+                      '退出账号',
+                      style: TextStyle(color: Colors.red),
+                    ),
+                    onTap: () => Navigator.pop(context, 'logout'),
+                  ),
+              ],
+            ),
+          ),
         ),
-      ),
-    ),
-  );
-  if (!context.mounted) return;
+      );
+  if (!context.mounted ||
+      services.vault.activeAccountId(platform) != accountId) {
+    return;
+  }
   if (action != null &&
       action != 'logout' &&
       action != 'copyLogin' &&
@@ -361,6 +414,7 @@ class WebLoginPage extends StatefulWidget {
     this.onUsePassword,
     this.nativeLoginLabel = '切换账号密码登录',
     this.passwordLogin,
+    this.baiduNativeLogin = false,
     this.accountId,
     super.key,
   });
@@ -370,6 +424,7 @@ class WebLoginPage extends StatefulWidget {
   final VoidCallback? onUsePassword;
   final String nativeLoginLabel;
   final AliyunWebPassword? passwordLogin;
+  final bool baiduNativeLogin;
   @override
   State<WebLoginPage> createState() => _WebLoginPageState();
 }
@@ -389,7 +444,27 @@ class _WebLoginPageState extends State<WebLoginPage>
   Timer? timer;
   final clock = Stopwatch()..start(), policy = LoginPollingPolicy();
   final _storageSession = newId();
+  final _baiduSession = newId();
+  Widget? _baiduView;
+  int _baiduViewRevision = 0;
+  late final String? _baiduSelection;
+  Map<String, dynamic> _baiduState = {};
+  bool _baiduWebVisible = false, _baiduQrMode = false, _baiduExecuting = false;
+  bool _baiduAutoReturn = false;
+  String _baiduError = '';
+  bool get _baiduNative =>
+      widget.baiduNativeLogin && widget.target.platform == CloudPlatform.baidu;
+  bool get _baiduBusy =>
+      _baiduExecuting ||
+      const {
+        'sending',
+        'submitting',
+        'completing',
+      }.contains(_baiduState['phase']);
   final _windows = <_WebLoginWindow>[];
+  int _pollSequence = 0;
+  bool get _flushLogin =>
+      Platform.isWindows && widget.target.platform == CloudPlatform.baidu;
   String _weiyunCaptureState = '';
   String _tianyiBrowserId = '', _tianyiCaptureState = '';
   bool ready = false,
@@ -402,7 +477,11 @@ class _WebLoginPageState extends State<WebLoginPage>
       passwordSent = false,
       passwordFallback = false;
   double progress = 0;
-  String status = '完成网页登录后将自动保存登录信息', error = '';
+  String get _initialStatus => widget.target.platform == CloudPlatform.xunlei
+      ? '小米账号可在网页底部「更多方式」中登录，完成后自动保存'
+      : '完成网页登录后将自动保存登录信息';
+  late String status = _initialStatus;
+  String error = '';
   bool get active => mounted && !leaving && !completed;
   bool get checking => checkingWeb != null;
   late final diagnostics = WebLoginDiagnostics(widget.target.platform);
@@ -415,12 +494,26 @@ class _WebLoginPageState extends State<WebLoginPage>
       (_sameWeb(controller, web) ||
           _windows.any((window) => _sameWeb(window.controller, web)));
 
-  Future<void> _forgetBrowserCookies({bool logFailure = true}) async {
+  Future<void> _forgetBrowserCookies({
+    bool logFailure = true,
+    bool requireSuccess = false,
+  }) async {
     final manager = cookies;
     if (manager == null) return;
     try {
+      diagnostics.record(
+        'cookie_cleanup_started',
+        stage: 'cleanup',
+        flush: _flushLogin,
+      );
       await manager.deleteAllCookies();
+      diagnostics.record(
+        'cookie_cleanup_completed',
+        stage: 'cleanup',
+        flush: _flushLogin,
+      );
     } catch (error, stack) {
+      if (requireSuccess) rethrow;
       if (!logFailure) return;
       diagnostics.record(
         'cookie_cleanup_failed',
@@ -434,7 +527,9 @@ class _WebLoginPageState extends State<WebLoginPage>
 
   void _cancel() {
     if (leaving || completed) return;
+    diagnostics.record('cancel_requested', stage: 'close', flush: _flushLogin);
     leaving = true;
+    if (_baiduNative) unawaited(_baiduLifecycle('close'));
     widget.passwordLogin?.clear();
     timer?.cancel();
     widget.services.login.invalidate(widget.target.platform);
@@ -450,6 +545,9 @@ class _WebLoginPageState extends State<WebLoginPage>
   @override
   void initState() {
     super.initState();
+    _baiduSelection = widget.services.vault.activeAccountId(
+      CloudPlatform.baidu,
+    );
     if (widget.passwordLogin != null) status = '正在打开官方密码登录，出现安全验证时请按网页提示完成';
     WidgetsBinding.instance.addObserver(this);
     unawaited(_initialize());
@@ -458,7 +556,220 @@ class _WebLoginPageState extends State<WebLoginPage>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     visible = state == AppLifecycleState.resumed;
-    if (visible) unawaited(_poll());
+    if (_baiduNative) {
+      unawaited(
+        _baiduLifecycle(visible ? 'resume' : 'pause').then((_) {
+          if (visible) unawaited(_poll());
+        }),
+      );
+    } else if (visible) {
+      unawaited(_poll());
+    }
+  }
+
+  Future<void> _baiduLifecycle(String action) async {
+    try {
+      await controller
+          ?.evaluateJavascript(
+            source: BaiduWebLogin.command(_baiduSession, action),
+          )
+          .timeout(const Duration(seconds: 3));
+    } catch (_) {
+      // The document may already be closing or navigating to official SSO.
+    }
+  }
+
+  bool _baiduOwnerCurrent() =>
+      widget.services.vault.activeAccountId(CloudPlatform.baidu) ==
+      _baiduSelection;
+
+  Future<void> _syncBaidu() async {
+    final web = controller;
+    if (!_baiduNative ||
+        web == null ||
+        !_current(web) ||
+        !visible ||
+        manualOpen) {
+      return;
+    }
+    if (!_baiduOwnerCurrent()) {
+      await _baiduLifecycle('close');
+      if (active) setState(() => _baiduError = '账号已发生变化，请返回后重新登录');
+      return;
+    }
+    try {
+      final url = (await web.getUrl().timeout(
+        const Duration(seconds: 3),
+      ))?.toString();
+      if (!_current(web) || manualOpen) return;
+      if (!BaiduWebLogin.trusted(url)) {
+        if (url != null && url.startsWith('https://')) {
+          setState(() => _baiduWebVisible = true);
+        }
+        return;
+      }
+      await web
+          .evaluateJavascript(source: BaiduWebLogin.bootstrap(_baiduSession))
+          .timeout(const Duration(seconds: 3));
+      final state = BaiduWebLogin.decode(
+        await web
+            .evaluateJavascript(source: BaiduWebLogin.read(_baiduSession))
+            .timeout(const Duration(seconds: 3)),
+      );
+      final currentUrl = (await web.getUrl().timeout(
+        const Duration(seconds: 3),
+      ))?.toString();
+      if (!_current(web) ||
+          manualOpen ||
+          !_baiduOwnerCurrent() ||
+          !BaiduWebLogin.trusted(currentUrl) ||
+          state.isEmpty) {
+        return;
+      }
+      final previous = _baiduState['phase'];
+      setState(() {
+        _baiduState = state;
+        if (state['mode'] == 'sms' || state['mode'] == 'qrcode') {
+          _baiduQrMode = state['mode'] == 'qrcode';
+        }
+        if (_baiduAutoReturn &&
+            state['phase'] == 'sent' &&
+            previous != 'sent' &&
+            _windows.isEmpty) {
+          _baiduWebVisible = false;
+          _baiduAutoReturn = false;
+          status = '验证码已发送，请输入6位短信验证码';
+        } else if (previous != state['phase'] &&
+            (state['phase'] == 'verify' || state['phase'] == 'completing')) {
+          _baiduWebVisible = true;
+          status = state['phase'] == 'completing'
+              ? '正在完成百度登录…'
+              : '请在百度官方页面完成验证或按提示重试';
+        }
+      });
+    } catch (_) {
+      // A redirect can replace the SDK. Keep its page available for the user.
+    }
+  }
+
+  Future<void> _baiduAction(String action, Map<String, Object?> data) async {
+    final web = controller;
+    if (!active ||
+        !visible ||
+        manualOpen ||
+        !ready ||
+        web == null ||
+        _baiduBusy) {
+      return;
+    }
+    if (!_baiduOwnerCurrent()) {
+      setState(() => _baiduError = '账号已发生变化，请返回后重新登录');
+      return;
+    }
+    FocusScope.of(context).unfocus();
+    setState(() {
+      _baiduExecuting = true;
+      _baiduError = '';
+      if (action == 'send' || action == 'submit') {
+        _baiduAutoReturn = action == 'send';
+        _baiduWebVisible = true;
+        status = action == 'send'
+            ? '请在百度页面完成可能出现的验证码，发送成功后将返回填写短信验证码'
+            : '正在登录，出现安全验证时请在百度页面完成';
+      }
+    });
+    try {
+      widget.services.control.checkCloud(CloudPlatform.baidu);
+      if (!BaiduWebLogin.trusted(
+        (await web.getUrl().timeout(const Duration(seconds: 3)))?.toString(),
+      )) {
+        throw const AppException('请先在百度页面完成当前验证，或刷新后重新登录');
+      }
+      if (!_current(web) || !visible || manualOpen || !_baiduOwnerCurrent()) {
+        return;
+      }
+      // Dispatch once to the current document. Never retry a send or submit on
+      // navigation, timeout, resume, or a delayed SDK initialization.
+      final result = await web
+          .evaluateJavascript(
+            source: BaiduWebLogin.command(_baiduSession, action, {
+              ...data,
+              'id': newId(),
+            }),
+          )
+          .timeout(const Duration(seconds: 5));
+      if (!_current(web) || manualOpen || !_baiduOwnerCurrent()) return;
+      if (result != 'started' && result != 'ready') {
+        throw const AppException('百度登录尚未就绪或正在验证，请在官方页面继续，也可刷新后重试');
+      }
+      if (action == 'mode') {
+        setState(() => _baiduQrMode = data['mode'] == 'qrcode');
+      }
+      await _syncBaidu();
+    } catch (e) {
+      if (_current(web) && !manualOpen) {
+        setState(() {
+          _baiduError = e is AppException
+              ? e.message
+              : '操作未确认，请在百度页面查看结果；不要重复发送验证码';
+          _baiduWebVisible = true;
+        });
+      }
+    } finally {
+      if (active) setState(() => _baiduExecuting = false);
+    }
+  }
+
+  void _showBaiduOfficial() {
+    if (!active) return;
+    setState(() {
+      _baiduAutoReturn = false;
+      _baiduWebVisible = true;
+      status = '请在百度官方页面完成验证，登录成功后将自动保存';
+    });
+  }
+
+  Future<void> _returnBaiduNative() async {
+    if (!active) return;
+    if (_baiduState['mode'] == 'normal' && !_baiduBusy) {
+      await _baiduAction('mode', {'mode': 'sms'});
+    }
+    if (!active) return;
+    setState(() {
+      _baiduWebVisible = false;
+      _baiduAutoReturn = false;
+    });
+  }
+
+  Future<void> _openManual() async {
+    if (manualOpen || !active) return;
+    manualOpen = true;
+    widget.passwordLogin?.clear();
+    widget.services.login.invalidate(widget.target.platform);
+    if (_baiduNative) await _baiduLifecycle('pause');
+    if (!mounted || !active) return;
+    try {
+      final result = await Navigator.push<bool>(
+        context,
+        MaterialPageRoute(
+          builder: (_) => ManualLoginPage(
+            widget.services,
+            widget.target.platform,
+            accountId: widget.accountId,
+          ),
+        ),
+      );
+      if (result == true && mounted && !leaving) {
+        await _forgetBrowserCookies();
+        if (!mounted || leaving) return;
+        completed = true;
+        timer?.cancel();
+        if (mounted) Navigator.pop(context);
+      }
+    } finally {
+      manualOpen = false;
+      if (_baiduNative && active) await _baiduLifecycle('resume');
+    }
   }
 
   Future<void> _initialize() async {
@@ -468,16 +779,28 @@ class _WebLoginPageState extends State<WebLoginPage>
       widget.services.control.checkCloud(widget.target.platform);
       environment = await widget.services.webEnvironment();
       if (!active) return;
+      diagnostics.record(
+        'environment_ready',
+        stage: 'initialize',
+        flush: _flushLogin,
+      );
       widget.services.control.checkCloud(widget.target.platform);
       cookies = CookieManager.instance(webViewEnvironment: environment);
       // SSO cookies may live on authentication hosts that are not part of the
       // provider API domain list. Clear the whole browser jar before rendering
       // so adding an account can never silently reuse the previous login.
-      await cookies!.deleteAllCookies();
+      await _forgetBrowserCookies(requireSuccess: true);
       if (!active) return;
       _tianyiBrowserId = '';
       _tianyiCaptureState = '';
+      _baiduView = null;
+      _baiduViewRevision++;
       setState(() => ready = true);
+      diagnostics.record(
+        'initialize_completed',
+        stage: 'initialize',
+        flush: _flushLogin,
+      );
       timer = Timer.periodic(const Duration(seconds: 2), (_) => _poll());
     } catch (e, stack) {
       if (active) {
@@ -495,7 +818,7 @@ class _WebLoginPageState extends State<WebLoginPage>
     }
   }
 
-  Future<String> _readCredentials(InAppWebViewController web) async {
+  Future<String> _readCredentials(InAppWebViewController web, int poll) async {
     final target = widget.target;
     final readCookies =
         target.localStorageKey == null ||
@@ -504,14 +827,27 @@ class _WebLoginPageState extends State<WebLoginPage>
         target.platform == CloudPlatform.wopan;
     String? page;
     try {
+      diagnostics.record(
+        'location_read_started',
+        stage: 'read_credentials',
+        fields: {'poll': poll},
+        flush: _flushLogin,
+      );
       page = (await web.getUrl().timeout(
         const Duration(seconds: 3),
       ))?.toString();
+      diagnostics.record(
+        'location_read_completed',
+        stage: 'read_credentials',
+        fields: {'poll': poll, 'hasPage': page != null},
+        flush: _flushLogin,
+      );
     } catch (_) {
       if (!readCookies) rethrow;
     }
+    if (!_current(web) || manualOpen) return '';
     Object? storage;
-    if (target.localStorageKey != null && target.canReadLocalStorage(page)) {
+    if (target.localStorageKey != null && target.canPrepareLocalStorage(page)) {
       final preparation = await web
           .evaluateJavascript(
             source: target.prepareStorageScript(_storageSession),
@@ -527,6 +863,7 @@ class _WebLoginPageState extends State<WebLoginPage>
       if (preparation != 'ready') {
         throw const AppException('网页登录存储尚未就绪，请稍候再检测或刷新网页');
       }
+      if (!target.canReadLocalStorage(page)) return '';
       if (_sameWeb(web, controller)) await _submitWebPassword(web);
       if (!_current(web) || manualOpen) return '';
       if (widget.passwordLogin != null && !passwordSent && !passwordFallback) {
@@ -600,15 +937,52 @@ class _WebLoginPageState extends State<WebLoginPage>
     if (readCookies) {
       Object? readError;
       var successfulReads = 0;
+      var hostIndex = 0;
       for (final url in target.cookieUrls(page)) {
+        if (!_current(web) || manualOpen) return '';
+        final readClock = Stopwatch()..start();
+        final index = hostIndex++;
         try {
+          diagnostics.record(
+            'browser_state_read_started',
+            stage: 'read_credentials',
+            fields: {'poll': poll, 'hostIndex': index},
+            flush: _flushLogin,
+          );
           final pairs = await cookies!
               .getCookies(url: WebUri(url), webViewController: web)
               .timeout(const Duration(seconds: 3));
           successfulReads++;
+          diagnostics.record(
+            'browser_state_read_completed',
+            stage: 'read_credentials',
+            fields: {
+              'poll': poll,
+              'hostIndex': index,
+              'entryCount': pairs.length,
+              'durationMs': readClock.elapsedMilliseconds,
+              if (target.platform == CloudPlatform.baidu)
+                'hasLoginSession': pairs.any(
+                  (entry) => entry.name == 'BDUSS' && entry.value.isNotEmpty,
+                ),
+            },
+            flush: _flushLogin,
+          );
           values.add(pairs.map((c) => '${c.name}=${c.value}').join('; '));
         } catch (e) {
           readError = e;
+          diagnostics.record(
+            'browser_state_read_failed',
+            level: 'warning',
+            stage: 'read_credentials',
+            fields: {
+              'poll': poll,
+              'hostIndex': index,
+              'durationMs': readClock.elapsedMilliseconds,
+              'type': e.runtimeType.toString(),
+            },
+            flush: _flushLogin,
+          );
         }
         if (!_current(web) || manualOpen) return '';
       }
@@ -682,9 +1056,25 @@ class _WebLoginPageState extends State<WebLoginPage>
     }
     var web = controller!;
     checkingWeb = web;
+    final poll = ++_pollSequence;
+    final pollClock = Stopwatch()..start();
+    diagnostics.record(
+      'poll_started',
+      stage: 'read_credentials',
+      fields: {
+        'poll': poll,
+        'popupCount': _windows.length,
+        'userInitiated': userInitiated,
+      },
+      flush: _flushLogin,
+    );
     var candidate = '';
     var stage = 'read_credentials';
     try {
+      if (_baiduNative) {
+        await _syncBaidu();
+        if (!active || manualOpen || !_baiduOwnerCurrent()) return;
+      }
       if (userInitiated) setState(() => status = '正在检测登录信息…');
       final target = widget.target;
       final browsers = [
@@ -699,7 +1089,7 @@ class _WebLoginPageState extends State<WebLoginPage>
         web = browser;
         checkingWeb = web;
         try {
-          candidate = await _readCredentials(web);
+          candidate = await _readCredentials(web, poll);
         } catch (e, stack) {
           readError = e;
           readStack = stack;
@@ -736,7 +1126,12 @@ class _WebLoginPageState extends State<WebLoginPage>
       }
       stage = 'validation';
       policy.started(clock.elapsedMilliseconds);
-      diagnostics.record('validation_started', stage: 'validation');
+      diagnostics.record(
+        'validation_started',
+        stage: 'validation',
+        fields: {'poll': poll},
+        flush: _flushLogin,
+      );
       if (mounted) setState(() => status = '正在验证登录信息…');
       await widget.services.login.submitWeb(
         target.platform,
@@ -749,18 +1144,30 @@ class _WebLoginPageState extends State<WebLoginPage>
       // Closing an SSO popup does not cancel its parent login. The account
       // service has already checked cancellation and account ownership.
       if (!active || !ready || manualOpen) return;
-      diagnostics.record('validation_succeeded', stage: 'validation');
+      diagnostics.record(
+        'validation_succeeded',
+        stage: 'validation',
+        fields: {'poll': poll},
+        flush: _flushLogin,
+      );
       await _forgetBrowserCookies();
       if (!active || !ready || manualOpen) return;
       completed = true;
       widget.passwordLogin?.clear();
       timer?.cancel();
       if (mounted && !leaving && !manualOpen) {
+        diagnostics.record(
+          'close_requested',
+          stage: 'close',
+          fields: {'completed': true},
+          flush: _flushLogin,
+        );
         message(context, '${target.platform.shortName}登录成功');
         Navigator.pop(context);
       }
     } catch (e, stack) {
       if ((stage == 'validation' ? active && ready : _current(web)) &&
+          (!_baiduNative || _sameWeb(web, controller)) &&
           !manualOpen) {
         policy.failed(candidate, clock.elapsedMilliseconds);
         diagnostics.record(
@@ -772,9 +1179,25 @@ class _WebLoginPageState extends State<WebLoginPage>
           error: e,
           stack: stack,
         );
-        setState(() => status = errorText(e));
+        setState(() {
+          status = errorText(e);
+          if (_baiduNative) {
+            _baiduError = status;
+            _baiduWebVisible = true;
+          }
+        });
       }
     } finally {
+      diagnostics.record(
+        'poll_completed',
+        stage: stage,
+        fields: {
+          'poll': poll,
+          'durationMs': pollClock.elapsedMilliseconds,
+          'completed': completed,
+        },
+        flush: _flushLogin,
+      );
       if (_sameWeb(checkingWeb, web)) {
         checkingWeb = null;
         if (active) setState(() {});
@@ -843,7 +1266,7 @@ class _WebLoginPageState extends State<WebLoginPage>
     widget.services.login.invalidate(widget.target.platform);
     setState(() {
       passwordFallback = true;
-      status = '完成网页登录后将自动保存登录信息';
+      status = _initialStatus;
     });
   }
 
@@ -851,7 +1274,7 @@ class _WebLoginPageState extends State<WebLoginPage>
     if (!_current(web)) return;
     diagnostics.pageLoaded();
     try {
-      if (widget.target.desktopMode) {
+      if (widget.target.desktopMode && !_baiduNative) {
         await web.evaluateJavascript(source: desktopLoginViewportScript);
       }
       if (widget.target.platform == CloudPlatform.tianyi && _current(web)) {
@@ -861,6 +1284,7 @@ class _WebLoginPageState extends State<WebLoginPage>
       if (attempt != null && _current(web)) {
         await web.evaluateJavascript(source: attempt.bootstrapScript);
       }
+      if (_baiduNative && _sameWeb(web, controller)) await _syncBaidu();
     } catch (_) {
       // A navigation can replace the document; cookie detection can still run.
     }
@@ -888,9 +1312,11 @@ class _WebLoginPageState extends State<WebLoginPage>
     }
     timer?.cancel();
     widget.services.login.invalidate(widget.target.platform);
-    // A dead Android renderer cannot be reused. Removing the platform view
+    // A dead renderer cannot be reused. Removing the platform view
     // lets the explicit retry create a fresh one instead of reloading it.
     controller = null;
+    _baiduView = null;
+    widget.services.invalidateWebEnvironment(environment);
     checkingWeb = null;
     _windows.clear();
     setState(() {
@@ -903,12 +1329,23 @@ class _WebLoginPageState extends State<WebLoginPage>
     if (!active) return;
     final index = _windows.indexWhere((window) => window.id == id);
     if (index < 0) return;
+    diagnostics.record(
+      'popup_close_requested',
+      stage: 'close',
+      fields: {'popupCount': _windows.length},
+      flush: _flushLogin,
+    );
     setState(() => _windows.removeRange(index, _windows.length));
     unawaited(_poll());
   }
 
   Widget _webView({_WebLoginWindow? popup}) => InAppWebView(
-    key: ValueKey(popup?.id ?? 'main-login-window'),
+    key: ValueKey(
+      popup?.id ??
+          (_baiduNative
+              ? 'baidu-login-window-$_baiduViewRevision'
+              : 'main-login-window'),
+    ),
     webViewEnvironment: environment,
     windowId: popup?.id,
     initialUrlRequest: popup == null
@@ -924,7 +1361,14 @@ class _WebLoginPageState extends State<WebLoginPage>
           ..supportMultipleWindows = true
           ..javaScriptCanOpenWindowsAutomatically = true,
     initialUserScripts: UnmodifiableListView([
-      if (widget.target.desktopMode) desktopLoginUserScript(),
+      if (widget.target.desktopMode && !_baiduNative) desktopLoginUserScript(),
+      if (_baiduNative && popup == null)
+        UserScript(
+          source: BaiduWebLogin.bootstrap(_baiduSession),
+          injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+          forMainFrameOnly: true,
+          allowedOriginRules: const {BaiduWebLogin.origin},
+        ),
       if (widget.target.platform == CloudPlatform.tianyi)
         UserScript(
           source: TianyiWebLogin.mobileFormScript,
@@ -963,6 +1407,12 @@ class _WebLoginPageState extends State<WebLoginPage>
     ]),
     onWebViewCreated: (web) {
       if (!active || !ready) return;
+      diagnostics.record(
+        'view_created',
+        stage: 'initialize',
+        fields: {'popup': popup != null},
+        flush: _flushLogin,
+      );
       if (popup == null) {
         controller = web;
       } else if (_windows.contains(popup)) {
@@ -976,6 +1426,7 @@ class _WebLoginPageState extends State<WebLoginPage>
         return false;
       }
       setState(() => _windows.add(_WebLoginWindow(action.windowId)));
+      if (_baiduNative) setState(() => _baiduWebVisible = true);
       diagnostics.record('authorization_window_opened');
       return true;
     },
@@ -1040,12 +1491,36 @@ class _WebLoginPageState extends State<WebLoginPage>
 
   Future<void> _refresh() async {
     if (!active) return;
+    if (_baiduNative) {
+      widget.services.login.invalidate(CloudPlatform.baidu);
+      await _baiduLifecycle('close');
+      if (!active) return;
+      timer?.cancel();
+      controller = null;
+      checkingWeb = null;
+      _windows.clear();
+      setState(() {
+        ready = false;
+        error = '';
+        progress = 0;
+        status = _initialStatus;
+        _baiduView = null;
+        _baiduState = {};
+        _baiduWebVisible = false;
+        _baiduQrMode = false;
+        _baiduExecuting = false;
+        _baiduAutoReturn = false;
+        _baiduError = '';
+      });
+      await _initialize();
+      return;
+    }
     if (error.isNotEmpty) {
       setState(() {
         error = '';
         ready = false;
         progress = 0;
-        status = '完成网页登录后将自动保存登录信息';
+        status = _initialStatus;
       });
       await _initialize();
       return;
@@ -1084,82 +1559,69 @@ class _WebLoginPageState extends State<WebLoginPage>
 
   @override
   Widget build(BuildContext context) => PopScope(
-    canPop: _windows.isEmpty,
+    canPop: _windows.isEmpty && (!_baiduNative || !_baiduWebVisible),
     onPopInvokedWithResult: (didPop, _) {
       if (didPop) {
         _cancel();
       } else if (_windows.isNotEmpty) {
         _closeWindow(_windows.last.id);
+      } else if (_baiduNative && _baiduWebVisible) {
+        unawaited(_returnBaiduNative());
       }
     },
     child: PageFrame(
-      title:
-          '${widget.target.platform.shortName}${widget.passwordLogin == null || passwordFallback ? '网页登录' : '登录验证'}',
+      title: _baiduNative
+          ? '百度${_baiduWebVisible ? '登录验证' : '登录'}'
+          : '${widget.target.platform.shortName}${widget.passwordLogin == null || passwordFallback ? '网页登录' : '登录验证'}',
       actions: [
         IconButton(
           tooltip: '刷新网页',
           onPressed: _refresh,
           icon: const Icon(CupertinoIcons.arrow_clockwise, size: 20),
         ),
-        TextButton(
-          onPressed: () async {
-            if (manualOpen || !active) return;
-            manualOpen = true;
-            widget.passwordLogin?.clear();
-            widget.services.login.invalidate(widget.target.platform);
-            try {
-              final result = await Navigator.push<bool>(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => ManualLoginPage(
-                    widget.services,
-                    widget.target.platform,
-                    accountId: widget.accountId,
-                  ),
-                ),
-              );
-              if (result == true && context.mounted && !leaving) {
-                await _forgetBrowserCookies();
-                if (!context.mounted || leaving) return;
-                completed = true;
-                timer?.cancel();
-                Navigator.pop(context);
-              }
-            } finally {
-              manualOpen = false;
-            }
-          },
-          child: const Text('手动'),
-        ),
+        TextButton(onPressed: _openManual, child: const Text('手动')),
       ],
       child: Column(
         children: [
           if (progress < 1 && ready) LinearProgressIndicator(value: progress),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
-            child: Row(
-              children: [
-                Icon(
-                  checking ? CupertinoIcons.clock : CupertinoIcons.lock_shield,
-                  size: 16,
-                  color: themeAccent(context),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    status,
-                    style: TextStyle(fontSize: 12, color: secondary(context)),
+          if (!_baiduNative || _baiduWebVisible)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
+              child: Row(
+                children: [
+                  Icon(
+                    checking
+                        ? CupertinoIcons.clock
+                        : CupertinoIcons.lock_shield,
+                    size: 16,
+                    color: themeAccent(context),
                   ),
-                ),
-                TextButton(
-                  onPressed: checking ? null : () => _poll(userInitiated: true),
-                  child: const Text('检测登录', style: TextStyle(fontSize: 12)),
-                ),
-              ],
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      status,
+                      style: TextStyle(fontSize: 12, color: secondary(context)),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: checking
+                        ? null
+                        : () => _poll(userInitiated: true),
+                    child: const Text('检测登录', style: TextStyle(fontSize: 12)),
+                  ),
+                ],
+              ),
             ),
-          ),
-          if (widget.onUsePassword != null ||
-              widget.passwordLogin != null && !passwordFallback)
+          if (_baiduNative && _baiduWebVisible)
+            TextButton.icon(
+              key: const ValueKey('baidu-return-native'),
+              onPressed: _returnBaiduNative,
+              icon: const Icon(CupertinoIcons.back, size: 18),
+              label: const Text('返回手机号或扫码登录'),
+            ),
+          if ((!_baiduNative || error.isNotEmpty) &&
+              (widget.onUsePassword != null ||
+                  widget.passwordLogin != null && !passwordFallback))
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
               child: Wrap(
@@ -1196,30 +1658,59 @@ class _WebLoginPageState extends State<WebLoginPage>
                   )
                 : !ready
                 ? const Center(child: CircularProgressIndicator())
-                : Stack(
+                : IndexedStack(
+                    index: _baiduNative && !_baiduWebVisible ? 1 : 0,
                     children: [
-                      Positioned.fill(child: _webView()),
-                      for (final popup in _windows)
-                        Positioned.fill(
-                          key: ValueKey('login-popup-${popup.id}'),
-                          child: ColoredBox(
-                            color: Theme.of(context).scaffoldBackgroundColor,
-                            child: Column(
-                              children: [
-                                Align(
-                                  alignment: Alignment.centerLeft,
-                                  child: TextButton.icon(
-                                    onPressed: () => _closeWindow(popup.id),
-                                    icon: const Icon(
-                                      CupertinoIcons.back,
-                                      size: 18,
+                      Stack(
+                        children: [
+                          Positioned.fill(
+                            child: _baiduNative
+                                ? _baiduView ??= _webView()
+                                : _webView(),
+                          ),
+                          for (final popup in _windows)
+                            Positioned.fill(
+                              key: ValueKey('login-popup-${popup.id}'),
+                              child: ColoredBox(
+                                color: Theme.of(
+                                  context,
+                                ).scaffoldBackgroundColor,
+                                child: Column(
+                                  children: [
+                                    Align(
+                                      alignment: Alignment.centerLeft,
+                                      child: TextButton.icon(
+                                        onPressed: () => _closeWindow(popup.id),
+                                        icon: const Icon(
+                                          CupertinoIcons.back,
+                                          size: 18,
+                                        ),
+                                        label: const Text('返回登录页面'),
+                                      ),
                                     ),
-                                    label: const Text('返回登录页面'),
-                                  ),
+                                    Expanded(child: _webView(popup: popup)),
+                                  ],
                                 ),
-                                Expanded(child: _webView(popup: popup)),
-                              ],
+                              ),
                             ),
+                        ],
+                      ),
+                      if (_baiduNative)
+                        ColoredBox(
+                          color: Theme.of(context).scaffoldBackgroundColor,
+                          child: BaiduLoginPanel(
+                            qrMode: _baiduQrMode,
+                            ready: _baiduState['ready'] == true,
+                            busy: _baiduBusy,
+                            state: _baiduState,
+                            error: _baiduError,
+                            onMode: (qr) => _baiduAction('mode', {
+                              'mode': qr ? 'qrcode' : 'sms',
+                            }),
+                            onAction: _baiduAction,
+                            onShowOfficial: _showBaiduOfficial,
+                            onUseWeb: _switchToPassword,
+                            onUseManual: _openManual,
                           ),
                         ),
                     ],

@@ -25,6 +25,18 @@ public = load('public_files', 'check_public_files.py')
 release = load('release_assets', 'package-release.py')
 settings = load('release_settings', 'prepare-ci-release.py')
 
+BACKEND_ONLY_PATHS = [
+    'backend/src/Routes.php', 'wwwroot/5.com/src/Sources.php',
+    '5.com/config/local.php', '.claude/settings.local.json',
+    'tool/password_updater/updater.py',
+    'tool/password_updater/templates/index.html',
+    '\u542f\u52a8\u5bc6\u7801\u66f4\u65b0\u5668.cmd',
+    'tool/source_runner.dart', 'tool/build-source-runtime.ps1',
+    'tool/tests/source_live_smoke.dart',
+    'docs/SOURCE-RUNTIME-DEPLOYMENT.md',
+    'docs/REMOTE-SOURCE-VERIFICATION.md',
+]
+
 
 class PublicFilesTest(unittest.TestCase):
     def setUp(self):
@@ -102,7 +114,7 @@ class PublicFilesTest(unittest.TestCase):
 
     def test_repository_rules_keep_local_tools_out_of_public_export(self):
         shutil.copy2(ROOT / '.gitignore', self.root / '.gitignore')
-        private_paths = [
+        private_paths = BACKEND_ONLY_PATHS + [
             '\u516c\u544a\u7f16\u8f91\u5668.html',
             'tool/announcement-editor.test.cjs', 'announcements.json',
             'config-1.7.0.json', 'config-2.0.0.json', '\u4ea4\u4e92.txt',
@@ -111,11 +123,17 @@ class PublicFilesTest(unittest.TestCase):
             'docs/QUARK-AUTHENTICATED-DIRECT-DOWNLOAD.md',
             'native/gopeed/internal/protocol/http/build.data',
             'native/gopeed/internal/protocol/http/download.data',
+            'outputs/player-tests.txt', 'outputs/task.network-response',
             'setup.exe', 'app-release.apk', 'download.zip', 'capture.har',
         ]
         public_paths = [
             'config/announcements.example.json', 'docs/ANNOUNCEMENTS.md',
             'lib/domain/announcements.dart', 'docs/images/promo-android.png',
+            'lib/data/parser_rules/server.dart', 'lib/data/sources/runtime.dart',
+            'lib/lan/lan_server.dart', 'native/gopeed/pkg/rest/server.go',
+            'vendor_plugins/asterlink_js/src/asterlink_js.c',
+            'docs/REMOTE-SOURCE-ARCHITECTURE.md', 'docs/REMOTE-SOURCE-SDK.md',
+            'docs/PARSER-RULES.md', 'config/parser-hub.example.json',
             '\u8fdc\u7a0b\u914d\u7f6e\u7f16\u8f91\u5668.html',
             'tool/remote-control-editor.test.cjs',
             'native/third_party/libmpv-android-build-v1.1.7.zip',
@@ -137,13 +155,14 @@ class PublicFilesTest(unittest.TestCase):
     def test_force_added_local_tools_are_rejected_by_staged_check(self):
         subprocess.run(['git', 'init', '--quiet', str(self.root)], check=True)
         shutil.copy2(ROOT / '.gitignore', self.root / '.gitignore')
-        paths = [
+        paths = BACKEND_ONLY_PATHS + [
             '\u516c\u544a\u7f16\u8f91\u5668.html',
             'tool/announcement-editor.test.cjs', 'announcements.json',
             'config-1.7.0.json', '\u4ea4\u4e92.txt',
             'docs/QUARK-AUTHENTICATED-DIRECT-DOWNLOAD.md',
             'setup.exe', 'download.zip', 'capture.har',
             'native/gopeed/internal/protocol/http/download.data',
+            'outputs/player-tests.txt', 'outputs/task.network-response',
         ]
         for name in paths:
             path = self.root / name

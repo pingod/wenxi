@@ -10,11 +10,14 @@ import 'package:asterlink/data/http.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/domain/downloads.dart';
 import 'package:asterlink/ui/login_page.dart';
+import 'package:asterlink/ui/quark_login_page.dart';
 import 'package:asterlink/ui/guangya_sms_login_page.dart';
+import 'package:asterlink/ui/wopan_sms_login_page.dart';
 import 'package:asterlink/ui/cloud_page.dart';
 import 'package:asterlink/ui/experimental_features_page.dart';
 import 'package:asterlink/ui/browser_page.dart';
 import 'package:asterlink/ui/player_page.dart';
+import 'package:asterlink/ui/preview_page.dart';
 import 'package:asterlink/platform/file_access.dart';
 import 'package:asterlink/platform/windows_actions.dart';
 import 'support.dart';
@@ -165,7 +168,7 @@ void main() {
           ),
           child: AsterLinkApp(
             services,
-            initialTab: tab,
+            initialTab: tab == 0 ? 0 : tab + 1,
             fontFamily: systemFont ? 'FixtureUI' : null,
           ),
         ),
@@ -264,8 +267,15 @@ void main() {
         );
         expect(find.text('账号密码登录'), findsOneWidget);
         expect(find.byType(WebLoginPage), findsNothing);
+      } else if (platform == CloudPlatform.quark) {
+        expect(find.byType(QuarkLoginPage), findsOneWidget);
+        expect(find.byType(WebLoginPage), findsNothing);
       } else if (platform == CloudPlatform.guangya) {
         expect(find.byType(GuangyaSmsLoginPage), findsOneWidget);
+        expect(find.text('手机号验证码登录'), findsOneWidget);
+        expect(find.byType(WebLoginPage), findsNothing);
+      } else if (platform == CloudPlatform.wopan) {
+        expect(find.byType(WopanSmsLoginPage), findsOneWidget);
         expect(find.text('手机号验证码登录'), findsOneWidget);
         expect(find.byType(WebLoginPage), findsNothing);
       } else {
@@ -536,6 +546,8 @@ void main() {
       expect(find.textContaining('修改后自动保存'), findsNothing);
       expect(find.textContaining('50 MB'), findsOneWidget);
       expect(find.textContaining('游客下载不限制文件大小'), findsOneWidget);
+      expect(find.textContaining('已登录时优先使用账号解析下载'), findsOneWidget);
+      expect(find.textContaining('已登录时也优先尝试游客下载'), findsNothing);
       expect(services.settings.quarkAuthenticatedDirectDownload, isFalse);
       expect(services.settings.quarkGuestDirectDownload, isFalse);
       expect(services.settings.ucGuestDirectDownload, isTrue);
@@ -651,10 +663,30 @@ void main() {
         );
         await changeTextScale(tester, 1.8);
         expect(tester.takeException(), isNull);
-        expect(
-          tester.getTopLeft(find.text('外观')).dy,
-          lessThan(tester.getTopLeft(find.text('下载设置')).dy),
+        final settingsScroll = find
+            .descendant(
+              of: find.byKey(const PageStorageKey('mine')),
+              matching: find.byType(Scrollable),
+            )
+            .first;
+        final appearance = tester.getTopLeft(find.text('外观'));
+        final initialOffset = tester
+            .state<ScrollableState>(settingsScroll)
+            .position
+            .pixels;
+        await tester.scrollUntilVisible(
+          find.text('下载设置'),
+          200,
+          scrollable: settingsScroll,
         );
+        final downloads = tester.getTopLeft(find.text('下载设置'));
+        expect(downloads.dx, appearance.dx);
+        expect(
+          downloads.dy +
+              tester.state<ScrollableState>(settingsScroll).position.pixels,
+          greaterThan(appearance.dy + initialOffset),
+        );
+        expect(tester.takeException(), isNull);
       } finally {
         debugDefaultTargetPlatformOverride = null;
       }
@@ -1048,14 +1080,22 @@ void main() {
     await tester.pumpAndSettle();
     await tester.sendKeyEvent(LogicalKeyboardKey.escape);
     await tester.pumpAndSettle();
-    expect(find.text('清理完成记录'), findsNothing);
+    expect(find.text('清理下载记录'), findsNothing);
     expect(services.downloads.tasks, hasLength(2));
 
     await tester.tap(find.byTooltip('更多操作'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('清理完成记录'));
+    await tester.tap(find.text('清理下载记录'));
     await tester.pumpAndSettle();
-    expect(find.text('仅移除已完成记录，已下载的文件会保留。'), findsOneWidget);
+    expect(find.textContaining('全部 2 条下载记录'), findsOneWidget);
+    expect(
+      tester
+          .widget<CheckboxListTile>(
+            find.byKey(const Key('downloads-clear-files')),
+          )
+          .value,
+      false,
+    );
     await tester.tap(find.text('取消'));
     await tester.pumpAndSettle();
     expect(services.downloads.tasks, hasLength(2));
@@ -1187,9 +1227,10 @@ void main() {
     await render(tester, const Size(393, 864), 0);
     for (final (index, pageKey) in [
       (0, 'parse'),
-      (1, 'cloud-list'),
-      (2, 'downloads'),
-      (3, 'mine'),
+      (1, 'resource-search-results'),
+      (2, 'cloud-list'),
+      (3, 'downloads'),
+      (4, 'mine'),
     ]) {
       await tester.tap(find.byKey(ValueKey('navigation-$index')));
       await tester.pumpAndSettle();
@@ -1280,7 +1321,7 @@ void main() {
   testWidgets('Bottom navigation keeps the four core features reachable', (
     tester,
   ) async {
-    await render(tester, const Size(393, 864), 0);
+    final services = await render(tester, const Size(393, 864), 0);
     expect(find.text('分享解析'), findsOneWidget);
     expect(find.byTooltip('更多操作'), findsNothing);
     await tester.tap(find.byKey(const Key('parse-announcements')));
@@ -1296,7 +1337,34 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('网盘列表'), findsOneWidget);
     expect(find.text('夸克网盘'), findsOneWidget);
-    await tester.tap(find.byKey(const ValueKey('navigation-2')));
+    final taskCount = services.downloads.tasks.length;
+    Navigator.of(tester.element(find.text('网盘列表'))).push<void>(
+      MaterialPageRoute(
+        builder: (_) => PreviewPage(
+          services,
+          const BrowseSession(
+            platform: CloudPlatform.quark,
+            mode: BrowseMode.personal,
+            title: 'fixture',
+            rootId: '0',
+          ),
+          const CloudFile(id: 'archive', name: '压缩包.7z', size: 4096),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.textContaining('此类型文件可下载后查看'), findsOneWidget);
+    expect(find.widgetWithText(FilledButton, '下载文件'), findsOneWidget);
+    await tester.tap(find.byTooltip('传输管理'));
+    await tester.pumpAndSettle();
+    expect(find.byType(PreviewPage), findsNothing);
+    expect(
+      find.byKey(const Key('download-concurrency')).hitTestable(),
+      findsOneWidget,
+    );
+    expect(services.downloads.tasks.length, taskCount);
+    expect(services.transferTab.value, 0);
+    await tester.tap(find.byKey(const ValueKey('navigation-3')));
     await tester.pumpAndSettle();
     expect(find.text('传输管理'), findsOneWidget);
     await tester.tap(find.text('我的').last);

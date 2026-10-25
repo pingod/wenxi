@@ -5,6 +5,7 @@ import '../../core/json.dart';
 import '../../core/operation_progress.dart';
 import '../../diagnostics/app_log.dart';
 import '../../domain/auth.dart';
+import '../../domain/aliyun_share.dart';
 import '../../domain/file_types.dart';
 import '../../domain/models.dart';
 import '../../domain/uploads.dart';
@@ -73,6 +74,22 @@ class AliyunConnector extends CloudConnector {
   @override
   CloudPlatform get platform => CloudPlatform.aliyun;
 
+  @override
+  bool canDownloadFile(BrowseSession session, CloudFile file) =>
+      !AliyunShareLink.isFastTransfer(session);
+
+  static const _fastTransferCanary = 'client=web,app=adrive,version=v0.0.1';
+  static const _fastTransferErrors = {
+    'ShareExpired',
+    'ShareNotFound',
+    'SharePunished',
+    'ShareMaxSaveUserCountExceed',
+    'ShareNoValidFile',
+    'ShareTokenExpired',
+    'ShareTokenInvalid',
+    'ShareTokenlnvalid',
+  };
+
   Map<String, String> _headers(
     TokenSession? session, {
     String shareToken = '',
@@ -95,7 +112,8 @@ class AliyunConnector extends CloudConnector {
   };
 
   bool _authError(HttpResult response, Json data) =>
-      response.status == 401 ||
+      response.status == 401 &&
+          !_fastTransferErrors.contains(data.str('code')) ||
       const {
         'AccessTokenInvalid',
         'AccessTokenExpired',
@@ -127,6 +145,14 @@ class AliyunConnector extends CloudConnector {
         'ShareLink.Expired' => '阿里分享已过期',
         'ShareLink.Forbidden' => '阿里分享不可访问',
         'NotFound.ShareLink' => '阿里分享不存在或已失效',
+        'ShareExpired' => '阿里快传链接已过期，请让分享者重新发送',
+        'ShareNotFound' => '阿里快传链接不存在或已取消',
+        'SharePunished' => '阿里快传文件暂不可访问',
+        'ShareMaxSaveUserCountExceed' => '阿里快传保存人数已达上限',
+        'ShareNoValidFile' => '阿里快传中已没有可保存的文件',
+        'ShareTokenExpired' ||
+        'ShareTokenInvalid' ||
+        'ShareTokenlnvalid' => '阿里快传凭据已失效，请刷新链接后重试',
         'NotFound.FileId' => '阿里云盘文件已移动或删除',
         'QuotaExhausted.Drive' => '阿里云盘空间不足',
         'ForbiddenFileInTheRecycleBin' => '文件已在回收站中',
@@ -526,6 +552,19 @@ class AliyunConnector extends CloudConnector {
     Credential? credential,
   ) async {
     require(link.shareId?.isNotEmpty == true, '阿里分享链接无效');
+    final route = AliyunShareLink.parse(Uri.parse(link.url));
+    require(route != null && route.id == link.shareId, '阿里分享链接无效');
+    if (route!.fastTransfer) {
+      final data = await _fastTransferInfo(route.id);
+      return BrowseSession(
+        platform: platform,
+        mode: BrowseMode.share,
+        rootId: 'root',
+        title: data.str('name').ifEmpty('阿里云盘快传'),
+        sourceLink: link,
+        metadata: {'shareId': route.id, 'aliyunShareType': 'fastTransfer'},
+      );
+    }
     final data = await _post('/adrive/v3/share_link/get_share_by_anonymous', {
       'share_id': link.shareId,
     }, read: true);
@@ -539,6 +578,24 @@ class AliyunConnector extends CloudConnector {
     );
     await _shareToken(session);
     return session;
+  }
+
+  Future<Json> _fastTransferInfo(String id) async {
+    require(id.isNotEmpty, '阿里快传信息缺失，请重新解析');
+    final data = await _post(
+      '/adrive/v1/share/getByAnonymous',
+      {'share_id': id},
+      read: true,
+      canary: _fastTransferCanary,
+    );
+    require(
+      data.str('share_id') == id &&
+          data['preview_file_list'] is List &&
+          data.list('preview_file_list').isNotEmpty &&
+          (data['preview_file_list'] as List).every((item) => item is Map),
+      '阿里快传未返回有效文件信息，请刷新链接后重试',
+    );
+    return data;
   }
 
   static CloudFile file(Json data, String parent) {
@@ -766,6 +823,18 @@ class AliyunConnector extends CloudConnector {
     String parentId,
     Credential? c,
   ) async {
+    if (AliyunShareLink.isFastTransfer(s)) {
+      require(parentId == s.rootId, '快传文件需先转存到网盘，再打开查看');
+      final data = await _fastTransferInfo(s.meta('shareId'));
+      return [
+        CloudFile(
+          id: AliyunShareLink.bundleId(s.meta('shareId')),
+          name: data.str('name').ifEmpty('阿里云盘快传'),
+          isDirectory: true,
+          parentId: s.rootId,
+        ),
+      ];
+    }
     if (s.mode == BrowseMode.share) {
       return _list(
         parentId,
@@ -875,6 +944,7 @@ class AliyunConnector extends CloudConnector {
     CloudFile f,
     Credential? c,
   ) async {
+    require(!AliyunShareLink.isFastTransfer(s), '快传文件需先转存到网盘，再选择文件下载');
     require(f.id.isNotEmpty && !f.isDirectory, '请选择要下载的文件');
     if (c == null) throw const AccountLoginRequired('阿里分享下载需要先登录阿里云盘');
     final token = await _session(c);
@@ -888,6 +958,7 @@ class AliyunConnector extends CloudConnector {
     CloudFile file,
     Credential? credential,
   ) async {
+    require(!AliyunShareLink.isFastTransfer(session), '快传文件需先转存到网盘，再选择文件播放');
     if (fileKind(file.name) != FileKind.video) {
       return download(session, file, credential);
     }
@@ -1336,7 +1407,84 @@ class AliyunConnector extends CloudConnector {
     final token = await _session(c);
     if (token.field('defaultDriveId').isEmpty) await _driveInfo(token);
     final to = _destination(target, token);
+    if (AliyunShareLink.isFastTransfer(s)) {
+      require(
+        files.length == 1 &&
+            files.single.id == AliyunShareLink.bundleId(s.meta('shareId')),
+        '阿里快传仅支持整包转存，请重新打开快传链接',
+      );
+      await _saveFastTransfer(s.meta('shareId'), to.$1, to.$2, token);
+      return;
+    }
     await _save(s, files, to.$1, to.$2, token);
+  }
+
+  Future<void> _saveFastTransfer(
+    String shareId,
+    String drive,
+    String parent,
+    TokenSession token,
+  ) async {
+    final access = await _post(
+      '/adrive/v1/share/getShareToken',
+      {'share_id': shareId},
+      session: token,
+      read: true,
+      canary: _fastTransferCanary,
+    );
+    require(access.str('share_token').isNotEmpty, '阿里未返回快传凭据，请刷新链接后重试');
+    // saveFile copies the whole transfer. Never replay it after an ambiguous
+    // network failure, or submit a subset inferred from preview_file_list.
+    final data = await _post(
+      '/adrive/v1/share/saveFile',
+      {'share_id': shareId, 'to_drive_id': drive, 'to_parent_file_id': parent},
+      session: token,
+      shareToken: access.str('share_token'),
+      canary: _fastTransferCanary,
+    );
+    require(
+      data.str('to_drive_id') == drive &&
+          data.str('to_parent_file_id') == parent &&
+          data['items'] is List &&
+          data.list('items').isNotEmpty &&
+          (data['items'] as List).every(
+            (item) => item is Map && item['body'] is Map,
+          ),
+      '阿里未返回完整转存结果，请到目标目录确认后再试',
+    );
+    final replies = data.list('items');
+    require(
+      replies.every((item) => item.str('id').isNotEmpty) &&
+          replies.map((item) => item.str('id')).toSet().length ==
+              replies.length,
+      '阿里快传返回了重复或缺失的结果，请到目标目录确认',
+    );
+    var saved = 0;
+    final failures = <AppException>[];
+    for (final reply in replies) {
+      try {
+        final body = _checked(
+          HttpResult(reply.integer('status'), ''),
+          reply.obj('body'),
+        );
+        require(
+          body.str('file_id').isNotEmpty ||
+              body.str('async_task_id').isNotEmpty,
+          '转存结果缺少文件信息，请到目标目录确认',
+        );
+        await _waitTask(body, token);
+        saved++;
+      } on AppException catch (error) {
+        RequestScope.checkpoint();
+        failures.add(error);
+      }
+    }
+    if (failures.isNotEmpty) {
+      throw AppException(
+        '${saved > 0 ? '已转存 $saved 项，另有 ${failures.length} 项未完成' : '快传转存未完成'}：'
+        '${failures.first.message}。请到目标目录确认后再试',
+      );
+    }
   }
 
   Future<DownloadSpec> _shareSource(

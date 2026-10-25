@@ -64,7 +64,7 @@ class _StartupFailurePageState extends State<StartupFailurePage> {
       final password = await askText(
         context,
         '输入备份密码',
-        hint: '最近一次成功导入时的备份密码',
+        hint: '建立本机密码恢复保护时使用的备份密码',
         secret: true,
         barrierDismissible: false,
       );
@@ -229,7 +229,7 @@ class _StartupFailurePageState extends State<StartupFailurePage> {
                       ),
                       const SizedBox(height: 8),
                       Text(
-                        '无需选择备份文件，导入后新增的数据也会保留。',
+                        '无需选择备份文件，备份后新增的本机数据也会保留。',
                         textAlign: TextAlign.center,
                         style: TextStyle(color: secondary(context)),
                       ),

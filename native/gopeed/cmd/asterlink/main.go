@@ -44,7 +44,7 @@ func handle(input request) (result any, err error) {
 	}
 	switch input.Method {
 	case "version":
-		return map[string]any{"version": gopeed.Version(), "protocol": 1, "taskCacheRoots": true}, nil
+		return map[string]any{"version": gopeed.Version(), "protocol": 1, "taskCacheRoots": true, "sourceNetworkPolicy": true, "parserHttp2": true}, nil
 	case "freeSpace":
 		bytes, err := availableSpace(args.Path)
 		return map[string]any{"bytes": bytes}, err
@@ -52,6 +52,16 @@ func handle(input request) (result any, err error) {
 		err = gopeed.Open(args.StorageDir, args.CacheDir, args.Key)
 	case "begin":
 		err = gopeed.Begin(string(input.Args))
+	case "parserRequestStart":
+		err = gopeed.StartParserRequest(string(input.Args))
+	case "parserRequestStatus":
+		var value string
+		value, err = gopeed.ParserRequestStatus(args.ID)
+		if err == nil {
+			err = json.Unmarshal([]byte(value), &result)
+		}
+	case "parserRequestStop":
+		gopeed.StopParserRequest(args.ID)
 	case "httpProbeStart":
 		err = gopeed.StartHttpProbe(string(input.Args))
 	case "httpProbeStatus":

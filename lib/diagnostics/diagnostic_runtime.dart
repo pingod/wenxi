@@ -57,16 +57,22 @@ class DiagnosticRuntime with WidgetsBindingObserver {
     Directory? directory;
     Object? failure;
     bool? enabled;
+    Json native = {};
     try {
-      if (Platform.isAndroid) {
+      if (Platform.isAndroid || Platform.isWindows) {
         final paths = asJson(
-          await const MethodChannel('com.asterlink.app/native')
+          await MethodChannel(
+                Platform.isWindows
+                    ? 'com.asterlink.app/diagnostics'
+                    : 'com.asterlink.app/native',
+              )
               .invokeMethod<Object?>('diagnosticPaths')
               .timeout(const Duration(seconds: 5)),
         );
         require(paths.str('logs').isNotEmpty, '无法读取日志目录');
         directory = Directory(paths.str('logs'));
         enabled = paths.boolean('enabled', true);
+        native = paths;
       } else {
         directory = Directory(
           p.join(
@@ -78,11 +84,17 @@ class DiagnosticRuntime with WidgetsBindingObserver {
       }
     } catch (error) {
       failure = error;
-      // If Android cannot read the persisted preference, respect a possible opt-out.
-      if (Platform.isAndroid) enabled = false;
+      // If the native layer cannot read the preference, respect a possible opt-out.
+      if (Platform.isAndroid || Platform.isWindows) enabled = false;
     }
     final log = DiagnosticLog.open(directory, enabled: enabled);
     _current = DiagnosticRuntime.attach(log);
+    if (native.str('session').isNotEmpty) {
+      log.record(
+        'logging.native_session',
+        fields: {'nativeSession': native.str('session'), 'pid': native['pid']},
+      );
+    }
     if (failure != null) {
       log.record(
         'logging.storage_unavailable',

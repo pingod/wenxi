@@ -8,6 +8,8 @@ class AppMenuAction<T> {
     required this.label,
     required this.icon,
     this.selected = false,
+    this.enabled = true,
+    this.destructive = false,
     this.detail,
   });
 
@@ -15,6 +17,8 @@ class AppMenuAction<T> {
   final String label;
   final IconData icon;
   final bool selected;
+  final bool enabled;
+  final bool destructive;
   final String? detail;
 }
 
@@ -94,6 +98,7 @@ class AppPopupMenuButton<T> extends StatelessWidget {
         for (final action in actions)
           PopupMenuItem<T>(
             value: action.value,
+            enabled: action.enabled,
             padding: EdgeInsets.zero,
             child: Semantics(
               selected: action.selected ? true : null,

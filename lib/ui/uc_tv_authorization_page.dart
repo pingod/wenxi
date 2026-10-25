@@ -384,7 +384,7 @@ class _UcTvAuthorizationPageState extends State<UcTvAuthorizationPage>
                   ),
                   const SizedBox(height: 10),
                   const Text(
-                    '请使用与网页登录相同的 UC 账号扫码并确认。授权后支持原文件下载和在线播放；播放时自动选择最高可用画质，授权到期后自动续期。',
+                    '请使用与网页登录相同的 UC 账号扫码并确认。授权后可尝试原文件下载和在线播放，仍受 UC 账号权限限制；播放时自动选择最高可用画质，授权到期后自动续期。',
                     textAlign: TextAlign.center,
                     style: TextStyle(height: 1.6),
                   ),

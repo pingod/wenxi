@@ -3,6 +3,7 @@ import 'package:file_selector/file_selector.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import '../core/json.dart';
+import 'android_download_file.dart';
 import 'native_engine.dart';
 
 String safeFileName(String raw) {
@@ -32,8 +33,27 @@ String safeRelativePath(String raw) => raw
     .join(p.separator);
 
 abstract class FileAccess {
-  // Android document providers are not filesystem paths. Keep their existing
-  // private cache; desktop payloads can live beside the chosen destination.
+  bool get directDownloads => false;
+  Future<Json?> inspectDownloadTarget(String id) async => null;
+  Future<DirectDownloadTarget> openDownloadTarget({
+    required String id,
+    required String name,
+    required String relativePath,
+    String? destination,
+  }) async => throw const AppException('此平台不支持直接下载');
+  Future<String> finishDownloadTarget(
+    String id,
+    DirectDownloadTarget target,
+    String name,
+  ) async => throw const AppException('此平台不支持直接下载');
+  Future<void> releaseDownloadTarget(
+    String id,
+    DirectDownloadTarget target,
+  ) async {}
+  Future<void> discardDownloadTarget(String id) async {}
+  Future<void> forgetDownloadTarget(String id) async {}
+  // Android targets use openDownloadTarget. This cache root is only used for
+  // legacy Android payloads and for desktop downloads beside the destination.
   Future<String?> downloadCacheRoot(String? destination) async => null;
   Future<StoragePlan> storagePlan(String cache, String? destination) async =>
       StoragePlan(StorageVolume('cache', cache), StorageVolume('cache', cache));
@@ -53,15 +73,38 @@ abstract class FileAccess {
   Future<void> delete(String? path);
 }
 
+/// Only the target key/URI are durable. The path and lease belong to this process.
+class DirectDownloadTarget {
+  const DirectDownloadTarget({
+    required this.uri,
+    required this.path,
+    required this.key,
+    required this.lease,
+    File? file,
+  }) : _file = file;
+  final String uri, path, key, lease;
+  final File? _file;
+  File get file => _file ?? File(path);
+  Json get engineArguments => {'outputPath': path, 'outputKey': key};
+}
+
 class StorageVolume {
   const StorageVolume(this.id, this.path);
   final String id, path;
 }
 
 class StoragePlan {
-  const StoragePlan(this.cache, this.target);
+  const StoragePlan(this.cache, this.target, {this.directOutput = false});
   final StorageVolume cache, target;
+  final bool directOutput;
+  StoragePlan forDirectOutput() =>
+      StoragePlan(cache, target, directOutput: true);
   Map<String, int> requirements(int total, int downloaded, {int overhead = 0}) {
+    if (directOutput) {
+      final result = {target.id: (total - downloaded).clamp(0, total)};
+      if (overhead > 0) result[cache.id] = (result[cache.id] ?? 0) + overhead;
+      return result;
+    }
     final result = {cache.id: (total - downloaded).clamp(0, total) + overhead};
     result[target.id] = (result[target.id] ?? 0) + total;
     return result;
@@ -85,6 +128,98 @@ class PlatformFileAccess implements FileAccess {
   final bool _android;
   final NativeTransport transport;
   final Directory defaultDirectory;
+  @override
+  bool get directDownloads => _android;
+  Future<T?> _targetCall<T>(String method, Json arguments) async {
+    try {
+      return await nativeChannel.invokeMethod<T>(method, arguments);
+    } on PlatformException catch (error) {
+      throw AppException(error.message ?? '无法访问下载目标，请检查目录权限');
+    }
+  }
+
+  @override
+  Future<Json?> inspectDownloadTarget(String id) async {
+    if (!_android) return null;
+    final value = await _targetCall<Object?>('inspectDownloadTarget', {
+      'id': id,
+    });
+    return value == null ? null : asJson(value);
+  }
+
+  @override
+  Future<DirectDownloadTarget> openDownloadTarget({
+    required String id,
+    required String name,
+    required String relativePath,
+    String? destination,
+  }) async {
+    require(_android, '此平台不支持直接下载');
+    final value = asJson(
+      await _targetCall<Object?>('openDownloadTarget', {
+        'id': id,
+        'name': safeFileName(name),
+        'relativePath': safeRelativePath(relativePath),
+        'destination': destination,
+      }),
+    );
+    require(
+      Uri.tryParse(value.str('uri'))?.scheme == 'content' &&
+          RegExp(r'^/proc/self/fd/[0-9]+$').hasMatch(value.str('path')) &&
+          value.str('lease').isNotEmpty &&
+          value.str('key').isNotEmpty,
+      '下载目标响应无效',
+    );
+    return DirectDownloadTarget(
+      uri: value.str('uri'),
+      path: value.str('path'),
+      key: value.str('key'),
+      lease: value.str('lease'),
+      file: AndroidDownloadFile(
+        path: value.str('path'),
+        id: id,
+        lease: value.str('lease'),
+        channel: nativeChannel,
+      ),
+    );
+  }
+
+  @override
+  Future<String> finishDownloadTarget(
+    String id,
+    DirectDownloadTarget target,
+    String name,
+  ) async {
+    final uri = await _targetCall<String>('finishDownloadTarget', {
+      'id': id,
+      'lease': target.lease,
+      'name': safeFileName(name),
+    });
+    require(uri == target.uri, '下载目标身份发生变化，文件已保留');
+    return uri!;
+  }
+
+  @override
+  Future<void> releaseDownloadTarget(
+    String id,
+    DirectDownloadTarget target,
+  ) async {
+    await _targetCall<void>('releaseDownloadTarget', {
+      'id': id,
+      'lease': target.lease,
+    });
+  }
+
+  @override
+  Future<void> discardDownloadTarget(String id) async {
+    if (_android) await _targetCall<void>('discardDownloadTarget', {'id': id});
+  }
+
+  @override
+  Future<void> forgetDownloadTarget(String id) async {
+    if (_android) await _targetCall<void>('forgetDownloadTarget', {'id': id});
+  }
+
   final _exportCallbacks = <String, (int, void Function(int, int))>{};
   int _exportGeneration = 0;
   void exportProgress(Json value) {

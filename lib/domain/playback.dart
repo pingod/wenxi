@@ -129,7 +129,7 @@ class PlaybackPreferences {
     this.aspectRatio = 0,
     this.connections = 8,
     this.driveConnections = const {},
-    this.segmentSizeMiB = 3,
+    this.segmentSizeMiB = 4,
     this.hardwareAcceleration = true,
     this.skipIntroSeconds = 0,
     this.skipOutroSeconds = 0,
@@ -151,33 +151,55 @@ class PlaybackPreferences {
   final int connections;
   final Map<String, int> driveConnections;
   final int segmentSizeMiB, skipIntroSeconds, skipOutroSeconds;
-  int connectionsFor(CloudPlatform? platform) =>
-      platform == null ? connections : driveConnections[platform.key] ?? 8;
+  static const minConnections = 1, maxConnections = 512;
+  static const connectionPresets = [1, 2, 4, 8, 12, 16, 32, 64, 128];
+
+  int connectionsFor(CloudPlatform? platform) {
+    final saved = platform == null ? null : driveConnections[platform.key];
+    if (saved != null) return saved;
+    if (platform == null) return connections;
+    // Quark commonly rate-limits a single HTTP stream. Start with a higher
+    // ceiling there; PlaybackBufferPolicy still ramps active requests and
+    // halves them on 429/503 or timeouts.
+    if (platform == CloudPlatform.quark) return 128;
+    return 8;
+  }
+
   static const rates = [.5, .75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
   static const minRate = .25, maxRate = 4.0;
+  static const minSubtitleSize = 14.0, maxSubtitleSize = 120.0;
   factory PlaybackPreferences.fromJson(Json value) => PlaybackPreferences(
     rate: finiteRange(value.number('rate', 1), 1, minRate, maxRate),
     volume: finiteRange(value.number('volume', 100), 100, 0, 100),
-    connections: value.integer('connections', 8).clamp(1, 32),
+    connections: value
+        .integer('connections', 8)
+        .clamp(minConnections, maxConnections),
     // Older versions only stored one setting. Preserve it for every drive
     // during migration instead of silently discarding the user's preference.
     driveConnections: Map.unmodifiable({
       if (!value.containsKey('driveConnections') &&
           value.containsKey('connections'))
         for (final platform in CloudPlatform.values)
-          platform.key: value.integer('connections', 8).clamp(1, 32),
+          platform.key: value
+              .integer('connections', 8)
+              .clamp(minConnections, maxConnections),
       for (final entry in value.obj('driveConnections').entries)
         if (CloudPlatform.fromKey(entry.key) != null &&
             int.tryParse('${entry.value}') != null)
           CloudPlatform.fromKey(entry.key)!.key: int.parse(
             '${entry.value}',
-          ).clamp(1, 32),
+          ).clamp(minConnections, maxConnections),
     }),
-    segmentSizeMiB: value.integer('segmentSizeMiB', 3).clamp(1, 16),
+    segmentSizeMiB: value.integer('segmentSizeMiB', 4).clamp(1, 16),
     hardwareAcceleration: value.boolean('hardwareAcceleration', true),
     skipIntroSeconds: value.integer('skipIntroSeconds').clamp(0, 600),
     skipOutroSeconds: value.integer('skipOutroSeconds').clamp(0, 600),
-    subtitleSize: finiteRange(value.number('subtitleSize', 22), 22, 14, 40),
+    subtitleSize: finiteRange(
+      value.number('subtitleSize', 22),
+      22,
+      minSubtitleSize,
+      maxSubtitleSize,
+    ),
     subtitleBottom: finiteRange(
       value.number('subtitleBottom', .04),
       .04,

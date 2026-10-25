@@ -10,4 +10,7 @@ abstract class DesktopActions {
 
   Future<void> revealFile(String path);
   Future<void> shutdown();
+
+  /// Suspends the machine to disk once every transfer has been saved.
+  Future<void> hibernate();
 }

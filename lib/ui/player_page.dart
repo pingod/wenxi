@@ -1,10 +1,10 @@
 import 'dart:async';
+import '../download/mobile_data_download_guard.dart';
 import 'subtitle_appearance.dart';
 import 'dart:io';
 import 'dart:math' as math;
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/cupertino.dart';
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
@@ -23,6 +23,7 @@ import '../playback/subtitle_files.dart';
 import '../diagnostics/app_log.dart';
 import 'player_theme.dart';
 import 'player_rate_input.dart';
+import 'player_connections_input.dart';
 import 'player_playlist_panel.dart';
 import 'player_aspect_panel.dart';
 import 'player_sleep_panel.dart';
@@ -60,7 +61,7 @@ class _PlayerPageState extends State<PlayerPage>
   late final device = widget.device ?? NativePlaybackDevice();
   final focus = FocusNode(debugLabel: 'AsterLink player');
   Timer? _hideTimer, _hudTimer, _volumeTimer, _layoutDeadline, _layoutQuiet;
-  Timer? _tapReset, _lockTimer;
+  Timer? _lockTimer;
   Timer? _nativeSubtitleTimer;
   double _nativeSubtitleHeight = 0,
       _nativeSubtitleBottom = 0,
@@ -68,8 +69,7 @@ class _PlayerPageState extends State<PlayerPage>
       _nativeSubtitleSize = 22;
   bool _lockVisible = false;
   late final AnimationController _chrome;
-  Offset? _lastTapPosition;
-  bool _lastTapVisible = true, _disableAnimations = false;
+  bool _disableAnimations = false;
   Object? _presentationState, _deviceState;
   final _safeInsets = <Orientation, EdgeInsets>{};
   Completer<void>? _layoutReady;
@@ -99,9 +99,11 @@ class _PlayerPageState extends State<PlayerPage>
   String hud = '', _seenNotice = '';
   String _seenFontMessage = '';
   Duration? _seekPreview;
+  Duration? _hoverSeekPreview;
+  double _hoverSeekX = 0;
   Duration _seekStart = Duration.zero;
   double _dragX = 0, _dragY = 0, _viewportWidth = 1, _viewportHeight = 1;
-  double _verticalInitial = 0, _verticalTarget = 0, _doubleTapX = .5;
+  double _verticalInitial = 0, _verticalTarget = 0;
   bool _brightnessDrag = false, _verticalActive = false;
   double _lastAudibleVolume = 100;
   RawDialogRoute<void>? _activePanel;
@@ -179,6 +181,7 @@ class _PlayerPageState extends State<PlayerPage>
     if (_seenGeneration != controller.generation) {
       _seenGeneration = controller.generation;
       _seekPreview = null;
+      _hoverSeekPreview = null;
       locked = false;
       visible = true;
     }
@@ -428,7 +431,6 @@ class _PlayerPageState extends State<PlayerPage>
     _hideTimer?.cancel();
     _hudTimer?.cancel();
     _volumeTimer?.cancel();
-    _tapReset?.cancel();
     _chrome.dispose();
     _nativeSubtitleTimer?.cancel();
     _lockTimer?.cancel();
@@ -482,7 +484,10 @@ class _PlayerPageState extends State<PlayerPage>
     if (!mounted || locked) return;
     if (show) _setControlsVisible(true);
     _hideTimer?.cancel();
-    if (_modalDepth == 0 && controller.state.playing && _seekPreview == null) {
+    if (_modalDepth == 0 &&
+        controller.state.playing &&
+        _seekPreview == null &&
+        _hoverSeekPreview == null) {
       _hideTimer = Timer(const Duration(seconds: 4), () {
         if (mounted && _modalDepth == 0 && !locked) {
           _setControlsVisible(false);
@@ -506,15 +511,38 @@ class _PlayerPageState extends State<PlayerPage>
 
   void _setControlsVisible(bool value) {
     if (visible != value) {
-      setState(() => visible = value);
+      setState(() {
+        visible = value;
+        if (!value) _hoverSeekPreview = null;
+      });
       _animateChrome();
     }
     unawaited(_syncDevice());
   }
 
-  void _clearTapSequence() {
-    _tapReset?.cancel();
-    _lastTapPosition = null;
+  void _clearTapSequence() {}
+
+  void _updateSeekHover(PointerEvent event, double width) {
+    final duration = controller.state.duration;
+    if (width <= 0 || duration <= Duration.zero || !controller.ready) return;
+    _hideTimer?.cancel();
+    final x = event.localPosition.dx.clamp(0.0, width).toDouble();
+    final milliseconds = (duration.inMilliseconds * (x / width)).round().clamp(
+      0,
+      duration.inMilliseconds,
+    );
+    final preview = Duration(milliseconds: milliseconds);
+    if (_hoverSeekPreview == preview && (_hoverSeekX - x).abs() < .5) return;
+    setState(() {
+      _hoverSeekX = x;
+      _hoverSeekPreview = preview;
+    });
+  }
+
+  void _clearSeekHover() {
+    if (_hoverSeekPreview == null) return;
+    setState(() => _hoverSeekPreview = null);
+    if (visible && !locked) _touch(show: false);
   }
 
   void _surfaceTap(TapUpDetails details) {
@@ -523,27 +551,15 @@ class _PlayerPageState extends State<PlayerPage>
       _showLock();
       return;
     }
-    final previous = _lastTapPosition;
-    final zone = (details.localPosition.dx / _viewportWidth * 3).floor();
-    if (previous != null &&
-        _tapReset?.isActive == true &&
-        (previous - details.localPosition).distance <= kDoubleTapSlop &&
-        (previous.dx / _viewportWidth * 3).floor() == zone) {
-      _clearTapSequence();
-      if (!locked && controller.ready) {
-        _setControlsVisible(_lastTapVisible);
-        _doubleTapX = details.localPosition.dx / _viewportWidth;
-        _doubleTap();
-      }
-      return;
-    }
-    _clearTapSequence();
-    _lastTapPosition = details.localPosition;
-    _lastTapVisible = visible;
-    // onTapUp has no competing DoubleTapGestureRecognizer: a single tap
-    // responds on release, without waiting for the double-tap timeout.
     _toggleControls();
-    _tapReset = Timer(kDoubleTapTimeout, () => _lastTapPosition = null);
+  }
+
+  void _surfaceDoubleTap() {
+    if (locked || !controller.ready) return;
+    _run(() async {
+      await controller.toggle();
+      if (mounted) _touch();
+    });
   }
 
   void _showHud(String text) {
@@ -606,6 +622,7 @@ class _PlayerPageState extends State<PlayerPage>
     setState(() {
       locked = !locked;
       visible = !locked;
+      _hoverSeekPreview = null;
       hud = '';
       _lockVisible = false;
     });
@@ -671,20 +688,6 @@ class _PlayerPageState extends State<PlayerPage>
       }
     } finally {
       _leaving = false;
-    }
-  }
-
-  void _doubleTap() {
-    if (locked || !controller.ready) return;
-    if (_doubleTapX < .33) {
-      _run(() => controller.skip(-15));
-      _showHud('后退 15 秒');
-    } else if (_doubleTapX > .67) {
-      _run(() => controller.skip(15));
-      _showHud('前进 15 秒');
-    } else {
-      _run(controller.toggle);
-      _touch();
     }
   }
 
@@ -1203,10 +1206,15 @@ class _PlayerPageState extends State<PlayerPage>
             children: [
               Text('字幕字号  ${controller.preferences.subtitleSize.round()}'),
               Slider(
+                key: const Key('player-subtitle-size'),
                 value: controller.preferences.subtitleSize,
-                min: 14,
-                max: 40,
-                divisions: 26,
+                min: PlaybackPreferences.minSubtitleSize,
+                max: PlaybackPreferences.maxSubtitleSize,
+                divisions:
+                    (PlaybackPreferences.maxSubtitleSize -
+                            PlaybackPreferences.minSubtitleSize)
+                        .round(),
+                label: '${controller.preferences.subtitleSize.round()}',
                 onChanged: (value) => _run(
                   () => controller.updatePreferences(
                     controller.preferences.copyWith(subtitleSize: value),
@@ -1372,6 +1380,28 @@ class _PlayerPageState extends State<PlayerPage>
       if (mounted) _syncNativeSubtitles();
     }
   }
+
+  Future<void> _customConnections() => _panel(
+    '${controller.current.platform?.shortName ?? '默认'}播放连接数',
+    (context) => ListView(
+      shrinkWrap: true,
+      padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
+      children: [
+        PlayerConnectionsInput(
+          connections: controller.connections,
+          onApply: (value) async {
+            await controller.setConnections(value);
+            if (context.mounted) Navigator.pop(context);
+          },
+        ),
+        const SizedBox(height: 12),
+        const Text(
+          '按网盘分别保存，立即生效。实际连接数会根据缓冲需求和网络状况自动调整。',
+          style: TextStyle(color: Colors.white60, fontSize: 12, height: 1.6),
+        ),
+      ],
+    ),
+  );
 
   Future<void> _settings() async {
     Future<void> Function()? next;
@@ -1579,7 +1609,7 @@ class _PlayerPageState extends State<PlayerPage>
                     spacing: 8,
                     runSpacing: 8,
                     children: [
-                      for (final count in [1, 2, 4, 8, 16, 32])
+                      for (final count in PlaybackPreferences.connectionPresets)
                         ChoiceChip(
                           key: ValueKey('player-connections-$count'),
                           label: Text('$count'),
@@ -1602,6 +1632,29 @@ class _PlayerPageState extends State<PlayerPage>
                                 : Colors.white70,
                           ),
                         ),
+                      ActionChip(
+                        key: const Key('player-connections-custom'),
+                        avatar: const Icon(
+                          CupertinoIcons.pencil,
+                          size: 14,
+                          color: Colors.white70,
+                        ),
+                        label: Text(
+                          PlaybackPreferences.connectionPresets.contains(
+                                controller.connections,
+                              )
+                              ? '自定义'
+                              : '自定义 · ${controller.connections}',
+                        ),
+                        onPressed: () {
+                          next = _customConnections;
+                          Navigator.pop(context);
+                        },
+                        backgroundColor: const Color(0xff26272b),
+                        surfaceTintColor: Colors.transparent,
+                        side: const BorderSide(color: Colors.white24),
+                        labelStyle: const TextStyle(color: Colors.white70),
+                      ),
                     ],
                   ),
                   const SizedBox(height: 8),
@@ -1640,7 +1693,7 @@ class _PlayerPageState extends State<PlayerPage>
                   ),
                   const SizedBox(height: 4),
                   const Text(
-                    '起播先用最多 2 个连接，再按需增加。播放器预读上限为 30 秒或 8 MiB；分片缓存与在途数据合计最多 48 MiB，暂停停止新分片。修改分片大小会保留进度重新连接。',
+                    '播放器按码率尽量预存约 90 秒，实际时长受缓存大小限制。起播先缓冲约 6 秒，反复卡顿时逐步增加；按需增加连接，缓存与在途数据预算合计 96 MiB。暂停停止新分片，修改分片大小会保留进度重新连接。',
                     style: TextStyle(
                       color: Colors.white54,
                       fontSize: 12,
@@ -1688,7 +1741,7 @@ class _PlayerPageState extends State<PlayerPage>
             padding: const EdgeInsets.all(20),
             child: Text(
               [
-                '双击两侧前后跳转 15 秒，双击中间播放/暂停。',
+                '拖动进度条可快速定位播放位置。',
                 '横向滑动调整进度，左侧上下滑动调亮度，右侧调音量；长按临时加速。',
                 if (isDesktopPlatform)
                   '键盘：空格播放/暂停，←/→跳转，↑/↓音量，F 全屏，Esc 返回，M 静音。',
@@ -1748,6 +1801,8 @@ class _PlayerPageState extends State<PlayerPage>
       if (!(await widget.confirmDownload?.call() ?? true) || !mounted) return;
       await controller.enqueueDownload(widget.onDownload!);
       if (mounted) _showHud('已添加到下载队列');
+    } on DownloadConfirmationCancelled {
+      // Declining a download does not interrupt the current playback.
     } finally {
       if (mounted) setState(() => _adding = false);
     }
@@ -2099,6 +2154,7 @@ class _PlayerPageState extends State<PlayerPage>
                             key: const Key('player-gesture-surface'),
                             behavior: HitTestBehavior.opaque,
                             onTapUp: _surfaceTap,
+                            onDoubleTap: locked ? null : _surfaceDoubleTap,
                             onHorizontalDragStart: _horizontalStart,
                             onHorizontalDragUpdate: _horizontalUpdate,
                             onHorizontalDragEnd: (_) => _horizontalEnd(),
@@ -2363,6 +2419,52 @@ class _PlayerPageState extends State<PlayerPage>
                 _icon('播放设置', CupertinoIcons.ellipsis, () => _run(_settings)),
               ],
             ),
+            if (_resolutionLabel case final resolution?)
+              Padding(
+                padding: const EdgeInsets.only(left: 48, right: 8, top: 2),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Semantics(
+                    label: '视频分辨率：$resolution',
+                    excludeSemantics: true,
+                    child: Container(
+                      key: const Key('player-resolution'),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 3,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(0x1affffff),
+                        border: Border.all(color: const Color(0x1fffffff)),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(
+                            CupertinoIcons.tv,
+                            size: 13,
+                            color: Colors.white70,
+                          ),
+                          const SizedBox(width: 6),
+                          Flexible(
+                            child: Text(
+                              resolution,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: Colors.white70,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
             AnimatedBuilder(
               animation: controller.sleepTimer,
               builder: (context, _) {
@@ -2420,6 +2522,12 @@ class _PlayerPageState extends State<PlayerPage>
     ),
   );
 
+  String? get _resolutionLabel {
+    final geometry = controller.videoGeometry;
+    if (geometry == null || !controller.hasVideo) return null;
+    return '${geometry.width} × ${geometry.height}';
+  }
+
   Widget _bottomControls() {
     final state = controller.state;
     final position = clampPlaybackPosition(
@@ -2451,47 +2559,105 @@ class _PlayerPageState extends State<PlayerPage>
                 children: [
                   SizedBox(
                     height: 36,
-                    child: SliderTheme(
-                      data: SliderTheme.of(context).copyWith(
-                        trackHeight: 2,
-                        trackShape: const RectangularSliderTrackShape(),
-                        thumbShape: const RoundSliderThumbShape(
-                          enabledThumbRadius: 4,
-                        ),
-                        overlayShape: const RoundSliderOverlayShape(
-                          overlayRadius: 14,
-                        ),
-                      ),
-                      child: Slider(
-                        key: const Key('player-seek'),
-                        padding: EdgeInsets.zero,
-                        value: position.inMilliseconds.toDouble(),
-                        max: maximum,
-                        label: playbackTime(position),
-                        semanticFormatterCallback: (value) =>
-                            playbackTime(Duration(milliseconds: value.round())),
-                        secondaryTrackValue: math.max(
-                          position.inMilliseconds.toDouble(),
-                          state.buffer.inMilliseconds
-                              .clamp(0, maximum)
-                              .toDouble(),
-                        ),
-                        activeColor: playerAccent(context),
-                        inactiveColor: Colors.white24,
-                        secondaryActiveColor: Colors.white54,
-                        thumbColor: Colors.white,
-                        onChangeStart: canSeek
-                            ? (_) => _hideTimer?.cancel()
-                            : null,
-                        onChanged: canSeek
-                            ? (value) => setState(
-                                () => _seekPreview = Duration(
-                                  milliseconds: value.round(),
+                    child: LayoutBuilder(
+                      builder: (context, seekBox) {
+                        final width = seekBox.maxWidth;
+                        return Stack(
+                          clipBehavior: Clip.none,
+                          children: [
+                            MouseRegion(
+                              key: const Key('player-seek-hover-region'),
+                              onEnter: canSeek
+                                  ? (event) => _updateSeekHover(event, width)
+                                  : null,
+                              onHover: canSeek
+                                  ? (event) => _updateSeekHover(event, width)
+                                  : null,
+                              onExit: (_) => _clearSeekHover(),
+                              child: SliderTheme(
+                                data: SliderTheme.of(context).copyWith(
+                                  trackHeight: 2,
+                                  trackShape:
+                                      const RectangularSliderTrackShape(),
+                                  thumbShape: const RoundSliderThumbShape(
+                                    enabledThumbRadius: 4,
+                                  ),
+                                  overlayShape: const RoundSliderOverlayShape(
+                                    overlayRadius: 14,
+                                  ),
                                 ),
-                              )
-                            : null,
-                        onChangeEnd: canSeek ? (_) => _horizontalEnd() : null,
-                      ),
+                                child: Slider(
+                                  key: const Key('player-seek'),
+                                  padding: EdgeInsets.zero,
+                                  value: position.inMilliseconds.toDouble(),
+                                  max: maximum,
+                                  label: playbackTime(position),
+                                  semanticFormatterCallback: (value) =>
+                                      playbackTime(
+                                        Duration(milliseconds: value.round()),
+                                      ),
+                                  secondaryTrackValue: math.max(
+                                    position.inMilliseconds.toDouble(),
+                                    state.buffer.inMilliseconds
+                                        .clamp(0, maximum)
+                                        .toDouble(),
+                                  ),
+                                  activeColor: playerAccent(context),
+                                  inactiveColor: Colors.white24,
+                                  secondaryActiveColor: Colors.white54,
+                                  thumbColor: Colors.white,
+                                  onChangeStart: canSeek
+                                      ? (_) => _hideTimer?.cancel()
+                                      : null,
+                                  onChanged: canSeek
+                                      ? (value) => setState(
+                                          () => _seekPreview = Duration(
+                                            milliseconds: value.round(),
+                                          ),
+                                        )
+                                      : null,
+                                  onChangeEnd: canSeek
+                                      ? (_) => _horizontalEnd()
+                                      : null,
+                                ),
+                              ),
+                            ),
+                            if (_hoverSeekPreview case final hover?
+                                when canSeek && _seekPreview == null)
+                              Positioned.fill(
+                                child: IgnorePointer(
+                                  child: CustomSingleChildLayout(
+                                    delegate: _SeekHoverLayout(_hoverSeekX),
+                                    child: DecoratedBox(
+                                      key: const Key('player-seek-hover-time'),
+                                      decoration: BoxDecoration(
+                                        color: Colors.black87,
+                                        borderRadius: BorderRadius.circular(4),
+                                        border: Border.all(
+                                          color: Colors.white24,
+                                        ),
+                                      ),
+                                      child: Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 6,
+                                          vertical: 2,
+                                        ),
+                                        child: Text(
+                                          playbackTime(hover),
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 12,
+                                            height: 1.2,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                          ],
+                        );
+                      },
                     ),
                   ),
                   Row(
@@ -2670,4 +2836,24 @@ class _PlayerPageState extends State<PlayerPage>
       ),
     ),
   );
+}
+
+class _SeekHoverLayout extends SingleChildLayoutDelegate {
+  const _SeekHoverLayout(this.x);
+  final double x;
+
+  @override
+  BoxConstraints getConstraintsForChild(BoxConstraints constraints) =>
+      BoxConstraints(maxWidth: constraints.maxWidth);
+
+  @override
+  Offset getPositionForChild(Size size, Size childSize) => Offset(
+    (x - childSize.width / 2)
+        .clamp(0.0, math.max(0.0, size.width - childSize.width))
+        .toDouble(),
+    -childSize.height,
+  );
+
+  @override
+  bool shouldRelayout(_SeekHoverLayout oldDelegate) => x != oldDelegate.x;
 }

@@ -20,6 +20,24 @@ import 'support.dart';
 
 class _LocalIo extends HttpOverrides {}
 
+class _SpaceTracingTransport extends DesktopGopeedTransport {
+  _SpaceTracingTransport({required super.executable});
+  final spaceChecks = <String>[];
+  String? fullVolume;
+
+  @override
+  Future<Object?> call(String method, [Json args = const {}]) async {
+    if (method == 'freeSpace') {
+      final path = args.str('path');
+      spaceChecks.add(path);
+      if (p.rootPrefix(path).toLowerCase() == fullVolume) {
+        return {'bytes': 0};
+      }
+    }
+    return super.call(method, args);
+  }
+}
+
 // Reproduce a pre-upgrade task: its payload uses the app's private cache.
 class _LegacyFiles extends PlatformFileAccess {
   _LegacyFiles(super.transport, super.defaultDirectory);
@@ -36,6 +54,7 @@ void main() {
       late HttpServer server;
       late StateStore store;
       late DownloadManager manager;
+      late _SpaceTracingTransport transport;
       var closed = true;
       final key = Uint8List.fromList(List.filled(32, 5));
       final content = Uint8List.fromList(
@@ -104,7 +123,7 @@ void main() {
           Directory(p.join(systemRoot.path, 'state')),
           testKey: key,
         );
-        final transport = DesktopGopeedTransport(executable: executable);
+        transport = _SpaceTracingTransport(executable: executable);
         manager = DownloadManager(
           store: store,
           engine: GopeedEngine(
@@ -139,6 +158,23 @@ void main() {
         checksumType: 'sha256',
         checksumValue: sha256.convert(content).toString(),
       );
+
+      void exhaustCacheVolume() {
+        final cacheVolume = p.rootPrefix(cache.path).toLowerCase();
+        if (cacheVolume != p.rootPrefix(selectedRoot.path).toLowerCase()) {
+          transport.fullVolume = cacheVolume;
+        }
+      }
+
+      void expectSelectedSpaceChecks() {
+        expect(transport.spaceChecks, isNotEmpty);
+        for (final path in transport.spaceChecks) {
+          expect(
+            p.rootPrefix(path).toLowerCase(),
+            p.rootPrefix(selectedRoot.path).toLowerCase(),
+          );
+        }
+      }
 
       Future<void> partial(String id) async {
         await until(
@@ -217,6 +253,7 @@ void main() {
       test(
         'new task resumes on the chosen volume after a complete process restart',
         () async {
+          exhaustCacheVolume();
           await manager.changeDestination(selectedRoot.path);
           final id = await manager.enqueue(spec());
           await partial(id);
@@ -229,17 +266,104 @@ void main() {
           expect(await Directory(p.join(cache.path, id)).exists(), isFalse);
           await close();
           await open();
+          exhaustCacheVolume();
           expect(manager.task(id)!.downloaded, savedProgress);
           expect(manager.engine.taskDirectory(id).path, payload.parent.path);
           ranges.clear();
           await manager.resume(id);
           await finish(id);
+          expectSelectedSpaceChecks();
           expect(ranges.any((start) => start > 0), isTrue);
           expect(await payload.exists(), isFalse);
           stdout.writeln(
             'DESTINATION_NATIVE ${jsonEncode({'case': 'newTask', 'cacheDrive': p.rootPrefix(payload.path), 'savedDrive': p.rootPrefix(manager.task(id)!.savedPath!), 'resumedAfterRestart': true, 'sha256Verified': true})}',
           );
         },
+      );
+
+      test(
+        'an empty legacy task uses the chosen volume before capacity checks',
+        () async {
+          await close();
+          const id = 'empty-legacy';
+          await store.put('tasks', [
+            DownloadTask(
+              id: id,
+              spec: spec(),
+              createdAt: 1,
+              status: DownloadStatus.paused,
+              destination: selectedRoot.path,
+            ).toJson(),
+          ]);
+          await open();
+          exhaustCacheVolume();
+          await manager.resume(id);
+          await finish(id);
+          expectSelectedSpaceChecks();
+          expect(
+            p.isWithin(
+              selectedRoot.path,
+              manager.engine.taskCacheRoot(id).path,
+            ),
+            isTrue,
+          );
+        },
+      );
+
+      test(
+        'a complete legacy cache exports without free space on its old volume',
+        () async {
+          await close();
+          const id = 'ready-legacy';
+          final payload = File(p.join(cache.path, id, 'payload.gopeed'));
+          await payload.parent.create(recursive: true);
+          await payload.writeAsBytes(content);
+          await store.put('tasks', [
+            DownloadTask(
+              id: id,
+              spec: spec(),
+              createdAt: 1,
+              status: DownloadStatus.paused,
+              destination: selectedRoot.path,
+              total: content.length,
+              downloaded: content.length,
+              payloadReady: true,
+            ).toJson(),
+          ]);
+          await open();
+          exhaustCacheVolume();
+          await manager.resume(id);
+          await finish(id);
+          expectSelectedSpaceChecks();
+          expect(await payload.exists(), isFalse);
+        },
+      );
+
+      test(
+        'a full selected volume reports the actual drive',
+        () async {
+          await manager.changeDestination(selectedRoot.path);
+          transport.fullVolume = p.rootPrefix(selectedRoot.path).toLowerCase();
+          final id = await manager.enqueue(spec());
+          await until(
+            () => !manager.task(id)!.active && manager.activeCount == 0,
+          );
+          expect(manager.task(id)!.status, DownloadStatus.failed);
+          expectSelectedSpaceChecks();
+          final disk = p
+              .rootPrefix(selectedRoot.path)
+              .replaceFirst(RegExp(r'[\\/]+$'), '');
+          expect(
+            manager.task(id)!.error,
+            contains('下载目录所在磁盘（$disk）空间不足'),
+          );
+          expect(manager.task(id)!.downloaded, 0);
+        },
+        // Drive letters only exist on Windows; elsewhere the message falls back
+        // to the platform neutral wording covered by the test above.
+        skip: !Platform.isWindows
+            ? 'Selected volumes without a drive letter use the generic message.'
+            : false,
       );
 
       test(

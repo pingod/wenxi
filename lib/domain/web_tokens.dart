@@ -1,6 +1,7 @@
 import 'dart:convert';
 import '../core/json.dart';
 import 'models.dart';
+import 'pikpak_web_login.dart';
 import 'xunlei_web_login.dart';
 
 /// The public web clients store token objects, rather than login cookies.
@@ -127,6 +128,12 @@ class WebTokens {
         'deviceId': pick(['device_id', 'deviceId']),
       if (platform == CloudPlatform.xunlei) ...{
         'clientId': XunleiWebLogin.clientId,
+        if (validToken(pick(['captcha_token', 'captchaToken'])))
+          'captchaToken': pick(['captcha_token', 'captchaToken']),
+      },
+      if (platform == CloudPlatform.pikpak) ...{
+        if (pick(['client_id', 'clientId']) == PikPakWebLogin.clientId)
+          'clientId': PikPakWebLogin.clientId,
         if (validToken(pick(['captcha_token', 'captchaToken'])))
           'captchaToken': pick(['captcha_token', 'captchaToken']),
       },

@@ -15,6 +15,7 @@ import 'support.dart';
 import 'token_cloud_support.dart';
 import 'xunlei_login_support.dart';
 import 'lanzou_password_support.dart';
+import 'wopan_login_support.dart';
 
 class GestureCaptcha extends TianyiCaptchaClient {
   GestureCaptcha(int type, {required super.cancel})
@@ -611,6 +612,189 @@ void main() {
         expect(tester.takeException(), isNull);
       },
     );
+  }
+
+  Future<void> sendWopanSms(WidgetTester tester, LoginHttp http) async {
+    await tester.enterText(
+      find.byKey(const ValueKey('wopan-sms-mobile')),
+      '13800000000',
+    );
+    await tester.tap(find.byKey(const ValueKey('wopan-sms-agreement')));
+    await tester.runAsync(() async {
+      await tester.tap(find.byKey(const ValueKey('wopan-sms-send')));
+      await until(
+        () =>
+            http.calls.any((r) => r.uri.path.endsWith('/sendMessageCodeBase')),
+      );
+      await Future<void>.delayed(Duration.zero);
+    });
+    await tester.pumpAndSettle();
+    expect(find.text('验证码已发送，请查看手机短信'), findsOneWidget);
+  }
+
+  testWidgets(
+    'Wopan defaults to SMS and requires a valid phone and agreement',
+    (tester) async {
+      final http = LoginHttp(wopanLoginResponse);
+      await render(tester, CloudPlatform.wopan, http);
+      expect(find.text('手机号验证码登录'), findsOneWidget);
+      expect(find.byType(WebLoginPage), findsNothing);
+      expect(find.byKey(const ValueKey('native-login-password')), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('wopan-sms-send')));
+      await tester.pump();
+      expect(find.text('请输入正确的手机号'), findsOneWidget);
+      await tester.enterText(
+        find.byKey(const ValueKey('wopan-sms-mobile')),
+        '13800000000',
+      );
+      await tester.tap(find.byKey(const ValueKey('wopan-sms-send')));
+      await tester.pump();
+      expect(find.text('请先阅读并同意联通用户协议和隐私政策'), findsOneWidget);
+      expect(http.calls, isEmpty);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('Wopan disables resend and changing phones discards its code', (
+    tester,
+  ) async {
+    final http = LoginHttp(wopanLoginResponse);
+    await render(tester, CloudPlatform.wopan, http);
+    await sendWopanSms(tester, http);
+    expect(
+      tester
+          .widget<TextButton>(find.byKey(const ValueKey('wopan-sms-send')))
+          .onPressed,
+      isNull,
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('wopan-sms-code')),
+      '123456',
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('wopan-sms-mobile')),
+      '13900000000',
+    );
+    expect(
+      tester
+          .widget<TextField>(find.byKey(const ValueKey('wopan-sms-code')))
+          .controller!
+          .text,
+      isEmpty,
+    );
+    await tester.tap(find.byKey(const ValueKey('wopan-sms-submit')));
+    await tester.pumpAndSettle();
+    expect(find.text('请先获取当前手机号的验证码'), findsOneWidget);
+    expect(http.calls, hasLength(1));
+    await tester.tap(find.byKey(const ValueKey('wopan-sms-send')));
+    expect(http.calls, hasLength(1));
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final size in [const Size(393, 852), const Size(1280, 800)]) {
+    testWidgets('Wopan SMS saves verified tokens without its code at $size', (
+      tester,
+    ) async {
+      final http = LoginHttp(wopanLoginResponse);
+      final services = await render(
+        tester,
+        CloudPlatform.wopan,
+        http,
+        size: size,
+      );
+      final owner = tester
+          .widget<PasswordLoginFlow>(find.byType(PasswordLoginFlow))
+          .accountId;
+      await sendWopanSms(tester, http);
+      await tester.enterText(
+        find.byKey(const ValueKey('wopan-sms-code')),
+        '123456',
+      );
+      await tester.runAsync(() async {
+        await tester.tap(find.byKey(const ValueKey('wopan-sms-submit')));
+        await until(
+          () => services.vault.credential(CloudPlatform.wopan) != null,
+        );
+      });
+      await tester.pumpAndSettle();
+      final saved = services.vault.credentialFor(CloudPlatform.wopan, owner)!;
+      expect(saved.field('username'), '13800000000');
+      expect(saved.field('userId'), 'wopan-user');
+      expect(saved.field('clientId'), '1001000035');
+      expect(saved.field('refreshToken'), refreshToken);
+      expect(saved.fields.values, isNot(contains('123456')));
+      expect(find.byType(PasswordLoginFlow), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  for (final phase in ['sending', 'verifying']) {
+    testWidgets('Leaving Wopan SMS while $phase ignores the late result', (
+      tester,
+    ) async {
+      final delayed = Completer<HttpResult>();
+      RecordedRequest? held;
+      final http = LoginHttp((r) {
+        if (phase == 'sending' && r.uri.path.endsWith('/sendMessageCodeBase') ||
+            phase == 'verifying' &&
+                r.json.obj('header').str('key') == 'LoginByMobileV2') {
+          held = r;
+          return delayed.future;
+        }
+        return wopanLoginResponse(r);
+      });
+      final before = tokenCredential(CloudPlatform.wopan);
+      final services = await render(
+        tester,
+        CloudPlatform.wopan,
+        http,
+        initialData: {
+          'credentials': {CloudPlatform.wopan.key: before.toJson()},
+        },
+      );
+      if (phase == 'verifying') {
+        await sendWopanSms(tester, http);
+        await tester.enterText(
+          find.byKey(const ValueKey('wopan-sms-code')),
+          '123456',
+        );
+      } else {
+        await tester.enterText(
+          find.byKey(const ValueKey('wopan-sms-mobile')),
+          '13800000000',
+        );
+        await tester.tap(find.byKey(const ValueKey('wopan-sms-agreement')));
+      }
+      await tester.runAsync(() async {
+        await tester.tap(
+          find.byKey(
+            ValueKey(
+              phase == 'sending' ? 'wopan-sms-send' : 'wopan-sms-submit',
+            ),
+          ),
+        );
+        await until(() => held != null);
+      });
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      delayed.complete(wopanLoginResponse(held!));
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 20)),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        services.vault.credential(CloudPlatform.wopan)!.sameAs(before),
+        isTrue,
+      );
+      expect(
+        http.calls.where(
+          (r) => r.json.obj('header').str('key') == 'AppQueryUser',
+        ),
+        isEmpty,
+      );
+      expect(find.byType(PasswordLoginFlow), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
   }
 
   testWidgets(

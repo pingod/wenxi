@@ -98,6 +98,80 @@ void main() {
     },
   );
 
+  for (final recover in [true, false]) {
+    test(
+      'Default preparation budget retries 64 times: recover=$recover',
+      () async {
+        final store = StateStore.memory();
+        final vault = Vault(store);
+        await vault.putCredential(
+          CloudPlatform.c139,
+          _credential(CloudPlatform.c139),
+        );
+        final reads = <String, int>{};
+        final http = FakeHttp((request) {
+          final path = request.uri.path;
+          final count = reads.update(path, (n) => n + 1, ifAbsent: () => 1);
+          final listing = path.endsWith('/file/list');
+          if ((listing && count == 1) ||
+              (!listing && (count < 64 || !recover))) {
+            return const HttpResult(503, '{}');
+          }
+          return jsonResponse({
+            'code': '0000',
+            'data': listing
+                ? {
+                    'items': [
+                      {
+                        'fileId': 'file',
+                        'name': 'fixture.bin',
+                        'size': 4,
+                        'type': 'file',
+                      },
+                    ],
+                  }
+                : {'url': _direct},
+          });
+        });
+        final delays = <Duration>[];
+        final repository = CloudRepository(
+          http,
+          vault,
+          CleanupOutbox(store, http),
+          retryWait: (delay) async => delays.add(delay),
+        );
+        final planned = repository.planDownload(
+          const BrowseSession(
+            platform: CloudPlatform.c139,
+            mode: BrowseMode.personal,
+            title: 'fixture',
+            rootId: 'root',
+          ),
+          const CloudFile(
+            id: 'file',
+            name: 'fixture.bin',
+            parentId: 'root',
+            size: 4,
+          ),
+        );
+        if (recover) {
+          expect((await repository.refresh(planned)).url, _direct);
+        } else {
+          await expectLater(
+            repository.refresh(planned),
+            throwsA(isA<HttpRequestFailure>()),
+          );
+        }
+        expect(reads, {'/hcy/file/list': 2, '/hcy/file/getDownloadUrl': 64});
+        expect(delays, [
+          const Duration(seconds: 2),
+          const Duration(seconds: 5),
+          ...List.filled(62, const Duration(seconds: 10)),
+        ]);
+      },
+    );
+  }
+
   test(
     'Pausing a share preparation waiting for the common root does not wait for another task',
     () async {

@@ -133,7 +133,7 @@ void main() {
         key: const Key('background-capture'),
         child: AsterLinkApp(
           services,
-          initialTab: 3,
+          initialTab: 4,
           fontFamily: systemFont ? 'BackgroundFixture' : null,
         ),
       ),
@@ -342,16 +342,17 @@ void main() {
         final layer = tester.renderObject(
           find.byKey(const Key('app-background-layer')),
         );
-        for (var i = 0; i < 4; i++) {
+        for (var i = 0; i < 5; i++) {
           await tap(tester, 'navigation-$i');
           expect(
             tester.renderObject(find.byKey(const Key('app-background-layer'))),
             same(layer),
           );
-          expect(
-            tester.widget<Scaffold>(find.byType(Scaffold)).backgroundColor,
-            Colors.transparent,
-          );
+          for (final scaffold in tester.widgetList<Scaffold>(
+            find.byType(Scaffold),
+          )) {
+            expect(scaffold.backgroundColor, Colors.transparent);
+          }
           expect(
             tester.widget<BackgroundScope>(find.byType(BackgroundScope)).active,
             isTrue,
@@ -365,7 +366,7 @@ void main() {
           );
           await screenshot(
             tester,
-            '${scenario.$1}-${['parse', 'cloud', 'transfers', 'mine'][i]}',
+            '${scenario.$1}-${['parse', 'resources', 'cloud', 'transfers', 'mine'][i]}',
           );
           expect(tester.takeException(), isNull);
         }

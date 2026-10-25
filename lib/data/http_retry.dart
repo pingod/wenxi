@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import '../domain/download_retries.dart';
 import 'http.dart';
 
 class ReadRetryAttempt {
@@ -16,7 +17,7 @@ class ReadRetryScope {
     required this.checkpoint,
     this.onRetry,
     this.wait = RequestScope.wait,
-  }) : retries = retries.clamp(0, 3);
+  }) : retries = retries.clamp(0, maxDownloadRetries);
 
   static final _key = Object();
   static ReadRetryScope? get current => Zone.current[_key] as ReadRetryScope?;
@@ -64,7 +65,7 @@ class ReadRetryScope {
       }
       checkpoint();
       if (!failure.retryable || _attempts >= retries) throw failure;
-      final normal = Duration(seconds: const [2, 5, 10][_attempts]);
+      final normal = Duration(seconds: const [2, 5, 10][_attempts.clamp(0, 2)]);
       final server = _retryAfter(failure.retryAfter);
       final delay = server != null && server > normal ? server : normal;
       final attempt = ReadRetryAttempt(++_attempts, delay, failure);

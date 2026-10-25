@@ -52,10 +52,10 @@ void main() {
         '  咐置松君杂货铺叩苓\n',
         1700000000000,
       );
-      expect(q['sign'], '2ee10236c811f81bbc5852f0e1904b7813b5444e3c5e');
+      expect(q['sign'], '2ee161cbfb0130221d5ee15564630fcbb5cd8baaa43b');
       expect(q['clipboard'], '  咐置松君杂货铺叩苓\n');
-      expect(q['identifier'], '咐置');
-      expect(q['shareSecret'], '松君杂货铺');
+      expect(q['identifier'], '');
+      expect(q['shareSecret'], '');
       final u = resolver.buildRequest(
         CloudPlatform.uc,
         '  ~U_Cfc773YARWW~\n',
@@ -83,9 +83,9 @@ void main() {
         1700000000000,
       );
       expect(body['clipboard'], clipboard);
-      expect(body['identifier'], '/~');
-      expect(body['shareSecret'], '62003YrHLe');
-      expect(body['sign'], '2ee1d4997afa780f9d96b7c5d8645358d43b3af892e9');
+      expect(body['identifier'], '');
+      expect(body['shareSecret'], '');
+      expect(body['sign'], '2ee143fc94fbf48728a1a471d345ee19299e44d23564');
     },
   );
 
@@ -102,26 +102,33 @@ void main() {
       expect(link.passcode, 'A%2B+B');
       expect(http.calls, hasLength(1));
       expect(http.calls.single.uri.host, 'utoken2.quark.cn');
-      expect(http.calls.single.json['identifier'], '/~');
-      expect(http.calls.single.json['shareSecret'], '62003YrHLe');
+      expect(http.calls.single.json['identifier'], '');
+      expect(http.calls.single.json['shareSecret'], '');
     },
   );
 
   for (final input in [
+    '新格式+_令牌/123，打开夸克查看',
+    '/~a~:/',
     '/~62003YrHLe~:/ /~62003YrHLe~:/',
     '咐置一个叩苓 /~62003YrHLe~:/',
+    '咐置一个叩苓 咐置另一个叩苓',
   ]) {
-    test('Multiple or mixed Quark commands are rejected: $input', () async {
-      final http = FakeHttp();
-      await expectLater(
-        CloudCommandResolver(
+    test(
+      'Quark lets the provider interpret the complete clipboard: $input',
+      () async {
+        final http = FakeHttp((_) => commandResponse(CloudPlatform.quark));
+        final link = await CloudCommandResolver(
           http,
           keys: fixtureCommandKeys,
-        ).resolve(CloudPlatform.quark, input),
-        throwsA(isA<AppException>()),
-      );
-      expect(http.calls, isEmpty);
-    });
+        ).resolve(CloudPlatform.quark, input);
+        expect(link.shareId, 'fixture');
+        expect(http.calls, hasLength(1));
+        expect(http.calls.single.json['clipboard'], input);
+        expect(http.calls.single.json['identifier'], '');
+        expect(http.calls.single.json['shareSecret'], '');
+      },
+    );
   }
 
   for (final platform in CloudCommandResolver.platforms) {
@@ -156,6 +163,93 @@ void main() {
     );
   }
 
+  for (final platform in CloudCommandResolver.platforms) {
+    test(
+      '${platform.key} sends new formats without a local character filter',
+      () async {
+        final input = '新口令 @token_123-🪁 ${'a' * 100}';
+        final http = FakeHttp((_) => commandResponse(platform));
+        final link = await CloudCommandResolver(
+          http,
+          keys: fixtureCommandKeys,
+        ).resolve(platform, input);
+        expect(link.platform, platform);
+        expect(http.calls, hasLength(1));
+        expect(
+          platform == CloudPlatform.xunlei
+              ? http.calls.single.uri.queryParameters['wd']
+              : http.calls.single.json['clipboard'],
+          input,
+        );
+      },
+    );
+
+    test(
+      '${platform.key} still rejects empty or excessive input before networking',
+      () async {
+        final http = FakeHttp();
+        for (final input in [
+          '',
+          ' \n ',
+          'x' * (CloudCommandResolver.maximumLength + 1),
+        ]) {
+          await expectLater(
+            CloudCommandResolver(
+              http,
+              keys: fixtureCommandKeys,
+            ).resolve(platform, input),
+            throwsA(isA<AppException>()),
+          );
+        }
+        expect(http.calls, isEmpty);
+      },
+    );
+  }
+
+  test(
+    'Xunlei retries the exact text when punctuation belongs to a new token',
+    () async {
+      const command = 'new_token!';
+      final http = FakeHttp(
+        (r) => r.uri.queryParameters['wd'] == command
+            ? commandResponse(CloudPlatform.xunlei)
+            : jsonResponse({
+                'ext': {'kouling_type': 'search'},
+              }),
+      );
+      final link = await CloudCommandResolver(
+        http,
+      ).resolve(CloudPlatform.xunlei, command);
+      expect(link.shareId, 'fixture');
+      expect(http.calls.map((r) => r.uri.queryParameters['wd']), [
+        'new_token',
+        command,
+      ]);
+    },
+  );
+
+  test(
+    'Quoted legacy Xunlei commands still resolve with one request',
+    () async {
+      final http = FakeHttp((_) => commandResponse(CloudPlatform.xunlei));
+      final link = await CloudCommandResolver(
+        http,
+      ).resolve(CloudPlatform.xunlei, '【张三丰资源】');
+      expect(link.shareId, 'fixture');
+      expect(http.calls, hasLength(1));
+      expect(http.calls.single.uri.queryParameters['wd'], '张三丰资源');
+    },
+  );
+
+  test('Xunlei network errors do not trigger a second text variant', () async {
+    final http = FakeHttp((_) => const HttpResult(503, '{}'));
+    await expectLater(
+      CloudCommandResolver(http).resolve(CloudPlatform.xunlei, '【口令】'),
+      throwsA(isA<AppException>()),
+    );
+    expect(http.calls, hasLength(1));
+  });
+
   test(
     'Failure on a selected provider never queries another provider',
     () async {
@@ -174,34 +268,24 @@ void main() {
     },
   );
 
-  test(
-    'Missing build material and unsupported Quark formats do not send requests',
-    () async {
-      final http = FakeHttp();
-      await expectLater(
-        CloudCommandResolver(
-          http,
-          keys: const CloudCommandKeys(quark: '', uc: ''),
-        ).resolve(CloudPlatform.uc, '中文口令'),
-        throwsA(isA<AppException>()),
-      );
-      await expectLater(
-        CloudCommandResolver(
-          http,
-          keys: fixtureCommandKeys,
-        ).resolve(CloudPlatform.quark, '未知格式'),
-        throwsA(isA<AppException>()),
-      );
-      await expectLater(
-        CloudCommandResolver(
-          http,
-          keys: fixtureCommandKeys,
-        ).resolve(CloudPlatform.quark, '咐置一个叩苓 咐置另一个叩苓'),
-        throwsA(isA<AppException>()),
-      );
-      expect(http.calls, isEmpty);
-    },
-  );
+  test('Missing build material does not send requests', () async {
+    final http = FakeHttp();
+    await expectLater(
+      CloudCommandResolver(
+        http,
+        keys: const CloudCommandKeys(quark: '', uc: ''),
+      ).resolve(CloudPlatform.uc, '中文口令'),
+      throwsA(isA<AppException>()),
+    );
+    await expectLater(
+      CloudCommandResolver(
+        http,
+        keys: const CloudCommandKeys(quark: '', uc: ''),
+      ).resolve(CloudPlatform.quark, '任意新格式'),
+      throwsA(isA<AppException>()),
+    );
+    expect(http.calls, isEmpty);
+  });
 
   test('Malformed response and non-share Xunlei result are rejected', () async {
     final http = FakeHttp(

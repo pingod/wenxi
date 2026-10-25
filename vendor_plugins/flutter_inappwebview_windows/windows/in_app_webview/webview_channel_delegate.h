@@ -45,7 +45,7 @@ namespace flutter_inappwebview_plugin
 
     class PermissionRequestCallback : public BaseCallbackResult<const std::shared_ptr<PermissionResponse>> {
     public:
-      PermissionRequestCallback();
+      PermissionRequestCallback() { decodeResult = PermissionResponse::fromEncodableValue; }
       ~PermissionRequestCallback() = default;
     };
 
@@ -82,6 +82,7 @@ namespace flutter_inappwebview_plugin
     void onDevToolsProtocolEventReceived(const std::string& eventName, const std::string& data) const;
     void onCreateWindow(std::shared_ptr<CreateWindowAction> createWindowAction, std::unique_ptr<CreateWindowCallback> callback) const;
     void onCloseWindow() const;
+    void onRenderProcessGone(bool didCrash) const;
     void onPermissionRequest(const std::string& origin, const std::vector<int64_t>& resources, std::unique_ptr<PermissionRequestCallback> callback) const;
     void shouldInterceptRequest(std::shared_ptr<WebResourceRequest> request, std::unique_ptr<ShouldInterceptRequestCallback> callback) const;
     void onLoadResourceWithCustomScheme(std::shared_ptr<WebResourceRequest> request, std::unique_ptr<LoadResourceWithCustomSchemeCallback> callback) const;

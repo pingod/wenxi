@@ -8,6 +8,7 @@
 
 #include "strconv.h"
 #include "string.h"
+#include "native_diagnostics.h"
 
 namespace flutter_inappwebview_plugin
 {
@@ -62,6 +63,7 @@ namespace flutter_inappwebview_plugin
 
   static inline void debugLog(const HRESULT& hr, const std::string& filename = "", const int& line = 0)
   {
+    if (FAILED(hr)) nativeDiagnostic("webview.hresult_failed", hr, line, nativeDiagnosticSource(filename.c_str()));
     auto isError = hr != S_OK;
     auto errorCode = std::to_string(hr);
     debugLog((isError ? "Error " + errorCode + ": " : "Message: ") + getHRMessage(hr), isError, filename, line);
@@ -95,9 +97,10 @@ namespace flutter_inappwebview_plugin
 
 #ifndef NDEBUG
 #define debugLog(value) debugLog(value, false, __FILE__, __LINE__)
+#endif
+// Retain source line/basename hash for failed HRESULTs in Release as well.
 #define succeededOrLog(value) succeededOrLog(value, __FILE__, __LINE__)
 #define failedAndLog(value) failedAndLog(value, __FILE__, __LINE__)
 #define failedLog(value) failedLog(value, __FILE__, __LINE__)
-#endif
 
 #endif //FLUTTER_INAPPWEBVIEW_PLUGIN_LOG_UTIL_H_

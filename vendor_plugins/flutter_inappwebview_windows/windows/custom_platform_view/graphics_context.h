@@ -1,5 +1,7 @@
 #pragma once
 
+#include <mutex>
+
 #include <D3d11.h>
 #include <windows.graphics.capture.h>
 #include <windows.ui.composition.h>
@@ -20,6 +22,9 @@ namespace flutter_inappwebview_plugin
       return device_winrt_.get();
     }
     ID3D11Device* d3d_device() const { return device_.get(); }
+    // The same immediate context is used by platform capture and Flutter's
+    // raster thread, and by more than one login window.
+    std::mutex& context_mutex() const { return context_mutex_; }
     ID3D11DeviceContext* d3d_device_context() const
     {
       return device_context_.get();
@@ -45,6 +50,7 @@ namespace flutter_inappwebview_plugin
 
   private:
     bool valid_ = false;
+    mutable std::mutex context_mutex_;
     rx::RoHelper* rohelper_;
     winrt::com_ptr<ABI::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice>
       device_winrt_;

@@ -11,6 +11,29 @@ import 'package:asterlink/domain/auth.dart';
 import 'package:asterlink/domain/models.dart';
 import 'support.dart';
 
+// REST requests and bounded media probes are separate protocol operations.
+// The selected fixture video is 42 bytes; its node supports authenticated Range.
+class _UcHttp extends FakeHttp {
+  _UcHttp([super.respond]);
+
+  @override
+  Future<HttpResult> peek(
+    String url,
+    Map<String, String> headers, {
+    int maxBytes = 8192,
+    bool followRedirects = true,
+  }) async {
+    expect(url, startsWith('https://example.com/original'));
+    expect(maxBytes, 1);
+    expect(headers['Cookie'], isNotEmpty);
+    expect(headers['Accept-Encoding'], 'identity');
+    return const HttpResult(206, 'x', {
+      'content-range': ['bytes 0-0/42'],
+      'content-length': ['1'],
+    });
+  }
+}
+
 const _now = 1700000000000;
 const _personal = BrowseSession(
   platform: CloudPlatform.uc,
@@ -88,7 +111,7 @@ void main() {
       () async {
         final vault = Vault(StateStore.memory()), old = _credential();
         await vault.putCredential(CloudPlatform.uc, old);
-        final http = FakeHttp(
+        final http = _UcHttp(
           (r) => r.uri.path.endsWith('/config') ? _refresh() : _download(),
         );
         final spec = await _connector(
@@ -131,7 +154,7 @@ void main() {
       () async {
         final vault = Vault(StateStore.memory()), c = _credential(fresh: true);
         await vault.putCredential(CloudPlatform.uc, c);
-        final http = FakeHttp((r) {
+        final http = _UcHttp((r) {
           expect(r.uri.path, '/1/clouddrive/file/download');
           return _download(
             cookies: [
@@ -160,7 +183,7 @@ void main() {
       'A 401 on a recently saved Cookie triggers one refresh and one retry',
       () async {
         var requests = 0;
-        final http = FakeHttp((r) {
+        final http = _UcHttp((r) {
           if (r.uri.path.endsWith('/config')) return _refresh();
           return requests++ == 0 ? _expired : _download();
         });
@@ -178,7 +201,7 @@ void main() {
       'Business login error 31001 is retried even when HTTP status is 200',
       () async {
         var requests = 0;
-        final http = FakeHttp((r) {
+        final http = _UcHttp((r) {
           if (r.uri.path.endsWith('/config')) return _refresh();
           return requests++ == 0
               ? jsonResponse({
@@ -199,7 +222,7 @@ void main() {
     test(
       'Still-expired sessions stop after one retry and require login',
       () async {
-        final http = FakeHttp(
+        final http = _UcHttp(
           (r) => r.uri.path.endsWith('/config') ? _refresh() : _expired,
         );
         await expectLater(
@@ -220,7 +243,7 @@ void main() {
     test(
       'Refresh network errors do not prevent an existing usable session downloading',
       () async {
-        final http = FakeHttp((r) {
+        final http = _UcHttp((r) {
           if (r.uri.path.endsWith('/config')) {
             throw const AppException('fixture offline');
           }
@@ -239,7 +262,7 @@ void main() {
       () async {
         final vault = Vault(StateStore.memory()), c = _credential();
         await vault.putCredential(CloudPlatform.uc, c);
-        final http = FakeHttp(
+        final http = _UcHttp(
           (r) => r.uri.path.endsWith('/config') ? _ok({}) : _expired,
         );
         await expectLater(
@@ -254,7 +277,7 @@ void main() {
     test(
       'Malformed or cleared Set-Cookie values cannot erase the working Cookie',
       () async {
-        final http = FakeHttp(
+        final http = _UcHttp(
           (_) => _download(
             cookies: [
               '__puus=; Max-Age=0',
@@ -277,7 +300,7 @@ void main() {
             c = _credential(),
             scope = RequestScope();
         await vault.putCredential(CloudPlatform.uc, c);
-        final http = FakeHttp((_) {
+        final http = _UcHttp((_) {
           scope.cancel();
           return _refresh();
         });
@@ -300,7 +323,7 @@ void main() {
               c = _credential(),
               reply = Completer<HttpResult>();
           await vault.putCredential(CloudPlatform.uc, c);
-          final http = FakeHttp((_) => reply.future);
+          final http = _UcHttp((_) => reply.future);
           final pending = expectLater(
             _connector(http, vault: vault).download(_personal, _file, c),
             _message('账号已变化'),
@@ -337,7 +360,7 @@ void main() {
         await vault.putCredential(CloudPlatform.uc, c);
         final replies = [Completer<HttpResult>(), Completer<HttpResult>()];
         var index = 0;
-        final http = FakeHttp((_) => replies[index++].future),
+        final http = _UcHttp((_) => replies[index++].future),
             connector = _connector(http, vault: vault);
         final first = connector.download(_personal, _file, c);
         final second = connector.download(_personal, _file, c);
@@ -362,7 +385,7 @@ void main() {
             vault = Vault(store),
             c = _credential();
         await vault.putCredential(CloudPlatform.uc, c);
-        final http = FakeHttp(
+        final http = _UcHttp(
           (r) => r.uri.path.endsWith('/config') ? _refresh() : _download(),
         );
         final repository = CloudRepository(
@@ -388,7 +411,7 @@ void main() {
         () async {
           final staged = <DownloadCleanup>[];
           var polls = 0;
-          final http = FakeHttp((r) {
+          final http = _UcHttp((r) {
             switch (r.uri.path) {
               case '/1/clouddrive/config':
                 return _refresh();
@@ -475,7 +498,7 @@ void main() {
     test(
       'Failed share transfer never requests a download link and cleans only its temporary folder',
       () async {
-        final http = FakeHttp((r) {
+        final http = _UcHttp((r) {
           if (r.uri.path.endsWith('/file/sort')) {
             return _ok({
               'list': [
@@ -508,7 +531,7 @@ void main() {
     test(
       'Failed transfer authentication does not issue download requests',
       () async {
-        final http = FakeHttp(
+        final http = _UcHttp(
           (r) => r.uri.path.endsWith('/config') ? _refresh() : _expired,
         );
         await expectLater(
@@ -525,7 +548,7 @@ void main() {
 
     test('Cancelled share transfer does not issue download requests', () async {
       final scope = RequestScope();
-      final http = FakeHttp((_) {
+      final http = _UcHttp((_) {
         scope.cancel();
         throw const AppException('请求已取消');
       });
@@ -541,16 +564,16 @@ void main() {
     });
 
     test(
-      'Missing share tokens without original link require reparsing',
+      'Missing share tokens retain the account route guidance to reopen the list',
       () async {
-        final http = FakeHttp();
+        final http = _UcHttp();
         await expectLater(
           _connector(http).download(
             _share,
             const CloudFile(id: 'file-1', name: 'sample.zip'),
             _credential(),
           ),
-          _message('重新解析'),
+          _message('重新打开分享列表'),
         );
         expect(http.calls, isEmpty);
       },
@@ -559,7 +582,7 @@ void main() {
     test(
       'Business errors cannot be mistaken for download success by status 200',
       () async {
-        final http = FakeHttp(
+        final http = _UcHttp(
           (_) => jsonResponse({
             'status': 200,
             'code': 32001,
@@ -586,7 +609,7 @@ void main() {
         ]) {
           await expectLater(
             _connector(
-              FakeHttp((_) => response),
+              _UcHttp((_) => response),
             ).download(_personal, _file, _credential(fresh: true)),
             throwsA(isA<AppException>()),
           );
@@ -598,7 +621,7 @@ void main() {
       'Missing response size retains the known size for download verification',
       () async {
         final spec = await _connector(
-          FakeHttp((_) => _download(size: 0)),
+          _UcHttp((_) => _download(size: 0)),
         ).download(_personal, _file, _credential(fresh: true));
         expect(spec.expectedSize, 42);
       },
@@ -611,7 +634,7 @@ void main() {
       () async {
         final vault = Vault(StateStore.memory()), old = _credential();
         await vault.putCredential(CloudPlatform.uc, old);
-        final http = FakeHttp((r) {
+        final http = _UcHttp((r) {
           expect(vault.credential(CloudPlatform.uc)!.sameAs(old), isTrue);
           return _ok(
             {'nickname': 'new-user', 'use_capacity': 10, 'total_capacity': 100},
@@ -638,7 +661,7 @@ void main() {
     test('Expired candidate cannot replace an existing UC login', () async {
       final vault = Vault(StateStore.memory()), old = _credential();
       await vault.putCredential(CloudPlatform.uc, old);
-      final http = FakeHttp((_) => _expired);
+      final http = _UcHttp((_) => _expired);
       await expectLater(
         _login(
           vault,
@@ -652,7 +675,7 @@ void main() {
     test(
       'Personal browsing is independent of capacity and uses the desktop client header',
       () async {
-        final http = FakeHttp((r) {
+        final http = _UcHttp((r) {
           expect(r.uri.path, '/1/clouddrive/file/sort');
           return _ok({
             'list': [
@@ -674,7 +697,7 @@ void main() {
     test(
       'Valid cloud capacity is retained if the optional account-info endpoint fails',
       () async {
-        final http = FakeHttp(
+        final http = _UcHttp(
           (r) => r.uri.path.endsWith('/member')
               ? _ok({
                   'use_capacity': '1099511627776',
@@ -697,7 +720,7 @@ void main() {
     test(
       'Incomplete lists and quotas surface errors instead of empty success',
       () async {
-        final connector = _connector(FakeHttp((_) => _ok({})));
+        final connector = _connector(_UcHttp((_) => _ok({})));
         await expectLater(
           connector.list(_personal, '0', _credential()),
           _message('文件列表响应不完整'),
@@ -709,7 +732,7 @@ void main() {
     test(
       'Personal downloads without credentials fail before making network requests',
       () async {
-        final http = FakeHttp();
+        final http = _UcHttp();
         await expectLater(
           _connector(http).download(_personal, _file, null),
           throwsA(isA<AccountLoginRequired>()),

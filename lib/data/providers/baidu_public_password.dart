@@ -1,11 +1,14 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:crypto/crypto.dart';
 
 import '../../core/json.dart';
 import '../../diagnostics/app_log.dart';
 import '../../domain/models.dart';
+import '../../domain/auth.dart';
 import '../../download/download_request.dart';
 import '../cloud_command_resolver.dart';
+import '../cleanup_outbox.dart';
 import '../http.dart';
 import '../http_retry.dart';
 import '../state_store.dart';
@@ -35,6 +38,11 @@ class BaiduPublicPasswords {
     DateTime Function()? clock,
     Future<String> Function()? fetch,
     Future<String> Function()? fetchBackup,
+    this.fetchAuthenticated,
+    this.cleanups,
+    this.storageKey = cacheKey,
+    this.allowBackup = true,
+    this.allowPrevious = true,
   }) : clock = clock ?? DateTime.now,
        _fetch = fetch,
        _fetchBackup = fetchBackup;
@@ -45,6 +53,12 @@ class BaiduPublicPasswords {
   final DateTime Function() clock;
   final Future<String> Function()? _fetch;
   final Future<String> Function()? _fetchBackup;
+  final Future<String> Function(Credential account)? fetchAuthenticated;
+  final CleanupOutbox? cleanups;
+  final String storageKey;
+  final bool allowBackup, allowPrevious;
+  final _accountCaches = <String, BaiduPublicPasswords>{};
+  final _commandScopes = <RequestScope>{};
   static const sourceUrl = BaiduPublicCommandSource.pageUrl;
   static const _legacySourceCommand = '執心急如焚核桃仁生效';
   static const backupUrl = 'https://gitee.com/dzys/cs/raw/master/ls.json';
@@ -67,6 +81,188 @@ class BaiduPublicPasswords {
   DateTime? _retryAt;
   final _rejectedValues = <String, DateTime>{};
   final _writes = AsyncGate();
+
+  bool get hasUcLogin => LoginCredentials.stored(
+    CloudPlatform.uc,
+    store?.credential(CloudPlatform.uc),
+  );
+
+  /// Reads the command supplied by the current password page. This must never
+  /// reuse the daily parser-password cache or the legacy published command.
+  Future<String> fromUcCommand(String command) async {
+    RequestScope.checkpoint();
+    require(!_closed, 'UC 取密服务已关闭');
+    require(
+      command.trim().isNotEmpty &&
+          command.length <= CloudCommandResolver.maximumLength &&
+          !RegExp(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]').hasMatch(command),
+      '网页没有提供有效的 UC 口令，请重新加载',
+    );
+    final vault = store is Vault ? store as Vault : null;
+    final owner = vault?.activeAccountId(CloudPlatform.uc);
+    final account = hasUcLogin ? store!.credential(CloudPlatform.uc) : null;
+    void checkAccount() {
+      require(!_closed, 'UC 取密服务已关闭');
+      final current = vault == null
+          ? store?.credential(CloudPlatform.uc)
+          : vault.credentialFor(CloudPlatform.uc, owner);
+      require(
+        (vault == null || vault.activeAccountId(CloudPlatform.uc) == owner) &&
+            (account == null
+                ? !LoginCredentials.stored(CloudPlatform.uc, current)
+                : current?.updatedAt == account.updatedAt &&
+                      current?.primary == account.primary),
+        'UC 账号已变化，请重新获取密码',
+      );
+    }
+
+    final scope = RequestScope(), parent = RequestScope.current;
+    var finished = false;
+    _commandScopes.add(scope);
+    unawaited(
+      parent?.whenCancel.then((_) {
+        if (!finished) scope.cancel();
+      }),
+    );
+    try {
+      Future<String> read() async {
+        RequestScope.checkpoint();
+        final result = await (account == null
+            ? _readSource(sourceCommand: command)
+            : _readAuthenticatedSource(account, sourceCommand: command));
+        RequestScope.checkpoint();
+        return result;
+      }
+
+      return await scope
+          .run(
+            () => RequestScope.cancellable(
+              RequestScope.guarded(
+                () =>
+                    const DownloadRequestContext(
+                      id: 'password-web-uc',
+                      retries: 0,
+                    ).run(
+                      () => vault == null
+                          ? read()
+                          : vault.withAccount(CloudPlatform.uc, owner, read),
+                    ),
+                checkAccount,
+              ),
+            ),
+          )
+          .timeout(
+            const Duration(seconds: 45),
+            onTimeout: () {
+              scope.cancel();
+              throw const AppException('UC 口令取密超时，请重新加载后再试');
+            },
+          );
+    } finally {
+      finished = true;
+      _commandScopes.remove(scope);
+      scope.cancel();
+    }
+  }
+
+  /// Only an authenticated UC transfer can fill this cache. Guest downloads,
+  /// shared-site passwords and the old Gitee fallback cannot satisfy this path.
+  Future<BaiduPublicPassword> authenticated() async {
+    RequestScope.checkpoint();
+    if (_closed || !hasUcLogin) throw _unavailable;
+    final account = store!.credential(CloudPlatform.uc)!;
+    final vault = store is Vault ? store as Vault : null;
+    final owner = vault?.accountId(CloudPlatform.uc);
+    final identity = sha256
+        .convert(
+          utf8.encode('${owner ?? account.primary}|${account.updatedAt}'),
+        )
+        .toString();
+    void checkAccount() {
+      RequestScope.checkpoint();
+      require(
+        hasUcLogin &&
+            store!.credential(CloudPlatform.uc)?.updatedAt ==
+                account.updatedAt &&
+            (vault == null || vault.accountId(CloudPlatform.uc) == owner),
+        'UC 账号已变化，请重新解析',
+      );
+    }
+
+    final cache = _accountCaches.putIfAbsent(
+      identity,
+      () => BaiduPublicPasswords(
+        http,
+        store: store,
+        clock: clock,
+        storageKey: 'publicParser.mfDg22.ucPassword.$identity',
+        allowBackup: false,
+        allowPrevious: false,
+        fetch: () async {
+          checkAccount();
+          Future<String> read() async {
+            final value =
+                await (fetchAuthenticated?.call(account) ??
+                    _readAuthenticatedSource(account));
+            checkAccount();
+            return value;
+          }
+
+          return vault == null
+              ? read()
+              : vault.withAccount(CloudPlatform.uc, owner, read);
+        },
+      ),
+    );
+    final result = await cache.get();
+    checkAccount();
+    return result;
+  }
+
+  Future<void> rejectAuthenticated(
+    BaiduPublicPassword used, {
+    bool deferRetry = true,
+  }) async {
+    for (final cache in _accountCaches.values) {
+      await cache.reject(used, deferRetry: deferRetry);
+    }
+  }
+
+  Future<String> _readAuthenticatedSource(
+    Credential account, {
+    String? sourceCommand,
+  }) async {
+    final outbox = cleanups;
+    require(outbox != null, 'UC 自动取密暂未准备好，请手动填写密码');
+    final staged = <DownloadCleanup>[];
+    final uc = UcConnector(
+      http,
+      store: store,
+      stageCleanup: (cleanup) async {
+        outbox!.retain(cleanup);
+        staged.add(cleanup);
+        await outbox.stage(cleanup);
+      },
+    );
+    try {
+      return await _readSource(
+        connector: uc,
+        credential: account,
+        transfer: true,
+        sourceCommand: sourceCommand,
+      );
+    } finally {
+      // Cancellation must still release this operation's private transfer folder.
+      // The outbox preserves failed cleanup for a later retry.
+      await RequestScope().run(() async {
+        for (final cleanup in staged) {
+          await outbox!.release(cleanup);
+          await outbox.ready(cleanup);
+        }
+        if (staged.isNotEmpty) unawaited(outbox!.drain());
+      }, inheritGuard: false);
+    }
+  }
 
   static bool _valid(String value) =>
       value.isNotEmpty &&
@@ -125,7 +321,7 @@ class BaiduPublicPasswords {
     if (_loaded) return;
     _loaded = true;
     try {
-      final saved = store?.secret(cacheKey);
+      final saved = store?.secret(storageKey);
       if (saved == null || saved.length > prefixBytes + 1024) return;
       final data = asJson(jsonDecode(saved));
       final legacy =
@@ -163,7 +359,7 @@ class BaiduPublicPasswords {
     if (cached == null || store == null || _closed) return;
     try {
       await store!.putSecret(
-        cacheKey,
+        storageKey,
         encoded({
           'schema': _legacyCache ? 1 : 2,
           'source': _legacyCache ? _legacySourceCommand : sourceUrl,
@@ -200,7 +396,7 @@ class BaiduPublicPasswords {
     if (retryAt != null &&
         now.isBefore(retryAt) &&
         retryAt.difference(now) <= _retryDelay) {
-      if (cached != null && !_rejected) return cached;
+      if (allowPrevious && cached != null && !_rejected) return cached;
       throw _unavailable;
     }
 
@@ -247,7 +443,7 @@ class BaiduPublicPasswords {
           }
           _retryAt = clock().toUtc().add(_retryDelay);
           final fallback = _cached;
-          final usable = fallback != null && !_rejected;
+          final usable = allowPrevious && fallback != null && !_rejected;
           DiagnosticLog.event(
             'baidu.public_password',
             fields: {
@@ -271,9 +467,11 @@ class BaiduPublicPasswords {
   }
 
   /// Background failures must never prevent opening the app or show a dialog.
-  Future<void> prefetch() async {
+  Future<void> prefetch({bool authenticatedOnly = false}) async {
     if (_closed) return;
     try {
+      // UC account credentials are never used to obtain a parser password.
+      if (authenticatedOnly) return;
       await get();
     } catch (_) {
       // get() records the stage and keeps any usable previous password.
@@ -283,6 +481,12 @@ class BaiduPublicPasswords {
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
+    for (final scope in _commandScopes.toList()) {
+      scope.cancel();
+    }
+    for (final cache in _accountCaches.values) {
+      await cache.close();
+    }
     _activeScope?.cancel();
     try {
       await _pending;
@@ -317,6 +521,7 @@ class BaiduPublicPasswords {
 
   Future<BaiduPublicPassword> _lookup({required bool backupOnly}) async {
     for (final source in BaiduPublicPasswordSource.values) {
+      if (!allowBackup && source == BaiduPublicPasswordSource.gitee) continue;
       if (backupOnly && source == BaiduPublicPasswordSource.uc) continue;
       final scope = RequestScope(), parent = RequestScope.current;
       var finished = false;
@@ -374,21 +579,26 @@ class BaiduPublicPasswords {
     throw _unavailable;
   }
 
-  Future<String> _readSource() async {
-    // A separate connector with no store or credential stays anonymous even
-    // when the app has UC accounts or has disabled guest downloads in settings.
-    final command = await BaiduPublicCommandSource(http, clock: clock).read();
+  Future<String> _readSource({
+    UcConnector? connector,
+    Credential? credential,
+    bool transfer = false,
+    String? sourceCommand,
+  }) async {
+    final command =
+        sourceCommand ??
+        await BaiduPublicCommandSource(http, clock: clock).read();
     RequestScope.checkpoint();
-    final uc = UcConnector(http);
+    final uc = connector ?? UcConnector(http);
     final link = await CloudCommandResolver(
       http,
       keys: commandKeys,
     ).resolve(CloudPlatform.uc, command);
-    final session = await uc.openShare(link, null);
+    final session = await uc.openShare(link, credential);
     final files = (await uc.list(
       session,
       session.rootId,
-      null,
+      credential,
     )).where((file) => !file.isDirectory).toList();
     final textFiles = files.where(
       (file) =>
@@ -396,7 +606,9 @@ class BaiduPublicPasswords {
     );
     final candidates = files.length == 1 ? files : textFiles.toList();
     require(candidates.length == 1, '公益解析密码来源没有唯一的文本文件');
-    final spec = await uc.download(session, candidates.single, null);
+    final spec = transfer
+        ? await uc.downloadFallback(session, candidates.single, credential)
+        : await uc.download(session, candidates.single, credential);
     final response = await http.peek(
       spec.url,
       {

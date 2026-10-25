@@ -2,6 +2,8 @@ import '../core/json.dart';
 import 'models.dart';
 import 'appearance.dart';
 import 'background.dart';
+import 'download_retries.dart';
+import 'github_acceleration.dart';
 
 class BrowserDisplaySettings {
   const BrowserDisplaySettings({
@@ -37,11 +39,14 @@ class AppSettings {
     this.themePalette = AppPalette.blue,
     this.glassStyle = GlassStyle.clear,
     this.background = const BackgroundSettings(),
+    this.hideResourceNavigation = false,
+    this.fontScalePercent = 100,
     this.threads = 64,
     this.concurrent = 3,
-    this.retries = 3,
+    this.retries = defaultDownloadRetries,
     this.speedLimit = 0,
     this.threadOverrides = const {},
+    this.githubAcceleration = const GitHubAcceleration(),
     this.destination,
     this.browserView = 'list',
     this.browserDisplays = const {},
@@ -51,13 +56,20 @@ class AppSettings {
     this.quarkAuthenticatedDirectDownload = false,
     this.hideGuestDownloadNotice = false,
     this.hideBaiduDownloadNotice = false,
+    this.warnOnMobileDataDownload = true,
   });
   final String theme;
   final AppPalette themePalette;
   final GlassStyle glassStyle;
   final BackgroundSettings background;
+  final bool hideResourceNavigation;
+  final int fontScalePercent;
+  static const minFontScalePercent = 80;
+  static const maxFontScalePercent = 180;
+  static const maxConcurrentDownloads = 32;
   final int threads, concurrent, retries, speedLimit;
   final Map<String, int> threadOverrides;
+  final GitHubAcceleration githubAcceleration;
   final String? destination;
   final String browserView;
   final Map<String, BrowserDisplaySettings> browserDisplays;
@@ -70,6 +82,7 @@ class AppSettings {
   final bool quarkAuthenticatedDirectDownload;
   final bool hideGuestDownloadNotice;
   final bool hideBaiduDownloadNotice;
+  final bool warnOnMobileDataDownload;
   static const profiles = {
     'github': ('GitHub', 8),
     'pikpak': ('PikPak网盘', 8),
@@ -140,11 +153,16 @@ class AppSettings {
     'themePalette': themePalette.name,
     'glassStyle': glassStyle.name,
     'background': background.toJson(),
+    'hideResourceNavigation': hideResourceNavigation,
+    'fontScalePercent': fontScalePercent,
     'threads': threads,
     'concurrent': concurrent,
     'retries': retries,
+    'downloadRetryPolicy': 1,
     'speedLimit': speedLimit,
     'downloadThreadOverrides': threadOverrides,
+    'githubAcceleration': githubAcceleration.toJson(),
+    'githubAccelerationPolicy': 1,
     'destination': destination,
     'browserView': browserView,
     'browserDisplays': {
@@ -158,6 +176,7 @@ class AppSettings {
     'quarkAuthenticatedDirectDownload': quarkAuthenticatedDirectDownload,
     'hideGuestDownloadNotice': hideGuestDownloadNotice,
     'hideBaiduDownloadNotice': hideBaiduDownloadNotice,
+    'warnOnMobileDataDownload': warnOnMobileDataDownload,
   };
   factory AppSettings.fromJson(Json j) => AppSettings(
     theme: ['System', 'Light', 'Dark'].contains(j.str('theme'))
@@ -166,15 +185,31 @@ class AppSettings {
     themePalette: AppPalette.parse(j['themePalette']),
     glassStyle: GlassStyle.parse(j['glassStyle']),
     background: BackgroundSettings.fromJson(j.obj('background')),
+    hideResourceNavigation: j.boolean('hideResourceNavigation'),
+    fontScalePercent: j
+        .integer('fontScalePercent', 100)
+        .clamp(minFontScalePercent, maxFontScalePercent),
     threads: j.integer('threads', 64).clamp(1, 512),
-    concurrent: j.integer('concurrent', 3).clamp(1, 3),
-    retries: j.integer('retries', 3).clamp(0, 3),
+    concurrent: j.integer('concurrent', 3).clamp(1, maxConcurrentDownloads),
+    // Adopt the former default once; later explicit choices persist.
+    retries:
+        j.integer('downloadRetryPolicy') < 1 &&
+            j.integer('retries', defaultDownloadRetries) == 3
+        ? defaultDownloadRetries
+        : j
+              .integer('retries', defaultDownloadRetries)
+              .clamp(0, maxDownloadRetries),
     speedLimit: j.integer('speedLimit').clamp(0, 1 << 50),
     threadOverrides: {
       for (final e in j.obj('downloadThreadOverrides').entries)
         if (profiles.containsKey(e.key))
           e.key: (int.tryParse('${e.value}') ?? 0).clamp(0, 512),
     },
+    githubAcceleration: GitHubAcceleration.fromJson(
+      j.obj('githubAcceleration'),
+      // Adopt the enabled default once; later explicit direct choices persist.
+      migrateLegacyDefault: j.integer('githubAccelerationPolicy') < 1,
+    ),
     destination: j['destination']?.toString(),
     browserView: j.str('browserView') == 'grid' ? 'grid' : 'list',
     browserDisplays: {
@@ -195,6 +230,7 @@ class AppSettings {
     ),
     hideGuestDownloadNotice: j.boolean('hideGuestDownloadNotice', false),
     hideBaiduDownloadNotice: j.boolean('hideBaiduDownloadNotice', false),
+    warnOnMobileDataDownload: j.boolean('warnOnMobileDataDownload', true),
   );
   AppSettings update(Json fields) =>
       AppSettings.fromJson({...toJson(), ...fields});

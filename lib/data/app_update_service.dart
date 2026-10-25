@@ -10,6 +10,7 @@ import '../domain/github.dart';
 import '../domain/models.dart';
 import '../domain/remote_control.dart';
 import '../download/download_manager.dart';
+import '../download/mobile_data_download_guard.dart';
 import '../platform/app_update_installer.dart';
 import '../platform/file_access.dart';
 import 'cloud_repository.dart';
@@ -94,6 +95,7 @@ class AppUpdateService extends ChangeNotifier {
     final work = Future<void>.microtask(action)
         .then((_) => true)
         .catchError((Object error, StackTrace stack) {
+          if (error is DownloadConfirmationCancelled) return false;
           if (!_closed) {
             _errors[key] = error is AppException
                 ? error.message

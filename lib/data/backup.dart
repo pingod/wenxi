@@ -5,6 +5,7 @@ import '../core/json.dart';
 import '../domain/models.dart';
 import '../domain/settings.dart';
 import 'state_store.dart';
+import 'http.dart';
 import 'cloud_favorites.dart';
 import 'backgrounds.dart';
 import '../domain/background.dart';
@@ -160,11 +161,35 @@ class BackupRepository {
             if (account.active) account.platform.key: account.id,
         },
         'cloudFavorites': store.data.list('cloudFavorites'),
+        'cloudFavoriteSort': CloudFavoriteSort.fromName(
+          store.data.str('cloudFavoriteSort'),
+        ).name,
       },
       password,
     ));
     require(bytes.length <= 16 * 1024 * 1024, '备份文件过大，请取消携带背景图后重试');
     return bytes;
+  }
+
+  /// Install local recovery only after the destination confirms the export.
+  /// Cancelling a picker or failing to write must keep the previous password.
+  Future<bool> exportTo(
+    String password,
+    Future<bool> Function(Uint8List bytes) save, {
+    bool includeBackgroundImages = false,
+  }) async {
+    final bytes = await create(
+      password,
+      includeBackgroundImages: includeBackgroundImages,
+    );
+    RequestScope.checkpoint();
+    if (!await save(bytes)) return false;
+    try {
+      await store.protectRecovery(password);
+    } catch (_) {
+      throw const AppException('备份文件已导出，但本机密码恢复保护未能保存。请保管好备份文件，稍后重新导出以建立保护。');
+    }
+    return true;
   }
 
   Future<int> restore(Uint8List bytes, String password) async {
@@ -330,6 +355,11 @@ class BackupRepository {
           }
           require(merged.length <= 2000, '合并后收藏超过 2000 项，请先清理收藏');
           draft['cloudFavorites'] = merged.values.toList();
+          if (payload.containsKey('cloudFavoriteSort')) {
+            draft['cloudFavoriteSort'] = CloudFavoriteSort.fromName(
+              payload.str('cloudFavoriteSort'),
+            ).name;
+          }
           if (settings != null) draft['settings'] = settings;
           return;
         }

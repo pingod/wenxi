@@ -3,6 +3,7 @@ package bt
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -16,6 +17,7 @@ import (
 	"github.com/GopeedLab/gopeed/internal/btpolicy"
 	"github.com/GopeedLab/gopeed/internal/controller"
 	"github.com/GopeedLab/gopeed/internal/fetcher"
+	"github.com/GopeedLab/gopeed/internal/outputfile"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	"github.com/GopeedLab/gopeed/pkg/protocol/bt"
 	"github.com/GopeedLab/gopeed/pkg/util"
@@ -124,6 +126,20 @@ func (f *Fetcher) Create(opts *base.Options) (err error) {
 }
 
 func (f *Fetcher) Start() (err error) {
+	if f.meta.Req.Labels[outputfile.KeyLabel] != "" {
+		if len(f.meta.Opts.SelectFiles) != 1 {
+			return errors.New("direct output requires one selected torrent file")
+		}
+		index := f.meta.Opts.SelectFiles[0]
+		if index < 0 || index >= len(f.meta.Res.Files) {
+			return errors.New("invalid direct output torrent selection")
+		}
+		file := f.meta.Res.Files[index]
+		logical := filepath.Join(f.meta.Opts.Path, f.meta.Res.Name, file.Path, file.Name)
+		if _, direct := outputfile.Path(logical); !direct {
+			return errors.New("direct output lease unavailable")
+		}
+	}
 	if !f.torrentReady.Load() {
 		if err = f.addTorrent(f.meta.Req, false); err != nil {
 			return

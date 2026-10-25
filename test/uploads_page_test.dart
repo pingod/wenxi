@@ -146,7 +146,7 @@ void main() {
         home: RepaintBoundary(
           key: const Key('uploads-capture'),
           child: shell
-              ? MainShell(services, initialTab: 2)
+              ? MainShell(services, initialTab: 3)
               : browser
               ? BrowserPage(services, uploadSession)
               : Scaffold(body: TransfersPage(services)),

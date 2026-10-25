@@ -17,17 +17,22 @@ abstract class NativeTransport {
 
 class AndroidGopeedTransport extends NativeTransport {
   bool _connected = false;
+  bool _parserUsed = false;
   @override
   bool get connected => _connected;
   @override
   Future<Object?> call(String method, [Json args = const {}]) async {
     try {
+      if (method == 'parserRequestStart') _parserUsed = true;
       final value = await nativeChannel.invokeMethod<Object?>('gopeed', {
         'method': method,
         'args': jsonEncode(args),
       });
       if (method == 'open') _connected = true;
-      if (method == 'close') _connected = false;
+      if (method == 'close') {
+        _connected = false;
+        _parserUsed = false;
+      }
       return value is String ? jsonDecode(value) : value;
     } on PlatformException catch (e) {
       throw AppException(e.message ?? '下载组件操作失败');
@@ -36,7 +41,7 @@ class AndroidGopeedTransport extends NativeTransport {
 
   @override
   Future<void> dispose() async {
-    if (_connected) await call('close');
+    if (_connected || _parserUsed) await call('close');
   }
 }
 
@@ -56,9 +61,30 @@ class DesktopGopeedTransport extends NativeTransport {
     require(!_disposed, '下载组件已经关闭');
     if (_process != null) return _process!;
     require(await File(executable).exists(), '缺少下载组件，请安装完整版本');
-    final process =
-        await (launchProcess?.call(executable) ??
-            Process.start(executable, const [], runInShell: false));
+    final Process process;
+    try {
+      process =
+          await (launchProcess?.call(executable) ??
+              Process.start(executable, const [], runInShell: false));
+    } on ProcessException catch (error) {
+      // Keep launch failures distinct from network errors. Changing download
+      // URLs or retrying transfers cannot fix a blocked executable. The
+      // application-control codes below only exist on Windows, so the message
+      // names it explicitly while the generic branch stays platform neutral.
+      final blocked =
+          {5, 577, 1260, 1275, 4551}.contains(error.errorCode) ||
+          RegExp(
+            r'应用程序控制|应用控制|application control|blocked.*policy',
+            caseSensitive: false,
+          ).hasMatch(error.message);
+      throw AppException(
+        blocked
+            ? 'Windows 安全策略阻止了下载组件启动（错误 ${error.errorCode}）。'
+                  '请检查 Windows 安全中心的保护历史记录或联系系统管理员，处理后重试；下载进度已保留'
+            : '下载组件无法启动（错误 ${error.errorCode}），'
+                  '请重新安装完整版本后重试；下载进度已保留',
+      );
+    }
     _coreOpen = false;
     _process = process;
     process.stdout
@@ -186,6 +212,8 @@ class GopeedEngine {
   final _gate = AsyncGate();
   bool _started = false;
   bool? _taskCacheRootsSupported;
+  bool? _directOutputSupported;
+  bool? _sourceNetworkPolicySupported;
   void validateId(String id) =>
       require(RegExp(r'^[A-Za-z0-9_-]{1,100}$').hasMatch(id), '无效的下载任务编号');
   Future<void> _start() async {
@@ -197,13 +225,32 @@ class GopeedEngine {
         key = base64Encode(CryptoBox.random(32));
         await vault.putSecret('flutter.gopeed.key', key);
       }
-      await transport.call('open', {
-        'storageDir': storage.path,
-        'cacheDir': cache.path,
-        'key': key,
-      });
+      final opened = asJson(
+        await transport.call('open', {
+          'storageDir': storage.path,
+          'cacheDir': cache.path,
+          'storageGeneration': store.data.str('engineStorageGeneration'),
+          'key': key,
+        }),
+      );
+      // Android upgrades may retain an older native database key. Keep the
+      // actual key in encrypted state so password recovery protects it too.
+      final actualKey = opened.str('key');
+      if (actualKey.isNotEmpty && actualKey != key) {
+        try {
+          require(
+            actualKey.length <= 128 && base64Decode(actualKey).length == 32,
+            '下载组件密钥格式错误',
+          );
+        } on FormatException {
+          throw const AppException('下载组件密钥格式错误');
+        }
+        await vault.putSecret('flutter.gopeed.key', actualKey);
+      }
       _started = true;
       _taskCacheRootsSupported = null;
+      _directOutputSupported = null;
+      _sourceNetworkPolicySupported = null;
     }
     final pending = (store.data['nativeRemovals'] as List? ?? [])
         .map((e) => e.toString())
@@ -273,10 +320,30 @@ class GopeedEngine {
     return asJson(await transport.call(method, args));
   });
 
+  Future<void> requireDirectOutput() => _gate.run(() async {
+    await _start();
+    _directOutputSupported ??= asJson(
+      await transport.call('version'),
+    ).boolean('directOutput');
+    require(_directOutputSupported!, '下载组件版本过旧，请安装支持直接下载的完整新版应用');
+  });
+
   Future<void> begin(Json request) => _gate.run(() async {
     final id = request.str('id');
     validateId(id);
     await _start();
+    if (request['networkPolicy'] != null) {
+      _sourceNetworkPolicySupported ??= asJson(
+        await transport.call('version'),
+      ).boolean('sourceNetworkPolicy');
+      require(_sourceNetworkPolicySupported!, '下载组件版本过旧，请安装支持来源接入包的完整新版应用');
+    }
+    if (request.str('outputPath').isNotEmpty) {
+      _directOutputSupported ??= asJson(
+        await transport.call('version'),
+      ).boolean('directOutput');
+      require(_directOutputSupported!, '下载组件版本过旧，请安装支持直接下载的完整新版应用');
+    }
     require(
       !(store.data['nativeRemovals'] as List? ?? []).contains(
         request.str('id'),

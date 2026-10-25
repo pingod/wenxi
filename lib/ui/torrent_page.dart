@@ -73,6 +73,8 @@ class _TorrentPageState extends State<TorrentPage> {
         onTap: widget.services.requestDownloadManager,
       );
       Navigator.pop(context, true);
+    } on DownloadConfirmationCancelled {
+      // Keep the selection available for a later download.
     } catch (e) {
       if (mounted) {
         setState(() => _error = e is AppException ? e.message : '添加下载失败，请重试');

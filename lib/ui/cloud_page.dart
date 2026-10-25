@@ -7,6 +7,8 @@ import '../domain/cloud_list_preferences.dart';
 import '../domain/models.dart';
 import 'browser_page.dart';
 import 'common.dart';
+import 'app_context_menu.dart';
+import 'app_popup_menu.dart';
 import 'login_page.dart';
 import 'parse_page.dart';
 
@@ -189,6 +191,79 @@ class CloudPage extends StatelessWidget {
     ),
   );
   Widget _card(BuildContext context, (String, String, CloudPlatform?) entry) {
+    final platform = entry.$3;
+    return AppContextMenu<String>(
+      key: ValueKey('cloud-context-${platform?.key ?? entry.$1}'),
+      identity: (
+        platform,
+        platform == null ? null : services.vault.activeAccountId(platform),
+      ),
+      actions: () {
+        final stored =
+            platform != null &&
+            LoginCredentials.stored(
+              platform,
+              services.vault.credential(platform),
+            );
+        return [
+          const AppMenuAction(
+            value: 'open',
+            label: '打开',
+            icon: CupertinoIcons.folder_open,
+          ),
+          if (platform != null && platform.requiresAccount) ...[
+            AppMenuAction(
+              value: 'login',
+              label: stored ? '重新登录当前账号' : '登录账号',
+              icon: CupertinoIcons.person_crop_circle,
+            ),
+            const AppMenuAction(
+              value: 'accounts',
+              label: '多账号管理',
+              icon: CupertinoIcons.person_2,
+            ),
+            const AppMenuAction(
+              value: 'info',
+              label: '账号配置',
+              icon: CupertinoIcons.slider_horizontal_3,
+            ),
+            if (stored) ...[
+              AppMenuAction(
+                value: 'refresh',
+                label: platform == CloudPlatform.github ? '刷新账号信息' : '刷新账号容量',
+                icon: CupertinoIcons.refresh,
+              ),
+              if (platform == CloudPlatform.uc)
+                const AppMenuAction(
+                  value: 'ucTv',
+                  label: 'TV 播放授权',
+                  icon: CupertinoIcons.tv,
+                ),
+              const AppMenuAction(
+                value: 'logout',
+                label: '退出账号',
+                icon: CupertinoIcons.square_arrow_right,
+                destructive: true,
+              ),
+            ],
+          ],
+        ];
+      },
+      onSelected: (action) async {
+        if (action == 'open') {
+          await _open(context, platform);
+        } else if (platform != null) {
+          await accountMenu(context, services, platform, command: action);
+        }
+      },
+      child: _cardContent(context, entry),
+    );
+  }
+
+  Widget _cardContent(
+    BuildContext context,
+    (String, String, CloudPlatform?) entry,
+  ) {
     final platform = entry.$3,
         credential = platform == null
             ? null

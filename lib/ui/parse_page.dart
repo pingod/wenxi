@@ -6,35 +6,55 @@ import 'torrent_page.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import '../app_services.dart';
 import '../core/json.dart';
 import '../core/operation_progress.dart';
 import '../diagnostics/app_log.dart';
 import '../data/http.dart';
+import '../data/resource_pool_preview.dart';
+import '../data/parser_rules/hub.dart';
 import '../domain/auth.dart';
 import '../domain/baidu_share_route.dart';
+import '../domain/public_share_route.dart';
 import '../domain/links.dart';
 import '../domain/models.dart';
+import '../domain/resource_search.dart';
 import 'cloud_command_page.dart';
 import '../platform/desktop_platform.dart';
 import '../platform/file_access.dart';
 import 'browser_page.dart';
 import 'baidu_share_route_picker.dart';
+import 'resource_preferences.dart';
+import 'parser_site_picker.dart';
 import 'common.dart';
+import 'app_context_menu.dart';
+import 'app_popup_menu.dart';
 import 'login_page.dart';
 import 'recent_playback_page.dart';
 import 'cloud_favorites_page.dart';
 import 'operation_progress_view.dart';
+import 'source_browser_page.dart';
 
 class ParsePage extends StatefulWidget {
-  const ParsePage(this.services, {super.key, this.active = true});
+  const ParsePage(
+    this.services, {
+    super.key,
+    this.active = true,
+    this.resourceActive = false,
+  });
   final AppServices services;
   final bool active;
+  final bool resourceActive;
   @override
   State<ParsePage> createState() => ParsePageState();
 }
 
 class ParsePageState extends State<ParsePage> {
+  bool _openingResource = false;
+  BaiduShareRoute? _resourceRoute;
+  bool get _active =>
+      widget.active || _openingResource && widget.resourceActive;
   final input = TextEditingController(), code = TextEditingController();
   final focus = FocusNode(), codeFocus = FocusNode();
   final _manualCodes = <String, String>{};
@@ -42,25 +62,55 @@ class ParsePageState extends State<ParsePage> {
   List<ParsedLink> links = [];
   int selected = 0, _generation = 0;
   bool working = false;
+  bool _startingParse = false;
   String stage = '', error = '';
   String? _recognizedText;
+  String? _parserPasswordGrant;
   CloudPlatform? _loginPlatform;
   BaiduShareRoute _baiduRoute = BaiduShareRoute.publicParser;
   RequestScope? _request;
   ParsedLink? get current => links.elementAtOrNull(selected);
+  bool _publicRoute(CloudPlatform? platform) =>
+      platform != null &&
+      widget.services.parserRules.publicParsingAllowed(platform) &&
+      (_openingResource && _resourceRoute != null
+          ? _resourceRoute == BaiduShareRoute.publicParser
+          : platform == CloudPlatform.baidu
+          ? _baiduRoute == BaiduShareRoute.publicParser
+          : PublicShareRoute.platforms.contains(platform) &&
+                widget.services.parserRules.configured &&
+                widget.services.parserRules.publicPreferred(platform));
+  bool _showParser(ParsedLink? link) =>
+      link != null &&
+      link.kind == LinkKind.cloudShare &&
+      link.platform != null &&
+      widget.services.parserRules.publicParsingAllowed(link.platform!) &&
+      (link.platform == CloudPlatform.baidu ||
+          widget.services.parserRules.configured &&
+              PublicShareRoute.platforms.contains(link.platform));
 
   @override
   void initState() {
     super.initState();
     input.addListener(_recognize);
     widget.services.sharedText.addListener(_shared);
+    widget.services.parserRules.addListener(_parserRulesChanged);
+    widget.services.sources.addListener(_parserRulesChanged);
     _shared();
+    widget.services.parserRules.start();
+    widget.services.sources.start();
+  }
+
+  void _parserRulesChanged() {
+    if (mounted) setState(() {});
   }
 
   @override
   void didUpdateWidget(ParsePage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (!widget.active && oldWidget.active) {
+    if (!widget.active &&
+        !widget.resourceActive &&
+        (oldWidget.active || oldWidget.resourceActive)) {
       if (working) _cancel();
       focus.unfocus();
       codeFocus.unfocus();
@@ -86,6 +136,7 @@ class ParsePageState extends State<ParsePage> {
   void _recognize() {
     if (_recognizedText == input.text) return;
     _recognizedText = input.text;
+    _parserPasswordGrant = null;
     if (working) _cancel();
     _progress.clear();
     final previous = current?.url;
@@ -120,6 +171,8 @@ class ParsePageState extends State<ParsePage> {
 
   @override
   void dispose() {
+    widget.services.parserRules.removeListener(_parserRulesChanged);
+    widget.services.sources.removeListener(_parserRulesChanged);
     _generation++;
     _request?.cancel();
     _progress.dispose();
@@ -134,6 +187,67 @@ class ParsePageState extends State<ParsePage> {
 
   void focusInput() => focus.requestFocus();
   void acceptClipboard(String text) => _replaceInput(text);
+
+  Future<void> openResource(ResourceSearchHit hit) async {
+    if (!mounted ||
+        working ||
+        _startingParse ||
+        !(widget.active || widget.resourceActive)) {
+      return;
+    }
+    _openingResource = true;
+    try {
+      _resourceRoute = BaiduShareRoute.account;
+      final platform = hit.platform;
+      final hub = widget.services.parserRules;
+      final publicAvailable =
+          platform != null &&
+          hit.link?.kind == LinkKind.cloudShare &&
+          hub.publicParsingAllowed(platform) &&
+          (platform == CloudPlatform.baidu ||
+              PublicShareRoute.platforms.contains(platform) &&
+                  hub.configured &&
+                  hub.sitesFor(platform).isNotEmpty);
+      if (publicAvailable) {
+        final choice = await showResourceParseRoute(context, platform);
+        if (!mounted ||
+            choice == null ||
+            !widget.resourceActive && !widget.active) {
+          return;
+        }
+        _resourceRoute = choice;
+      }
+      focus.unfocus();
+      _replaceInput(hit.shareText);
+      if (hit.password.isNotEmpty) _editCode(hit.password);
+      await parse(
+        poolPreview: hit.poolSupported
+            ? ResourcePoolPreview(
+                source: hit,
+                api: widget.services.resourceSearch.api,
+                cloud: widget.services.cloud,
+              )
+            : null,
+      );
+      if (mounted && error.isNotEmpty) throw AppException(error);
+    } finally {
+      _resourceRoute = null;
+      _openingResource = false;
+    }
+  }
+
+  Future<void> _parseChoice(int index) async {
+    if (working || _startingParse || index >= links.length) return;
+    setState(() {
+      selected = index;
+      code.text = current?.passcode ?? '';
+      error = '';
+      _loginPlatform = null;
+      _parserPasswordGrant = null;
+    });
+    await parse();
+  }
+
   Future<void> paste() async {
     final value = await Clipboard.getData(Clipboard.kTextPlain);
     if (!mounted) return;
@@ -146,7 +260,7 @@ class ParsePageState extends State<ParsePage> {
   }
 
   bool _current(int generation) =>
-      mounted && widget.active && generation == _generation;
+      mounted && _active && generation == _generation;
 
   void _cancel() {
     _generation++;
@@ -195,7 +309,7 @@ class ParsePageState extends State<ParsePage> {
     final revision = widget.services.vault.credential(platform)?.updatedAt;
     final originalInput = input.text;
     await openLogin(context, widget.services, platform);
-    if (!mounted || !widget.active || input.text != originalInput) return;
+    if (!mounted || !_active || input.text != originalInput) return;
     if (widget.services.vault.credential(platform)?.updatedAt != revision &&
         LoginCredentials.stored(
           platform,
@@ -235,8 +349,101 @@ class ParsePageState extends State<ParsePage> {
     }
   }
 
-  Future<void> parse() async {
-    if (working) return;
+  Future<bool> _trySource(ParsedLink link) async {
+    final sources = widget.services.sources;
+    if (!sources.enabled ||
+        !sources.hub.configured ||
+        !{'http', 'https'}.contains(Uri.tryParse(link.url)?.scheme)) {
+      return false;
+    }
+    final generation = ++_generation;
+    final scope = _request = RequestScope();
+    setState(() {
+      working = true;
+      error = '';
+      stage = '正在检查可用来源…';
+    });
+    try {
+      await scope.run(() => RequestScope.cancellable(sources.load()));
+      if (!sources.ready) {
+        await scope.run(() => RequestScope.cancellable(sources.refresh()));
+      }
+      if (!_current(generation)) return true;
+      final candidates = sources.candidates(link.url);
+      if (candidates.isEmpty) return false;
+      if (!mounted) return true;
+      final choice = await showDialog<String>(
+        context: context,
+        builder: (context) => SimpleDialog(
+          title: const Text('选择打开方式'),
+          children: [
+            for (final release in candidates)
+              SimpleDialogOption(
+                onPressed: () => Navigator.pop(context, release.package.id),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Text(release.package.name),
+                ),
+              ),
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(context, '__builtin'),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Text(
+                  link.kind == LinkKind.cloudShare ? '使用网盘解析' : '作为直链下载',
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+      if (!_current(generation) || choice == null) return true;
+      if (choice == '__builtin') return false;
+      final release = candidates.firstWhere((r) => r.package.id == choice);
+      setState(() => stage = '正在读取${release.package.name}…');
+      final session = await scope.run(
+        () => sources.open(release, {
+          'url': link.url,
+          'text': input.text,
+          'passcode': code.text,
+        }),
+      );
+      if (!_current(generation)) return true;
+      await widget.services.remember(
+        link,
+        title: session.title,
+        itemCount: session.items.length,
+        canCommit: () => _current(generation),
+      );
+      if (!_current(generation) || !mounted) return true;
+      await Navigator.push<void>(
+        context,
+        MaterialPageRoute(
+          builder: (_) => SourceBrowserPage(widget.services, session),
+        ),
+      );
+      return true;
+    } catch (e) {
+      if (_current(generation)) setState(() => error = errorText(e));
+      return true;
+    } finally {
+      if (_current(generation)) {
+        setState(() {
+          working = false;
+          stage = '';
+          _request = null;
+        });
+      }
+    }
+  }
+
+  Future<void> parse({
+    String? passwordGrant,
+    ResourcePoolPreview? poolPreview,
+  }) async {
+    if (!mounted || !_active || working || _startingParse) return;
+    passwordGrant ??= _parserPasswordGrant;
+    _parserPasswordGrant = null;
     _progress.clear();
     final link = current;
     DiagnosticLog.event(
@@ -251,6 +458,19 @@ class ParsePageState extends State<ParsePage> {
       );
       focus.requestFocus();
       return;
+    }
+    _startingParse = true;
+    try {
+      if (!(_openingResource &&
+                  _resourceRoute == BaiduShareRoute.publicParser) &&
+              await _trySource(link) ||
+          !mounted ||
+          !_active ||
+          current != link) {
+        return;
+      }
+    } finally {
+      _startingParse = false;
     }
     if (link.kind == LinkKind.unsupportedCloud) {
       setState(() => error = '已识别${link.cloudLabel ?? '网盘'}链接，当前版本暂未接入该网盘');
@@ -294,9 +514,9 @@ class ParsePageState extends State<ParsePage> {
       }
       final platform = link.platform!;
       widget.services.control.checkCloud(platform);
-      if ((platform.shareRequiresAccount ||
-              platform == CloudPlatform.baidu &&
-                  _baiduRoute == BaiduShareRoute.account) &&
+      if (!_publicRoute(platform) &&
+          (platform.shareRequiresAccount ||
+              platform == CloudPlatform.baidu && !_publicRoute(platform)) &&
           !LoginCredentials.stored(
             platform,
             widget.services.vault.credential(platform),
@@ -324,12 +544,25 @@ class ParsePageState extends State<ParsePage> {
       }
 
       setState(() => stage = '正在验证分享链接…');
+      final parserHub = widget.services.parserRules;
+      final parserSite = _publicRoute(platform) && parserHub.configured
+          ? await scope.run(
+              () => RequestScope.cancellable(
+                parserHub.forNewShare(platform: platform),
+              ),
+            )
+          : null;
+      checkpoint();
       final result = await scope
           .run(
             () => _progress.run(() async {
               final session = await widget.services.cloud.share(
                 link,
-                baiduRoute: _baiduRoute,
+                baiduRoute: _publicRoute(platform)
+                    ? BaiduShareRoute.publicParser
+                    : BaiduShareRoute.account,
+                parserSiteId: parserSite?.id,
+                parserPasswordGrant: passwordGrant,
               );
               checkpoint();
               setState(() => stage = '正在读取文件列表…');
@@ -342,7 +575,7 @@ class ParsePageState extends State<ParsePage> {
             }),
           )
           .timeout(
-            const Duration(seconds: 90),
+            parserSite?.rule.shareTimeout ?? const Duration(seconds: 90),
             onTimeout: () {
               scope.cancel();
               throw const AppException('解析超时，请检查网络后重试');
@@ -365,13 +598,38 @@ class ParsePageState extends State<ParsePage> {
       await Navigator.push<void>(
         context,
         MaterialPageRoute(
-          builder: (_) =>
-              BrowserPage(widget.services, result.$1, initialItems: result.$2),
+          builder: (_) => BrowserPage(
+            widget.services,
+            result.$1,
+            initialItems: result.$2,
+            poolPreview: poolPreview,
+          ),
         ),
       );
     } catch (e, stack) {
       if (!_current(generation)) return;
       _progress.close(failed: true);
+      if (e is ParserPasswordRequired) {
+        _request?.cancel();
+        _request = null;
+        setState(() {
+          working = false;
+          stage = '';
+          error = e.message;
+        });
+        if (!mounted) return;
+        final ready = await showParserPasswordDialog(
+          context,
+          widget.services.parserRules,
+          e.siteId,
+          resolveUcPassword:
+              widget.services.cloud.publicPasswords.fromUcCommand,
+        );
+        if (ready != null && _current(generation)) {
+          await parse(passwordGrant: ready, poolPreview: poolPreview);
+        }
+        return;
+      }
       DiagnosticLog.error(
         'parse.failed',
         e,
@@ -485,46 +743,136 @@ class ParsePageState extends State<ParsePage> {
                             itemCount: history.length,
                             itemBuilder: (context, index) {
                               final item = history[index];
-                              return ListTile(
-                                leading: PlatformMark(
-                                  platform: CloudPlatform.fromKey(
-                                    item.str('platform'),
+                              final known = item['link'] is Map
+                                  ? ParsedLink.fromJson(item.obj('link'))
+                                  : LinkParser.parse(item.str('sourceText'))
+                                        .where(
+                                          (link) =>
+                                              link.url ==
+                                              item.str('normalizedUrl'),
+                                        )
+                                        .firstOrNull;
+                              final copyLabel = known?.isCloudShare == false
+                                  ? '复制链接'
+                                  : '复制分享链接';
+                              Future<void> copy() async {
+                                try {
+                                  await widget.services.copyText(
+                                    known?.textForCopy ??
+                                        item
+                                            .str('normalizedUrl')
+                                            .ifEmpty(item.str('sourceText')),
+                                  );
+                                  if (context.mounted) {
+                                    message(context, '链接已复制');
+                                  }
+                                } catch (e) {
+                                  if (context.mounted) {
+                                    message(context, errorText(e));
+                                  }
+                                }
+                              }
+
+                              Future<void> remove() =>
+                                  widget.services.store.change((draft) {
+                                    draft['history'] = draft
+                                        .list('history')
+                                        .where(
+                                          (h) =>
+                                              h.str('normalizedUrl') !=
+                                              item.str('normalizedUrl'),
+                                        )
+                                        .toList();
+                                  });
+                              return AppContextMenu<String>(
+                                key: ValueKey(item.str('normalizedUrl')),
+                                identity: (
+                                  item.str('normalizedUrl'),
+                                  item.integer('createdAt'),
+                                ),
+                                actions: () =>
+                                    widget.services.store.data
+                                        .list('history')
+                                        .any(
+                                          (h) =>
+                                              h.str('normalizedUrl') ==
+                                              item.str('normalizedUrl'),
+                                        )
+                                    ? [
+                                        const AppMenuAction(
+                                          value: 'use',
+                                          label: '使用此链接',
+                                          icon: CupertinoIcons.arrow_up_doc,
+                                        ),
+                                        AppMenuAction(
+                                          value: 'copy',
+                                          label: copyLabel,
+                                          icon: CupertinoIcons.link,
+                                        ),
+                                        const AppMenuAction(
+                                          value: 'remove',
+                                          label: '删除这条历史',
+                                          icon: CupertinoIcons.trash,
+                                          destructive: true,
+                                        ),
+                                      ]
+                                    : [],
+                                onSelected: (action) async {
+                                  switch (action) {
+                                    case 'use':
+                                      Navigator.pop(context, item);
+                                    case 'copy':
+                                      await copy();
+                                    case 'remove':
+                                      await remove();
+                                  }
+                                },
+                                child: ListTile(
+                                  leading: PlatformMark(
+                                    platform: CloudPlatform.fromKey(
+                                      item.str('platform'),
+                                    ),
+                                    size: 30,
                                   ),
-                                  size: 30,
-                                ),
-                                title: Text(
-                                  item
-                                      .str('fileName')
-                                      .ifEmpty(item.str('normalizedUrl')),
-                                  maxLines: 2,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                                subtitle: Text(
-                                  '${formatDate(item.integer('createdAt'))}${item['itemCount'] == null ? '' : ' · ${item.integer('itemCount')} 项'}',
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    color: secondary(context),
+                                  title: Text(
+                                    item
+                                        .str('fileName')
+                                        .ifEmpty(item.str('normalizedUrl')),
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
                                   ),
-                                ),
-                                trailing: IconButton(
-                                  tooltip: '删除这条历史',
-                                  icon: const Icon(
-                                    CupertinoIcons.xmark,
-                                    size: 16,
+                                  subtitle: Text(
+                                    '${formatDate(item.integer('createdAt'))}${item['itemCount'] == null ? '' : ' · ${item.integer('itemCount')} 项'}',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: secondary(context),
+                                    ),
                                   ),
-                                  onPressed: () =>
-                                      widget.services.store.change((draft) {
-                                        draft['history'] = draft
-                                            .list('history')
-                                            .where(
-                                              (h) =>
-                                                  h.str('normalizedUrl') !=
-                                                  item.str('normalizedUrl'),
-                                            )
-                                            .toList();
-                                      }),
+                                  trailing: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      IconButton(
+                                        tooltip: copyLabel,
+                                        visualDensity: VisualDensity.compact,
+                                        icon: const Icon(
+                                          CupertinoIcons.doc_on_doc,
+                                          size: 19,
+                                        ),
+                                        onPressed: copy,
+                                      ),
+                                      IconButton(
+                                        tooltip: '删除这条历史',
+                                        visualDensity: VisualDensity.compact,
+                                        icon: const Icon(
+                                          CupertinoIcons.xmark,
+                                          size: 16,
+                                        ),
+                                        onPressed: remove,
+                                      ),
+                                    ],
+                                  ),
+                                  onTap: () => Navigator.pop(context, item),
                                 ),
-                                onTap: () => Navigator.pop(context, item),
                               );
                             },
                           ),
@@ -587,6 +935,22 @@ class ParsePageState extends State<ParsePage> {
     String recognition, {
     bool desktop = false,
   }) {
+    final recognitionControl = InkWell(
+      key: const Key('parse-recognized-action'),
+      onTap: current == null || working ? null : parse,
+      borderRadius: BorderRadius.circular(6),
+      child: Text(
+        recognition,
+        key: const Key('parse-recognition'),
+        maxLines: desktop ? null : 2,
+        overflow: desktop ? null : TextOverflow.ellipsis,
+        style: TextStyle(
+          fontSize: desktop ? 12 : 13,
+          fontWeight: desktop ? null : FontWeight.w600,
+          color: current == null ? secondary(context) : themeAccent(context),
+        ),
+      ),
+    );
     if (desktop) {
       final title = Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -596,16 +960,7 @@ class ParsePageState extends State<ParsePage> {
             style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
           ),
           const SizedBox(height: 7),
-          Text(
-            recognition,
-            key: const Key('parse-recognition'),
-            style: TextStyle(
-              fontSize: 12,
-              color: current == null
-                  ? secondary(context)
-                  : themeAccent(context),
-            ),
-          ),
+          recognitionControl,
         ],
       );
       final tools = Wrap(
@@ -672,19 +1027,7 @@ class ParsePageState extends State<ParsePage> {
                     style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
                   ),
                   const SizedBox(height: 3),
-                  Text(
-                    recognition,
-                    key: const Key('parse-recognition'),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: current == null
-                          ? secondary(context)
-                          : themeAccent(context),
-                    ),
-                  ),
+                  recognitionControl,
                 ],
               ),
             ),
@@ -988,7 +1331,12 @@ class ParsePageState extends State<ParsePage> {
     final hint = Theme.of(context).brightness == Brightness.dark
         ? const Color(0xff77777c)
         : const Color(0xffc4c4c7);
-    final recognition = link == null
+    final sourceCandidates = link == null
+        ? const []
+        : widget.services.sources.candidates(link.url);
+    final recognition = sourceCandidates.isNotEmpty
+        ? '已识别：${sourceCandidates.map((r) => r.package.name).join('、')}'
+        : link == null
         ? '等待粘贴链接'
         : '已识别：${_label(link)}${links.length > 1 ? ' · 共 ${links.length} 条' : ''}';
     return PopScope(
@@ -1006,6 +1354,29 @@ class ParsePageState extends State<ParsePage> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 _inputHeader(context, recognition, desktop: desktop),
+                if (widget.services.settings.hideResourceNavigation)
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: TextButton.icon(
+                      key: const Key('parse-resources'),
+                      onPressed: working
+                          ? null
+                          : widget.services.requestResourceSearch,
+                      icon: SvgPicture.asset(
+                        'assets/navigation/search.svg',
+                        width: 19,
+                        height: 19,
+                        colorFilter: ColorFilter.mode(
+                          working
+                              ? Theme.of(context).disabledColor
+                              : themeAccent(context),
+                          BlendMode.srcIn,
+                        ),
+                        excludeFromSemantics: true,
+                      ),
+                      label: const Text('资源'),
+                    ),
+                  ),
                 SizedBox(height: desktop ? 22 : 23),
                 TextField(
                   key: const Key('parse-input'),
@@ -1064,25 +1435,50 @@ class ParsePageState extends State<ParsePage> {
                 if (!desktop)
                   Divider(height: 1, thickness: .6, color: border(context)),
                 _codeInput(context, link, hint, desktop: desktop),
-                if (link?.platform == CloudPlatform.baidu &&
-                    link?.kind == LinkKind.cloudShare)
+                if (_showParser(link))
                   Padding(
                     padding: const EdgeInsets.only(top: 4, bottom: 10),
                     child: BaiduShareRoutePicker(
-                      value: _baiduRoute,
+                      platform: link!.platform!,
+                      value: _publicRoute(link.platform)
+                          ? BaiduShareRoute.publicParser
+                          : BaiduShareRoute.account,
                       onChanged: working
                           ? null
-                          : (value) => setState(() {
-                              _baiduRoute = value;
-                              error = '';
-                              _loginPlatform = null;
-                            }),
+                          : (value) async {
+                              if (link.platform == CloudPlatform.baidu) {
+                                _baiduRoute = value;
+                              } else {
+                                await widget.services.parserRules.preferPublic(
+                                  link.platform!,
+                                  value == BaiduShareRoute.publicParser,
+                                );
+                              }
+                              if (mounted) {
+                                setState(() {
+                                  error = '';
+                                  _parserPasswordGrant = null;
+                                  _loginPlatform = null;
+                                });
+                              }
+                            },
                     ),
+                  ),
+                if (_showParser(link) && _publicRoute(link?.platform))
+                  ParserSitePicker(
+                    services: widget.services,
+                    platform: link!.platform!,
+                    enabled: !working,
+                    onSelected: (_) => setState(() {
+                      error = '';
+                      _parserPasswordGrant = null;
+                    }),
+                    onPasswordReady: (grant) => _parserPasswordGrant = grant,
                   ),
                 if (links.length > 1) ...[
                   const SizedBox(height: 8),
                   Text(
-                    '选择本次要解析的链接',
+                    '点击链接立即解析',
                     style: TextStyle(fontSize: 12, color: secondary(context)),
                   ),
                   for (var i = 0; i < links.length; i++)
@@ -1106,14 +1502,7 @@ class ParsePageState extends State<ParsePage> {
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(fontSize: 11),
                       ),
-                      onTap: working
-                          ? null
-                          : () => setState(() {
-                              selected = i;
-                              code.text = current?.passcode ?? '';
-                              error = '';
-                              _loginPlatform = null;
-                            }),
+                      onTap: working ? null : () => _parseChoice(i),
                     ),
                 ],
                 if (stage.isNotEmpty ||
@@ -1496,6 +1885,7 @@ class _DirectDialogState extends State<_DirectDialog> {
               const SizedBox(height: 16),
             ],
             TextField(
+              key: const Key('direct-download-url'),
               controller: url,
               decoration: const InputDecoration(labelText: 'HTTP / HTTPS 链接'),
               maxLines: 3,
@@ -1503,11 +1893,13 @@ class _DirectDialogState extends State<_DirectDialog> {
             ),
             const SizedBox(height: 16),
             TextField(
+              key: const Key('direct-download-name'),
               controller: name,
               decoration: const InputDecoration(labelText: '保存文件名'),
             ),
             const SizedBox(height: 16),
             TextField(
+              key: const Key('direct-download-connections'),
               controller: connections,
               keyboardType: TextInputType.number,
               inputFormatters: [FilteringTextInputFormatter.digitsOnly],
@@ -1560,7 +1952,11 @@ class _DirectDialogState extends State<_DirectDialog> {
         onPressed: () => Navigator.pop(context),
         child: const Text('取消'),
       ),
-      FilledButton(onPressed: submit, child: const Text('添加下载')),
+      FilledButton(
+        key: const Key('direct-download-submit'),
+        onPressed: submit,
+        child: const Text('添加下载'),
+      ),
     ],
   );
 }

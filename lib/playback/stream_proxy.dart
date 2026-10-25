@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 import '../domain/models.dart';
 import '../domain/downloads.dart';
+import '../domain/playback.dart';
 import '../core/json.dart';
 import 'playback_failure.dart';
 
@@ -138,8 +139,8 @@ class _Segment {
 
 /// Session-wide Range scheduling: metadata probes and nearby reads share work;
 /// a real seek supersedes old work. The first 256 KiB use two media requests,
-/// then demand can use the configured connection budget. There is no idle
-/// prefetch loop. Metadata can take priority within that same budget. Validated
+/// then demand can fill the byte-bounded read-ahead window independently of
+/// connection count. Metadata takes priority within the same budget. Validated
 /// response bodies stream incrementally; cached AND in-flight bytes are bounded.
 class PlaybackStreamProxy {
   PlaybackStreamProxy(
@@ -150,7 +151,10 @@ class PlaybackStreamProxy {
     this.warmupBytes = 256 * 1024,
     this.onFailure,
     this.readCache,
-  }) : _connections = connections.clamp(1, 32),
+  }) : _connections = connections.clamp(
+         PlaybackPreferences.minConnections,
+         PlaybackPreferences.maxConnections,
+       ),
        _maxCacheBytes = maxCacheBytes {
     assert(chunkBytes > 0 && maxCacheBytes >= chunkBytes && warmupBytes >= 0);
   }
@@ -173,6 +177,7 @@ class PlaybackStreamProxy {
     _maxCacheBytes = bytes;
     for (final reader in _readers.toList()) {
       _trimWindow(reader);
+      _scheduleAhead(reader);
     }
     _pump();
     return true;
@@ -181,10 +186,16 @@ class PlaybackStreamProxy {
   int _connections;
   int get connections => _connections;
   set connections(int value) {
-    _connections = value.clamp(1, 32);
+    final next = value.clamp(
+      PlaybackPreferences.minConnections,
+      PlaybackPreferences.maxConnections,
+    );
+    if (_connections == next) return;
+    _connections = next;
     _fetchClient?.maxConnectionsPerHost = _connections;
     for (final reader in _readers.toList()) {
       _trimWindow(reader);
+      _scheduleAhead(reader);
     }
     _pump();
   }
@@ -259,6 +270,8 @@ class PlaybackStreamProxy {
     'paused': _paused,
     'seekPending': _seekPending,
     'bufferedBytes': bufferedBytes,
+    'cacheLimitBytes': maxCacheBytes,
+    'connectionLimit': connections,
     'fileBytes': _length,
   };
   Uri get uri => Uri.parse('http://127.0.0.1:${_server!.port}$_path');
@@ -648,12 +661,34 @@ class PlaybackStreamProxy {
     }
   }
 
-  int _window(_Reader reader) => reader.metadata ? 1 : _budget;
+  // Completed future ranges must not occupy connection slots. Keep filling
+  // the bounded cache while a slower leading range or the player is waiting.
+  int _window(_Reader reader) {
+    if (reader.metadata) return 1;
+    // Download-backed playback leaves preloading to its download task.
+    if (readCache != null || _deliveredBytes < warmupBytes) return _budget;
+    return math.max(1, maxCacheBytes ~/ chunkBytes);
+  }
+
+  void _scheduleAhead(_Reader reader) {
+    if (reader.stopped) return;
+    for (
+      var ahead = reader.cursor + 1;
+      ahead <= math.min(reader.last, reader.cursor + _window(reader) - 1);
+      ahead++
+    ) {
+      _requestSegment(reader, ahead, demand: false);
+    }
+  }
 
   void _trimWindow(_Reader reader) {
     final end = reader.cursor + _window(reader) - 1;
     for (final index in reader.pending.keys.toList()) {
-      if (index < reader.cursor || index > end) _releaseSegment(reader, index);
+      final segment = reader.pending[index]!;
+      if (index < reader.cursor ||
+          index > end && (!segment.started || segment.bytes != null)) {
+        _releaseSegment(reader, index);
+      }
     }
   }
 
@@ -720,31 +755,47 @@ class PlaybackStreamProxy {
     return segment;
   }
 
-  bool _makeRoom(int size, {int? limit}) {
-    while (bufferedBytes + size > (limit ?? maxCacheBytes)) {
-      final candidates = _segments.values
-          .where((s) => s.bytes != null && s.demanders.isEmpty)
-          .toList();
-      if (candidates.isEmpty) return false;
-      // Keep the container header and tail when possible; never let pinning
-      // them prevent a demanded segment from fitting in the byte budget.
-      int edge(_Segment s) =>
-          s.index == 0 || s.index >= (_length - 1) ~/ chunkBytes - 1 ? 1 : 0;
-      candidates.sort((a, b) {
-        final ownership = (a.owners.isEmpty ? 0 : 1).compareTo(
-          b.owners.isEmpty ? 0 : 1,
-        );
-        if (ownership != 0) return ownership;
-        final priority = edge(a).compareTo(edge(b));
-        return priority != 0 ? priority : a.touched.compareTo(b.touched);
-      });
-      final victim = candidates.first;
+  bool _makeRoom(int size, {int? limit, bool evictAhead = true}) {
+    final ceiling = limit ?? maxCacheBytes;
+    final needed = bufferedBytes + size - ceiling;
+    if (needed <= 0) return true;
+    final candidates = _segments.values
+        .where(
+          (s) =>
+              s.bytes != null &&
+              s.demanders.isEmpty &&
+              (evictAhead || s.owners.isEmpty),
+        )
+        .toList();
+    // A resize that cannot fit in-flight reads must leave the cache intact.
+    // Otherwise each performance sample can throw away and re-fetch the same
+    // useful data without ever giving more space to the native packet cache.
+    if (candidates.fold(0, (sum, s) => sum + s.bytes!.length) < needed) {
+      return false;
+    }
+    int edge(_Segment s) =>
+        s.index == 0 || s.index >= (_length - 1) ~/ chunkBytes - 1 ? 1 : 0;
+    candidates.sort((a, b) {
+      final ownership = (a.owners.isEmpty ? 0 : 1).compareTo(
+        b.owners.isEmpty ? 0 : 1,
+      );
+      if (ownership != 0) return ownership;
+      if (a.owners.isNotEmpty) {
+        // When repartitioning the two caches, retain the nearest ready ranges.
+        return (b.index - _cursor).abs().compareTo((a.index - _cursor).abs());
+      }
+      // Unowned header/tail data still helps later container probes and seeks.
+      final priority = edge(a).compareTo(edge(b));
+      return priority != 0 ? priority : a.touched.compareTo(b.touched);
+    });
+    for (final victim in candidates) {
       for (final owner in victim.owners.toList()) {
         owner.pending.remove(victim.index);
       }
       victim.owners.clear();
       _segments.remove(victim.key);
       _cachedBytes -= victim.bytes!.length;
+      if (bufferedBytes + size <= ceiling) break;
     }
     return true;
   }
@@ -769,7 +820,8 @@ class PlaybackStreamProxy {
             : (a.index - _cursor).abs().compareTo((b.index - _cursor).abs());
       });
       final segment = waiting.first;
-      if (_active >= _budget || !_makeRoom(segment.size)) {
+      if (_active >= _budget ||
+          !_makeRoom(segment.size, evictAhead: segment.demanders.isNotEmpty)) {
         if (_metadataPreemption == null &&
             segment.demanders.any((r) => r.metadata)) {
           final victim = _segments.values
@@ -1041,18 +1093,8 @@ class PlaybackStreamProxy {
         if (!metadata) _cursor = index;
         _trimWindow(current);
         final demanded = _requestSegment(current, index, demand: true);
-        void scheduleAhead() {
-          for (
-            var ahead = index + 1;
-            ahead <= math.min(last, index + _window(current) - 1);
-            ahead++
-          ) {
-            _requestSegment(current, ahead, demand: false);
-          }
-          _pump();
-        }
-
-        scheduleAhead();
+        _scheduleAhead(current);
+        _pump();
         final offset = demanded.start;
         final from = math.max(0, start - offset),
             to = math.min(demanded.size, end - offset + 1);
@@ -1074,7 +1116,10 @@ class PlaybackStreamProxy {
           final warming = _deliveredBytes < warmupBytes;
           if (!metadata) _deliveredBytes += next - cursor;
           cursor = next;
-          if (warming && _deliveredBytes >= warmupBytes) scheduleAhead();
+          if (warming && _deliveredBytes >= warmupBytes) {
+            _scheduleAhead(current);
+            _pump();
+          }
         }
         _releaseSegment(current, index);
       }

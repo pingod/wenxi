@@ -6,8 +6,11 @@ import 'package:flutter/material.dart';
 import '../app_services.dart';
 import '../core/operation_progress.dart';
 import '../data/http.dart';
+import '../data/resource_pool_preview.dart';
 import '../domain/models.dart';
 import '../download/image_preview_loader.dart';
+import '../preview/text_document.dart';
+import '../preview/text_preview_loader.dart';
 import '../playback/playback_controller.dart';
 import '../playback/playback_sources.dart';
 import 'common.dart';
@@ -15,6 +18,7 @@ import 'baidu_download_prompt.dart';
 import 'operation_progress_view.dart';
 import 'player_page.dart';
 import 'uc_tv_authorization_page.dart';
+import 'text_preview.dart';
 
 class PreviewPage extends StatefulWidget {
   const PreviewPage(
@@ -24,12 +28,16 @@ class PreviewPage extends StatefulWidget {
     super.key,
     this.playlist = const [],
     this.parentFolders = const {},
+    this.poolPreview,
+    this.sourceFolders = const [],
   });
   final AppServices services;
   final BrowseSession session;
   final CloudFile file;
   final List<CloudFile> playlist;
   final Map<String, String> parentFolders;
+  final ResourcePoolPreview? poolPreview;
+  final List<String> sourceFolders;
   @override
   State<PreviewPage> createState() => _PreviewPageState();
 }
@@ -43,24 +51,87 @@ class _PreviewPageState extends State<PreviewPage> {
   DownloadSpec? spec;
   PlaybackController? playback;
   Uint8List? image;
-  String? text;
+  TextDocument? text;
   bool loading = true, adding = false;
   String error = '';
   late final kind = fileKind(widget.file.name);
+  late BrowseSession session = widget.session;
+  late CloudFile file = widget.file;
+  late List<CloudFile> playlist = widget.playlist;
+  late Map<String, String> parentFolders = widget.parentFolders;
+  bool preparingPool = false, poolError = false;
   @override
   void initState() {
     super.initState();
+    if (widget.poolPreview != null) {
+      _preparePool();
+    } else {
+      _startPreview();
+    }
+  }
+
+  void _startPreview() {
     if (kind == FileKind.video || kind == FileKind.audio) {
-      playback = cloudPlayback(
-        widget.services,
-        widget.session,
-        widget.file,
-        widget.playlist,
-        parentFolders: widget.parentFolders,
-      );
+      setState(() {
+        loading = false;
+        playback = cloudPlayback(
+          widget.services,
+          session,
+          file,
+          playlist,
+          parentFolders: parentFolders,
+        );
+      });
     } else {
       _load();
     }
+  }
+
+  Future<void> _preparePool() async {
+    setState(() {
+      preparingPool = true;
+      poolError = false;
+      loading = true;
+      error = '';
+    });
+    try {
+      final target = await progress.run(
+        () => widget.poolPreview!.resolve(
+          widget.session,
+          widget.file,
+          widget.sourceFolders,
+          scope,
+          sourceParentId: widget.parentFolders[widget.file.id],
+        ),
+      );
+      if (!mounted || scope.token.isCancelled) return;
+      session = target.session;
+      file = target.file;
+      playlist = target.siblings;
+      parentFolders = {
+        for (final sibling in target.siblings) sibling.id: target.parentId,
+      };
+      setState(() => preparingPool = false);
+      _startPreview();
+    } catch (e) {
+      if (!mounted || scope.token.isCancelled) return;
+      progress.close(failed: true);
+      setState(() {
+        preparingPool = false;
+        poolError = true;
+        loading = false;
+        error = errorText(e);
+      });
+    }
+  }
+
+  void _useOriginal() {
+    setState(() {
+      poolError = false;
+      error = '';
+      loading = true;
+    });
+    _startPreview();
   }
 
   Future<void> _release(DownloadSpec value) async {
@@ -76,9 +147,7 @@ class _PreviewPageState extends State<PreviewPage> {
     }
     try {
       final value = await scope.run(
-        () => progress.run(
-          () => widget.services.cloud.prepare(widget.session, widget.file),
-        ),
+        () => progress.run(() => widget.services.cloud.prepare(session, file)),
       );
       if (!mounted) {
         await _release(value);
@@ -91,14 +160,14 @@ class _PreviewPageState extends State<PreviewPage> {
             value,
             limit: _maxImagePreviewBytes,
             connections: widget.services.settings.connectionsFor(
-              widget.session.platform,
+              session.platform,
               value.profile,
             ),
           ),
         );
       } else if (kind == FileKind.text) {
         text = await scope.run(
-          () => widget.services.transfer.text(value.url, value.headers),
+          () => TextPreviewLoader.remote(widget.services.transfer, value),
         );
       }
       if (mounted) setState(() => loading = false);
@@ -113,24 +182,21 @@ class _PreviewPageState extends State<PreviewPage> {
   }
 
   Future<void> _download() async {
-    if (adding) return;
+    if (adding || preparingPool || poolError) return;
     setState(() => adding = true);
     try {
       if (!await confirmBaiduDownload(
             context,
             widget.services,
-            widget.session.platform,
-            session: widget.session,
+            session.platform,
+            session: session,
           ) ||
           !mounted) {
         return;
       }
       var value = spec;
       if (value == null) {
-        value = await widget.services.cloud.prepare(
-          widget.session,
-          widget.file,
-        );
+        value = await widget.services.cloud.prepare(session, file);
       } else {
         widget.services.cleanups.retain(value.cleanup);
       }
@@ -148,6 +214,8 @@ class _PreviewPageState extends State<PreviewPage> {
           onTap: widget.services.requestDownloadManager,
         );
       }
+    } on DownloadConfirmationCancelled {
+      // The user declined mobile data; the prepared source was released above.
     } catch (e) {
       if (mounted) message(context, errorText(e));
     } finally {
@@ -179,11 +247,11 @@ class _PreviewPageState extends State<PreviewPage> {
           playback!.current.platform,
           session: playback!.current.source?.cloud?.session,
         ),
-        onAuthorizeUcTv: widget.session.platform == CloudPlatform.uc
+        onAuthorizeUcTv: session.platform == CloudPlatform.uc
             ? () => openUcTvAuthorization(
                 context,
                 widget.services,
-                accountId: widget.session.accountId,
+                accountId: session.accountId,
               )
             : null,
         subtitleDirectory: Directory(
@@ -198,8 +266,12 @@ class _PreviewPageState extends State<PreviewPage> {
       title: widget.file.name,
       actions: [
         IconButton(
-          tooltip: '下载文件',
-          onPressed: adding ? null : _download,
+          tooltip: kind == FileKind.image || kind == FileKind.text
+              ? '下载文件'
+              : '传输管理',
+          onPressed: kind == FileKind.image || kind == FileKind.text
+              ? (adding || loading || poolError ? null : _download)
+              : widget.services.requestDownloadManager,
           icon: const Icon(CupertinoIcons.arrow_down_circle),
         ),
       ],
@@ -212,11 +284,48 @@ class _PreviewPageState extends State<PreviewPage> {
                       padding: const EdgeInsets.all(24),
                       child: ConstrainedBox(
                         constraints: const BoxConstraints(maxWidth: 360),
-                        child: OperationProgressView(
-                          progress: progress,
-                          label: '正在加载预览…',
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            OperationProgressView(
+                              progress: progress,
+                              label: preparingPool ? '正在准备预览…' : '正在加载预览…',
+                            ),
+                            if (preparingPool) ...[
+                              const SizedBox(height: 20),
+                              TextButton(
+                                key: const Key('pool-preview-cancel'),
+                                onPressed: () {
+                                  scope.cancel();
+                                  Navigator.of(context).pop();
+                                },
+                                child: const Text('返回文件列表'),
+                              ),
+                            ],
+                          ],
                         ),
                       ),
+                    ),
+                  )
+                : poolError
+                ? EmptyPanel(
+                    '暂未完成资源准备',
+                    error,
+                    icon: CupertinoIcons.doc,
+                    action: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        FilledButton(
+                          key: const Key('pool-preview-retry'),
+                          onPressed: _preparePool,
+                          child: const Text('重试'),
+                        ),
+                        TextButton(
+                          key: const Key('pool-preview-original'),
+                          onPressed: _useOriginal,
+                          child: const Text('使用原链接预览'),
+                        ),
+                      ],
                     ),
                   )
                 : error.isNotEmpty
@@ -248,16 +357,7 @@ class _PreviewPageState extends State<PreviewPage> {
                     ),
                   )
                 : text != null
-                ? SingleChildScrollView(
-                    padding: const EdgeInsets.all(20),
-                    child: Align(
-                      alignment: Alignment.topLeft,
-                      child: SelectableText(
-                        text!,
-                        style: const TextStyle(fontSize: 14, height: 1.6),
-                      ),
-                    ),
-                  )
+                ? TextPreview(text!)
                 : EmptyPanel(
                     widget.file.name,
                     '${formatBytes(widget.file.size)}\n此类型文件可下载后查看',

@@ -74,6 +74,7 @@ native/.tools/
 
 # Local accounts, diagnostics, reference material and release outputs.
 /logs/
+/outputs/
 /logs.zip
 /*-logs-*.zip
 /*-backup-*.json
@@ -91,6 +92,18 @@ native/.tools/
 /公告编辑器.html
 /tool/announcement-editor.test.cjs
 /交互.txt
+# This repository publishes the client; backend services and operator tools stay local.
+/backend/
+/wwwroot/
+/5.com/
+/.claude/
+/tool/password_updater/
+/启动密码更新器.cmd
+/tool/source_runner.dart
+/tool/build-source-runtime.ps1
+/tool/tests/source_live_smoke.dart
+/docs/SOURCE-RUNTIME-DEPLOYMENT.md
+/docs/REMOTE-SOURCE-VERIFICATION.md
 # Local implementation notes and diagnostics; keep application docs public.
 /docs/CLOUD-PROVIDERS-2026-09-24.md
 /docs/OPENLIST-CLOUDS-SMS-2026-09-24.md

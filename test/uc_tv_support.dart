@@ -146,6 +146,8 @@ class UcTvFixture {
     );
     cleanups = CleanupOutbox(store, http);
     repository = CloudRepository(http, vault, cleanups);
+    final stageCleanup =
+        (repository.connector(CloudPlatform.uc) as UcConnector).stageCleanup!;
     connector = UcConnector(
       http,
       store: vault,
@@ -153,7 +155,7 @@ class UcTvFixture {
       taskDelay: Duration.zero,
       stageCleanup: (cleanup) async {
         staged.add(cleanup);
-        await cleanups.stage(cleanup);
+        await stageCleanup(cleanup);
       },
     );
     repository.connectors[CloudPlatform.uc] = connector;
@@ -196,9 +198,10 @@ class UcTvFixture {
     }
     if (r.uri.host == 'api.extscreen.com') return ucTvToken();
     if (r.uri.host == 'media.example' && r.uri.path == '/original.mp4') {
-      return const HttpResult(206, 'xx', {
-        'content-range': ['bytes 0-1/400'],
-        'content-length': ['2'],
+      final singleByte = r.headers['Range'] == 'bytes=0-0';
+      return HttpResult(206, singleByte ? 'x' : 'xx', {
+        'content-range': [singleByte ? 'bytes 0-0/400' : 'bytes 0-1/400'],
+        'content-length': [singleByte ? '1' : '2'],
       });
     }
     Json data = {};

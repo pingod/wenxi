@@ -3,6 +3,7 @@ import 'dart:convert';
 import '../../core/json.dart';
 import '../../domain/auth.dart';
 import '../../domain/github.dart';
+import '../../domain/github_acceleration.dart';
 import '../../domain/models.dart';
 import '../../domain/uploads.dart';
 import '../http.dart';
@@ -11,8 +12,9 @@ import 'personal_cloud.dart';
 part 'github_write.dart';
 
 class GitHubConnector extends PersonalCloudConnector {
-  GitHubConnector(this.http);
+  GitHubConnector(this.http, {this.acceleration});
   final JsonHttp http;
+  final GitHubAcceleration Function()? acceleration;
   static const userAgent = 'AsterLink-GitHub/1.0';
   static const apiVersion = '2022-11-28';
   static const codeUploadLimit = 100 * 1024 * 1024;
@@ -736,16 +738,27 @@ class GitHubConnector extends PersonalCloudConnector {
         require(_downloadUrl(url), 'GitHub 未返回有效的文件直链，请稍后重试');
         var rawReady = false;
         try {
+          final probeUrl =
+              acceleration?.call().urlFor(url, downloadHeaders) ?? url;
           final probe = await http.peek(
-            url,
+            probeUrl,
             downloadHeaders,
             maxBytes: 1,
             followRedirects: false,
           );
+          final location = probe.header('location');
+          final redirect = location.isEmpty
+              ? null
+              : Uri.tryParse(probeUrl)?.resolve(location);
           rawReady =
               probe.successful ||
-              {301, 302, 307, 308}.contains(probe.status) &&
-                  _downloadUrl(probe.header('location'));
+              {301, 302, 303, 307, 308}.contains(probe.status) &&
+                  (_downloadUrl(location) ||
+                      probeUrl != url &&
+                          redirect != null &&
+                          {'http', 'https'}.contains(redirect.scheme) &&
+                          redirect.host.isNotEmpty &&
+                          redirect.userInfo.isEmpty);
         } on HttpRequestFailure {
           RequestScope.checkpoint();
         }

@@ -56,6 +56,8 @@ void main() {
       'https://pan.xunlei.com:444/',
       'https://pan.xunlei.com.invalid/',
       'https://i.xunlei.com/',
+      'https://account.xiaomi.com/fe/service/login/password',
+      'https://open-api-auth.xunlei.com/platform',
       'https://user@pan.xunlei.com/',
     ]) {
       expect(target.canReadLocalStorage(url), isFalse);

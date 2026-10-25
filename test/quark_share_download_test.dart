@@ -7,6 +7,7 @@ import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/auth.dart';
 import 'package:asterlink/domain/downloads.dart';
 import 'package:asterlink/domain/models.dart';
+import 'package:asterlink/domain/settings.dart';
 import 'support.dart';
 
 HttpResult _ok(Object data) =>
@@ -19,7 +20,11 @@ HttpResult _notShared() => jsonResponse({
 }, 400);
 
 class _Fixture {
-  _Fixture({this.platform = CloudPlatform.quark, this.root = '0'}) {
+  _Fixture({
+    this.platform = CloudPlatform.quark,
+    this.root = '0',
+    bool Function(CloudPlatform, bool)? directPolicy,
+  }) {
     final stamp = '${DateTime.now().millisecondsSinceEpoch}';
     account = Credential('fixture', {
       'primary': '__pus=fixture-account; __puus=fixture-session',
@@ -28,10 +33,16 @@ class _Fixture {
     }, updatedAt: 42);
     store = StateStore.memory({
       'credentials': {platform.key: account.toJson()},
+      'settings': const AppSettings().toJson(),
     });
     vault = Vault(store);
     http = FakeHttp(reply);
-    repository = CloudRepository(http, vault, CleanupOutbox(store, http));
+    repository = CloudRepository(
+      http,
+      vault,
+      CleanupOutbox(store, http),
+      directShareDownloadEnabled: directPolicy,
+    );
   }
 
   final CloudPlatform platform;
@@ -45,7 +56,14 @@ class _Fixture {
   String rootFileId = 'shared-file';
   int rootFileSize = 4;
   bool rootUnavailable = false;
+  String? capacityFailure;
   AppException? outsideError;
+  AppException? saveError, directError;
+  bool authenticatedDirectAvailable = false, failCleanup = false;
+  String? transferCookie;
+  String? directFileId;
+  int? probeSize;
+  int directExpirations = 0;
   final tasks = <String, String>{};
 
   ParsedLink get link => ParsedLink(
@@ -67,6 +85,14 @@ class _Fixture {
       .toList();
 
   HttpResult reply(RecordedRequest r) {
+    if (r.uri.host == 'dl.quark.cn') {
+      expect(r.headers['Range'], 'bytes=0-0');
+      expect(r.headers['Cookie'], contains('__pus=fixture-account'));
+      return HttpResult(206, 'x', {
+        'content-range': ['bytes 0-0/${probeSize ?? rootFileSize}'],
+        'content-length': ['1'],
+      });
+    }
     switch (r.uri.path) {
       case '/1/clouddrive/config':
         return _ok({});
@@ -121,10 +147,36 @@ class _Fixture {
       case '/1/clouddrive/file':
         return _ok({'fid': 'temporary-${++directories}'});
       case '/1/clouddrive/share/sharepage/save':
+        if (saveError != null) throw saveError!;
+        if (capacityFailure == 'save') {
+          return jsonResponse({
+            'status': 400,
+            'code': 32003,
+            'message': 'capacity limit[{0}]',
+          }, 400);
+        }
         final id = 'task-${tasks.length + 1}';
         tasks[id] = 'saved-${r.json['fid_list'][0]}-$directories';
-        return _ok({'task_id': id});
+        final result = _ok({'task_id': id});
+        return transferCookie == null
+            ? result
+            : HttpResult(result.status, result.body, {
+                'set-cookie': ['__puus=$transferCookie; Path=/; Secure'],
+              });
       case '/1/clouddrive/task':
+        if (capacityFailure == 'response' || capacityFailure == 'code') {
+          return jsonResponse({
+            'status': 400,
+            'code': 32003,
+            if (capacityFailure == 'response') 'message': 'capacity limit[{0}]',
+          }, 400);
+        }
+        if (capacityFailure == 'task') {
+          return _ok({'status': 3, 'message': 'capacity limit[{0}]'});
+        }
+        if (capacityFailure == 'task_code') {
+          return _ok({'task_status': 4, 'code': 32003});
+        }
         return _ok({
           'status': 2,
           'save_as': {
@@ -133,6 +185,21 @@ class _Fixture {
         });
       case '/1/clouddrive/file/download':
         if (r.json.containsKey('pwd_id')) {
+          if (directError != null) throw directError!;
+          if (directExpirations > 0) {
+            directExpirations--;
+            return jsonResponse({'status': 400, 'code': 41020}, 400);
+          }
+          if (authenticatedDirectAvailable &&
+              (r.headers['Cookie'] ?? '').contains('__pus=fixture-account')) {
+            return _ok([
+              {
+                'fid': directFileId ?? rootFileId,
+                'size': rootFileSize,
+                'download_url': 'https://dl.quark.cn/original',
+              },
+            ]);
+          }
           return jsonResponse({'status': 400, 'code': 23018}, 400);
         }
         final fid = r.json['fids'][0] as String;
@@ -140,6 +207,7 @@ class _Fixture {
           {'fid': fid, 'size': 4, 'download_url': 'https://cdn.example/$fid'},
         ]);
       case '/1/clouddrive/file/delete':
+        if (failCleanup) return const HttpResult(503, '{}');
         return _ok({});
       default:
         throw StateError('Unexpected fixture request ${r.uri.path}');
@@ -163,6 +231,275 @@ class _Fixture {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  for (final failure in ['response', 'task']) {
+    test(
+      'Quark $failure capacity failure explains denied automatic recovery',
+      () async {
+        final f = _Fixture(directPolicy: (_, _) => false)
+          ..capacityFailure = failure;
+        final session = await f.repository.share(f.link);
+        final file = (await f.repository.list(session, session.rootId)).first;
+        await expectLater(
+          f.repository.refresh(f.repository.planDownload(session, file)),
+          throwsA(
+            isA<AppException>().having(
+              (e) => e.message,
+              'message',
+              '夸克网盘空间不足，已自动尝试免转存下载但未成功，请清理网盘空间后重试',
+            ),
+          ),
+        );
+        expect(f.calls('/share/sharepage/save'), hasLength(1));
+        expect(f.calls('/file/download'), hasLength(1));
+        expect(
+          f.calls('/file/download').where((r) => !r.json.containsKey('pwd_id')),
+          isEmpty,
+        );
+      },
+    );
+  }
+
+  for (final failure in ['save', 'response', 'task', 'code', 'task_code']) {
+    test(
+      'Quark $failure capacity failure temporarily uses account direct',
+      () async {
+        final f = _Fixture(directPolicy: (_, _) => false)
+          ..capacityFailure = failure
+          ..authenticatedDirectAvailable = true
+          ..rootFileSize = 6 * 1024 * 1024 * 1024;
+        final settings = encoded(f.store.data.obj('settings'));
+        final session = await f.repository.share(f.link);
+        final file = (await f.repository.list(session, session.rootId)).first;
+        final spec = await f.repository.refresh(
+          f.repository.planDownload(session, file),
+        );
+        expect(spec.url, 'https://dl.quark.cn/original');
+        expect(spec.expectedSize, file.size);
+        expect(spec.guestDownload, isFalse);
+        expect(spec.cleanup, isNull);
+        expect(spec.headers['Cookie'], contains('__pus=fixture-account'));
+        final direct = f.calls('/file/download').single;
+        expect(direct.json['fids'], [file.id]);
+        expect(direct.json['fids_token'], ['file-token-2']);
+        expect(direct.json['stoken'], 'share-token-2');
+        expect(f.calls('/share/sharepage/save'), hasLength(1));
+        expect(f.calls('/file/delete').single.json['filelist'], [
+          'temporary-1',
+        ]);
+        expect(f.store.data.obj('cleanups').values, hasLength(1));
+        expect(
+          asJson(f.store.data.obj('cleanups').values.single).boolean('ready'),
+          isTrue,
+        );
+        expect(encoded(f.store.data.obj('settings')), settings);
+      },
+    );
+  }
+
+  test('Quark normal transfer does not enable account direct', () async {
+    final f = _Fixture(directPolicy: (_, _) => false)
+      ..authenticatedDirectAvailable = true;
+    final session = await f.repository.share(f.link);
+    final file = (await f.repository.list(session, session.rootId)).first;
+    final spec = await f.repository.prepare(session, file);
+    expect(spec.cleanup, isNotNull);
+    expect(
+      f.calls('/file/download').single.json.containsKey('pwd_id'),
+      isFalse,
+    );
+    expect(f.calls('/file/delete'), isEmpty);
+    expect(
+      asJson(f.store.data.obj('cleanups').values.single).boolean('ready'),
+      isFalse,
+    );
+  });
+
+  test('Quark automatic direct is scoped to the current download', () async {
+    final f = _Fixture(directPolicy: (_, _) => false)
+      ..capacityFailure = 'save'
+      ..authenticatedDirectAvailable = true;
+    final session = await f.repository.share(f.link);
+    final file = (await f.repository.list(session, session.rootId)).first;
+    final direct = await f.repository.prepare(session, file);
+    expect(direct.cleanup, isNull);
+    f.capacityFailure = null;
+    final normal = await f.repository.refresh(direct);
+    expect(normal.cleanup, isNotNull);
+    expect(f.calls('/share/sharepage/save'), hasLength(2));
+    expect(
+      f.calls('/file/download').where((r) => r.json.containsKey('pwd_id')),
+      hasLength(1),
+    );
+    expect(
+      f.store.data.obj('settings').boolean('quarkAuthenticatedDirectDownload'),
+      isFalse,
+    );
+  });
+
+  for (final error in [
+    const HttpRequestFailure('连接超时', kind: 'connectionTimeout'),
+    const AccountLoginRequired('请重新登录'),
+    const AppException('请求已取消'),
+    const AppException('本地磁盘空间不足'),
+    const AppException('网盘拒绝转存'),
+  ]) {
+    test('Quark adaptive recovery does not hide ${error.message}', () async {
+      final f = _Fixture(directPolicy: (_, _) => false)
+        ..saveError = error
+        ..authenticatedDirectAvailable = true;
+      final session = await f.repository.share(f.link);
+      final file = (await f.repository.list(session, session.rootId)).first;
+      await expectLater(
+        f.repository.prepare(session, file),
+        throwsA(same(error)),
+      );
+      expect(f.calls('/file/download'), isEmpty);
+      expect(f.calls('/share/sharepage/save'), hasLength(1));
+    });
+  }
+
+  for (final error in [
+    const HttpRequestFailure('免转存连接超时', kind: 'connectionTimeout'),
+    const AccountLoginRequired('免转存登录已失效'),
+  ]) {
+    test(
+      'Quark automatic direct reports ${error.message} without another transfer',
+      () async {
+        final f = _Fixture(directPolicy: (_, _) => false)
+          ..capacityFailure = 'save'
+          ..directError = error;
+        final session = await f.repository.share(f.link);
+        final file = (await f.repository.list(session, session.rootId)).first;
+        await expectLater(
+          f.repository.prepare(session, file),
+          throwsA(same(error)),
+        );
+        expect(f.calls('/share/sharepage/save'), hasLength(1));
+        expect(f.calls('/file/download'), hasLength(1));
+      },
+    );
+  }
+
+  test(
+    'Quark automatic direct uses cookies renewed by the failed transfer',
+    () async {
+      final f = _Fixture(directPolicy: (_, _) => false)
+        ..capacityFailure = 'task'
+        ..authenticatedDirectAvailable = true
+        ..transferCookie = 'renewed-session';
+      final session = await f.repository.share(f.link);
+      final file = (await f.repository.list(session, session.rootId)).first;
+      final spec = await f.repository.prepare(session, file);
+      expect(
+        f.calls('/file/download').single.headers['Cookie'],
+        contains('__puus=renewed-session'),
+      );
+      expect(spec.headers['Cookie'], contains('__puus=renewed-session'));
+      expect(
+        f.vault.credential(CloudPlatform.quark)!.primary,
+        contains('__puus=renewed-session'),
+      );
+      expect(
+        f.vault.credential(CloudPlatform.quark)!.updatedAt,
+        f.account.updatedAt,
+      );
+    },
+  );
+
+  test(
+    'Quark successful recovery keeps failed directory cleanup retryable',
+    () async {
+      final f = _Fixture(directPolicy: (_, _) => false)
+        ..capacityFailure = 'save'
+        ..authenticatedDirectAvailable = true
+        ..failCleanup = true;
+      final session = await f.repository.share(f.link);
+      final file = (await f.repository.list(session, session.rootId)).first;
+      final spec = await f.repository.prepare(session, file);
+      expect(spec.cleanup, isNull);
+      expect(
+        asJson(f.store.data.obj('cleanups').values.single).boolean('ready'),
+        isTrue,
+      );
+      f.failCleanup = false;
+      await f.repository.cleanups.drain();
+      expect(f.store.data.obj('cleanups'), isEmpty);
+      expect(f.calls('/file/delete'), hasLength(2));
+      expect(
+        f.calls('/file/delete').map((r) => r.json['filelist']),
+        everyElement(['temporary-1']),
+      );
+    },
+  );
+
+  test(
+    'Quark automatic direct refreshes expired tokens for the same file',
+    () async {
+      final f = _Fixture(directPolicy: (_, _) => false)
+        ..capacityFailure = 'save'
+        ..authenticatedDirectAvailable = true
+        ..directExpirations = 1;
+      final session = await f.repository.share(f.link);
+      final file = (await f.repository.list(session, session.rootId)).first;
+      final spec = await f.repository.prepare(session, file);
+      expect(spec.expectedSize, file.size);
+      expect(f.calls('/file/download'), hasLength(2));
+      expect(f.calls('/file/download').last.json['fids_token'], [
+        'file-token-2',
+      ]);
+      expect(f.calls('/share/sharepage/save'), hasLength(1));
+    },
+  );
+
+  for (final wrongId in [true, false]) {
+    test(
+      'Quark automatic direct rejects mismatched ${wrongId ? 'file' : 'length'}',
+      () async {
+        final f = _Fixture(directPolicy: (_, _) => false)
+          ..capacityFailure = 'task'
+          ..authenticatedDirectAvailable = true
+          ..directFileId = wrongId ? 'another-file' : null
+          ..probeSize = wrongId ? null : 1024;
+        final session = await f.repository.share(f.link);
+        final file = (await f.repository.list(session, session.rootId)).first;
+        await expectLater(
+          f.repository.prepare(session, file),
+          throwsA(
+            isA<AppException>().having(
+              (e) => e.message,
+              'message',
+              contains('不一致'),
+            ),
+          ),
+        );
+        expect(f.calls('/share/sharepage/save'), hasLength(1));
+      },
+    );
+  }
+
+  test(
+    'UC quota failure retains its existing account download policy',
+    () async {
+      final f =
+          _Fixture(platform: CloudPlatform.uc, directPolicy: (_, _) => false)
+            ..capacityFailure = 'task'
+            ..authenticatedDirectAvailable = true;
+      final session = await f.repository.share(f.link);
+      final file = (await f.repository.list(session, session.rootId)).first;
+      await expectLater(
+        f.repository.prepare(session, file),
+        throwsA(
+          isA<AppException>().having(
+            (e) => e.message,
+            'message',
+            '网盘空间不足，可尝试打开实用性功能的突破文件大小限制再试',
+          ),
+        ),
+      );
+      expect(f.calls('/file/download'), isEmpty);
+    },
+  );
 
   for (final platform in [CloudPlatform.quark, CloudPlatform.uc]) {
     for (final root in ['0', '']) {

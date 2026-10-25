@@ -89,6 +89,317 @@
                 <data android:mimeType="application/vnd.apple.mpegurl"/>
             </intent-filter>
         </activity-alias>
+        <!-- Share-link aliases can be enabled individually in 链接唤起.
+             Third-party domains require user approval in Android default-open settings. -->
+        <activity-alias android:name="com.asterlink.app.link.QuarkEntry" android:targetActivity=".MainActivity"
+            android:exported="true" android:enabled="true" android:label="文析助手解析">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="http"/>
+                <data android:scheme="https"/>
+                <data android:host="pan.quark.cn"/>
+                <data android:pathPrefix="/s/"/>
+            </intent-filter>
+        </activity-alias>
+        <activity-alias android:name="com.asterlink.app.link.UcEntry" android:targetActivity=".MainActivity"
+            android:exported="true" android:enabled="true" android:label="文析助手解析">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="http"/>
+                <data android:scheme="https"/>
+                <data android:host="drive.uc.cn"/>
+                <data android:pathPrefix="/s/"/>
+            </intent-filter>
+        </activity-alias>
+        <activity-alias android:name="com.asterlink.app.link.BaiduEntry" android:targetActivity=".MainActivity"
+            android:exported="true" android:enabled="true" android:label="文析助手解析">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="http"/>
+                <data android:scheme="https"/>
+                <data android:host="pan.baidu.com"/>
+                <data android:pathPrefix="/s/"/>
+                <data android:path="/share/init"/>
+                <data android:path="/share/link"/>
+            </intent-filter>
+        </activity-alias>
+        <activity-alias android:name="com.asterlink.app.link.AliyunEntry" android:targetActivity=".MainActivity"
+            android:exported="true" android:enabled="true" android:label="文析助手解析">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="http"/>
+                <data android:scheme="https"/>
+                <data android:host="alipan.com"/>
+                <data android:host="*.alipan.com"/>
+                <data android:host="aliyundrive.com"/>
+                <data android:host="*.aliyundrive.com"/>
+                <data android:pathPrefix="/s/"/>
+            </intent-filter>
+        </activity-alias>
+        <activity-alias android:name="com.asterlink.app.link.TianyiEntry" android:targetActivity=".MainActivity"
+            android:exported="true" android:enabled="true" android:label="文析助手解析">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="http"/>
+                <data android:scheme="https"/>
+                <data android:host="cloud.189.cn"/>
+                <data android:pathPrefix="/t/"/>
+                <data android:path="/web/share"/>
+            </intent-filter>
+        </activity-alias>
+        <activity-alias android:name="com.asterlink.app.link.C139Entry" android:targetActivity=".MainActivity"
+            android:exported="true" android:enabled="true" android:label="文析助手解析">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="http"/>
+                <data android:scheme="https"/>
+                <data android:host="yun.139.com"/>
+                <data android:host="caiyun.139.com"/>
+                <data android:pathPrefix="/shareweb"/>
+                <data android:pathPrefix="/w/"/>
+                <data android:pathPrefix="/m/i"/>
+            </intent-filter>
+        </activity-alias>
+        <activity-alias android:name="com.asterlink.app.link.WopanEntry" android:targetActivity=".MainActivity"
+            android:exported="true" android:enabled="true" android:label="文析助手解析">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="http"/>
+                <data android:scheme="https"/>
+                <data android:host="pan.wo.cn"/>
+                <data android:host="panservice.mail.wo.cn"/>
+                <data android:pathPrefix="/s/"/>
+                <data android:pathPrefix="/share/"/>
+                <data android:path="/"/>
+                <data android:path="/web/share"/>
+            </intent-filter>
+        </activity-alias>
+        <activity-alias android:name="com.asterlink.app.link.GuangyaEntry" android:targetActivity=".MainActivity"
+            android:exported="true" android:enabled="true" android:label="文析助手解析">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="http"/>
+                <data android:scheme="https"/>
+                <data android:host="guangyapan.com"/>
+                <data android:host="*.guangyapan.com"/>
+                <data android:pathPrefix="/s/"/>
+            </intent-filter>
+        </activity-alias>
+        <activity-alias android:name="com.asterlink.app.link.XunleiEntry" android:targetActivity=".MainActivity"
+            android:exported="true" android:enabled="true" android:label="文析助手解析">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="http"/>
+                <data android:scheme="https"/>
+                <data android:host="pan.xunlei.com"/>
+                <data android:pathPrefix="/s/"/>
+            </intent-filter>
+        </activity-alias>
+        <activity-alias android:name="com.asterlink.app.link.Pan115Entry" android:targetActivity=".MainActivity"
+            android:exported="true" android:enabled="true" android:label="文析助手解析">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="http"/>
+                <data android:scheme="https"/>
+                <data android:host="115.com"/>
+                <data android:host="*.115.com"/>
+                <data android:host="115cdn.com"/>
+                <data android:host="*.115cdn.com"/>
+                <data android:host="115sha1.com"/>
+                <data android:host="*.115sha1.com"/>
+                <data android:pathPrefix="/s/"/>
+            </intent-filter>
+        </activity-alias>
+        <activity-alias android:name="com.asterlink.app.link.Pan123Entry" android:targetActivity=".MainActivity"
+            android:exported="true" android:enabled="true" android:label="文析助手解析">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="http"/>
+                <data android:scheme="https"/>
+                <data android:host="123pan.com"/>
+                <data android:host="*.123pan.com"/>
+                <data android:host="123pan.cn"/>
+                <data android:host="*.123pan.cn"/>
+                <data android:host="123865.com"/>
+                <data android:host="*.123865.com"/>
+                <data android:host="123684.com"/>
+                <data android:host="*.123684.com"/>
+                <data android:host="123912.com"/>
+                <data android:host="*.123912.com"/>
+                <data android:pathPrefix="/s/"/>
+                <data android:pathPrefix="/123pan/"/>
+                <data android:path="/"/>
+            </intent-filter>
+        </activity-alias>
+        <activity-alias android:name="com.asterlink.app.link.LanzouEntry" android:targetActivity=".MainActivity"
+            android:exported="true" android:enabled="true" android:label="文析助手解析">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="http"/>
+                <data android:scheme="https"/>
+                <data android:host="lanzou.com"/>
+                <data android:host="*.lanzou.com"/>
+                <data android:host="lanzoua.com"/>
+                <data android:host="*.lanzoua.com"/>
+                <data android:host="lanzoub.com"/>
+                <data android:host="*.lanzoub.com"/>
+                <data android:host="lanzouc.com"/>
+                <data android:host="*.lanzouc.com"/>
+                <data android:host="lanzoud.com"/>
+                <data android:host="*.lanzoud.com"/>
+                <data android:host="lanzoue.com"/>
+                <data android:host="*.lanzoue.com"/>
+                <data android:host="lanzouf.com"/>
+                <data android:host="*.lanzouf.com"/>
+                <data android:host="lanzoug.com"/>
+                <data android:host="*.lanzoug.com"/>
+                <data android:host="lanzouh.com"/>
+                <data android:host="*.lanzouh.com"/>
+                <data android:host="lanzoui.com"/>
+                <data android:host="*.lanzoui.com"/>
+                <data android:host="lanzouj.com"/>
+                <data android:host="*.lanzouj.com"/>
+                <data android:host="lanzouk.com"/>
+                <data android:host="*.lanzouk.com"/>
+                <data android:host="lanzoul.com"/>
+                <data android:host="*.lanzoul.com"/>
+                <data android:host="lanzoum.com"/>
+                <data android:host="*.lanzoum.com"/>
+                <data android:host="lanzoun.com"/>
+                <data android:host="*.lanzoun.com"/>
+                <data android:host="lanzouo.com"/>
+                <data android:host="*.lanzouo.com"/>
+                <data android:host="lanzoup.com"/>
+                <data android:host="*.lanzoup.com"/>
+                <data android:host="lanzouq.com"/>
+                <data android:host="*.lanzouq.com"/>
+                <data android:host="lanzour.com"/>
+                <data android:host="*.lanzour.com"/>
+                <data android:host="lanzous.com"/>
+                <data android:host="*.lanzous.com"/>
+                <data android:host="lanzout.com"/>
+                <data android:host="*.lanzout.com"/>
+                <data android:host="lanzouu.com"/>
+                <data android:host="*.lanzouu.com"/>
+                <data android:host="lanzouv.com"/>
+                <data android:host="*.lanzouv.com"/>
+                <data android:host="lanzouw.com"/>
+                <data android:host="*.lanzouw.com"/>
+                <data android:host="lanzoux.com"/>
+                <data android:host="*.lanzoux.com"/>
+                <data android:host="lanzouy.com"/>
+                <data android:host="*.lanzouy.com"/>
+                <data android:host="lanzouz.com"/>
+                <data android:host="*.lanzouz.com"/>
+                <data android:host="lanzout.net"/>
+                <data android:host="*.lanzout.net"/>
+                <data android:pathPattern="/..*"/>
+            </intent-filter>
+        </activity-alias>
+        <activity-alias android:name="com.asterlink.app.link.CtfileEntry" android:targetActivity=".MainActivity"
+            android:exported="true" android:enabled="true" android:label="文析助手解析">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="http"/>
+                <data android:scheme="https"/>
+                <data android:host="ctfile.com"/>
+                <data android:host="*.ctfile.com"/>
+                <data android:host="ctfile.cn"/>
+                <data android:host="*.ctfile.cn"/>
+                <data android:host="400gb.com"/>
+                <data android:host="*.400gb.com"/>
+                <data android:host="545c.com"/>
+                <data android:host="*.545c.com"/>
+                <data android:host="pipipan.com"/>
+                <data android:host="*.pipipan.com"/>
+                <data android:pathPrefix="/f/"/>
+                <data android:pathPrefix="/file/"/>
+                <data android:pathPrefix="/d/"/>
+                <data android:pathPrefix="/dir/"/>
+                <data android:pathPrefix="/s/"/>
+                <data android:path="/"/>
+            </intent-filter>
+        </activity-alias>
+        <activity-alias android:name="com.asterlink.app.link.FeijipanEntry" android:targetActivity=".MainActivity"
+            android:exported="true" android:enabled="true" android:label="文析助手解析">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="http"/>
+                <data android:scheme="https"/>
+                <data android:host="feijipan.com"/>
+                <data android:host="*.feijipan.com"/>
+                <data android:pathPrefix="/s/"/>
+                <data android:path="/"/>
+            </intent-filter>
+        </activity-alias>
+        <activity-alias android:name="com.asterlink.app.link.PikpakEntry" android:targetActivity=".MainActivity"
+            android:exported="true" android:enabled="true" android:label="文析助手解析">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="http"/>
+                <data android:scheme="https"/>
+                <data android:host="mypikpak.com"/>
+                <data android:host="*.mypikpak.com"/>
+                <data android:pathPrefix="/s/"/>
+            </intent-filter>
+        </activity-alias>
+        <activity-alias android:name="com.asterlink.app.link.ShareEntry" android:targetActivity=".MainActivity"
+            android:exported="true" android:enabled="true" android:label="文析助手解析">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="text/plain"/>
+            </intent-filter>
+        </activity-alias>
+        <activity-alias android:name="com.asterlink.app.link.SelectionEntry" android:targetActivity=".MainActivity"
+            android:exported="true" android:enabled="true" android:label="用文析助手解析">
+            <intent-filter>
+                <action android:name="android.intent.action.PROCESS_TEXT"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="text/plain"/>
+            </intent-filter>
+        </activity-alias>
+        <activity-alias android:name="com.asterlink.app.link.ProtocolEntry" android:targetActivity=".MainActivity"
+            android:exported="true" android:enabled="true" android:label="文析助手">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="wenxi"/>
+                <data android:host="resolve"/>
+                <data android:host="download"/>
+            </intent-filter>
+        </activity-alias>
         <service android:name=".FlutterDownloadService" android:exported="false" android:stopWithTask="false" android:foregroundServiceType="dataSync"/>
         <service android:name=".AppKeepAliveService" android:exported="false" android:stopWithTask="false" android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"

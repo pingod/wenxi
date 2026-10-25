@@ -387,6 +387,7 @@ extension _LanServer on LanService {
         );
       }
       share.clients.add(client);
+      share.clientRequests[client] = (share.clientRequests[client] ?? 0) + 1;
       if (request.method == 'HEAD') return;
       share.lastActivity = clock();
       await response.addStream(
@@ -402,6 +403,12 @@ extension _LanServer on LanService {
       );
     } finally {
       share.responses.remove(response);
+      final requests = (share.clientRequests[client] ?? 1) - 1;
+      if (requests <= 0) {
+        share.clientRequests.remove(client);
+      } else {
+        share.clientRequests[client] = requests;
+      }
       share.lastActivity = clock();
       _changed();
     }

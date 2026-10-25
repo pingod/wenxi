@@ -1,8 +1,11 @@
 import '../http.dart';
 import '../state_store.dart';
+import '../../core/json.dart';
 import '../../domain/models.dart';
 import '../../domain/auth.dart';
 import '../../domain/file_types.dart';
+import '../../domain/uc_video_download.dart';
+import '../../domain/public_share_route.dart';
 import '../../diagnostics/app_log.dart';
 import 'cookie_cloud.dart';
 import 'uc_tv.dart';
@@ -30,33 +33,186 @@ class UcConnector extends CookieCloudConnector {
 
   final UcTvService tv;
 
+  /// An explicit alternative to original-file download, using web playback
+  /// permissions. Its size and identity belong to the selected transcode.
+  Future<DownloadSpec> downloadPlayable(
+    BrowseSession session,
+    CloudFile file,
+    Credential? credential, {
+    String? resolution,
+  }) async {
+    require(
+      !PublicShareRoute.uses(session) &&
+          !file.isDirectory &&
+          fileKind(file.name) == FileKind.video,
+      '此功能仅支持 UC 视频文件',
+    );
+    if (credential == null) {
+      throw const AccountLoginRequired('请先登录 UC 网盘，再下载可播放版本');
+    }
+    require(
+      resolution == null || UcVideoDownload.labels.containsKey(resolution),
+      'UC 下载画质信息无效，请重新选择',
+    );
+    return prepareStream(session, file, credential, (fid) async {
+      final data = success(
+        await http.postJsonRead(url('file/v2/play'), {
+          'fid': fid,
+          'resolutions': 'low,normal,high,super,2k,4k',
+          'supports': 'fmp4_av,m3u8',
+        }, headers('')),
+      );
+      RequestScope.checkpoint();
+      require(
+        (data.str('fid').isEmpty || data.str('fid') == fid) &&
+            (file.size <= 0 ||
+                data.integer('size') <= 0 ||
+                data.integer('size') == file.size),
+        'UC 返回的视频与所选文件不一致，请刷新列表后重试',
+      );
+      final choices = data.list('video_list').where((item) {
+        final info = item.obj('video_info');
+        final accessible = item['accessable'];
+        return {true, 1, 'true', '1'}.contains(accessible) &&
+            UcVideoDownload.labels.containsKey(item.str('resolution')) &&
+            (resolution == null || item.str('resolution') == resolution) &&
+            item.str('trans_status', 'success') == 'success' &&
+            item.str('supports_format') == 'mp4' &&
+            info.str('hls_type', 'none') == 'none' &&
+            info.str('url').isNotEmpty;
+      }).toList();
+      final ranks = UcVideoDownload.labels.keys.toList();
+      choices.sort(
+        (a, b) => ranks
+            .indexOf(b.str('resolution'))
+            .compareTo(ranks.indexOf(a.str('resolution'))),
+      );
+      require(
+        choices.isNotEmpty,
+        resolution == null
+            ? 'UC 暂未提供可下载的 MP4 可播放版本，请稍后重试或尝试原文件下载'
+            : 'UC 原选画质已不可用，无法续传；请重新选择可播放版本',
+      );
+      final chosen = choices.first, info = chosen.obj('video_info');
+      final quality = UcVideoDownload.fromJson({
+        'resolution': chosen.str('resolution'),
+        'width': info['width'],
+        'height': info['height'],
+        'size': info['size'],
+      });
+      final address = info.str('url'), uri = Uri.tryParse(address);
+      require(
+        uri != null &&
+            uri.scheme == 'https' &&
+            uri.userInfo.isEmpty &&
+            (uri.host == 'uc.cn' || uri.host.endsWith('.uc.cn')),
+        'UC 未返回有效的可播放版本下载地址',
+      );
+      final downloadHeaders = {...headers(''), 'Accept-Encoding': 'identity'};
+      // Keep account cookies on the returned UC node; a redirect must be
+      // resolved again instead of forwarding credentials to an unknown host.
+      final probe = await probeDownload(
+        address,
+        downloadHeaders,
+        followRedirects: false,
+      );
+      require(probe.successful, 'UC 可播放版本连接失败（HTTP ${probe.status}），请重试');
+      final range = RegExp(
+        r'^bytes 0-0/(\d+)$',
+      ).firstMatch(probe.header('content-range'));
+      final length = int.tryParse(probe.header('content-length'));
+      final total =
+          probe.status == 206 &&
+              range != null &&
+              (length == null || length == 1)
+          ? int.tryParse(range.group(1)!)
+          : probe.status == 200
+          ? length
+          : null;
+      final encoding = probe.header('content-encoding').toLowerCase();
+      require(
+        (encoding.isEmpty || encoding == 'identity') && total == quality.size,
+        'UC 可播放版本的实际大小不一致，请重新获取下载链接',
+      );
+      DiagnosticLog.event(
+        'uc.playable_download',
+        fields: {'file': DiagnosticLog.reference(file.id), ...quality.toJson()},
+      );
+      return DownloadSpec(
+        url: address,
+        fileName: quality.fileName(file.name),
+        expectedSize: quality.size,
+        headers: downloadHeaders,
+        source: {'ucVideo': quality.toJson()},
+      );
+    }, forPlayback: false);
+  }
+
   @override
   Future<DownloadSpec> download(
     BrowseSession session,
     CloudFile file,
     Credential? credential,
   ) async {
-    if (session.mode == BrowseMode.share) {
-      try {
-        final direct = await tryShareDownload(
-          session,
-          file,
-          credential,
-          onRefreshed: (freshSession, freshFile) {
-            session = freshSession;
-            file = freshFile;
-          },
+    if (session.mode != BrowseMode.share) {
+      return _accountDownload(session, file, credential);
+    }
+    require(!file.isDirectory, '文件夹不能直接下载');
+    if (credential == null) return _guestDownload(session, file);
+    final owner = tv.store?.credential(CloudPlatform.uc);
+    final boundRevision = owner?.sameAs(credential) == true
+        ? owner!.updatedAt
+        : null;
+    void checkpoint() {
+      RequestScope.checkpoint();
+      if (boundRevision != null) {
+        require(
+          tv.store!.credential(CloudPlatform.uc)?.updatedAt == boundRevision,
+          'UC 账号已变化，请重新打开文件列表',
         );
-        if (direct != null) return direct;
-      } on UcOriginalContentMismatch catch (error) {
-        // Retain the existing authorized-original route for restricted media.
-        if (!UcTvService.authorized(credential)) {
-          throw UcTvAuthorizationRequired(
-            '${error.message}。请点击「授权并继续」，或在 UC 账号菜单完成「TV 播放授权」后重试',
-          );
-        }
       }
     }
+
+    // Saved accounts always take priority. The guest setting only controls
+    // recovery after the selected account's normal download route fails.
+    try {
+      return await _accountDownload(session, file, credential);
+    } on AppException catch (error, stack) {
+      checkpoint();
+      if (!(directShareDownloadEnabled?.call(false) ?? true)) rethrow;
+      DiagnosticLog.event(
+        'share.download_fallback',
+        fields: {
+          'platform': 'uc',
+          'stage': 'guest',
+          'reason': error.runtimeType.toString(),
+        },
+      );
+      try {
+        final guest = await _guestDownload(session, file);
+        checkpoint();
+        return guest;
+      } on AppException {
+        checkpoint();
+        // Keep the account's actionable login/authorization error when neither
+        // route can supply the original file.
+        Error.throwWithStackTrace(error, stack);
+      }
+    }
+  }
+
+  Future<DownloadSpec> _guestDownload(
+    BrowseSession session,
+    CloudFile file,
+  ) async =>
+      await tryShareDownload(session, file, null) ??
+      (throw const AccountLoginRequired('UC 此文件不支持游客下载，请登录后重试'));
+
+  Future<DownloadSpec> _accountDownload(
+    BrowseSession session,
+    CloudFile file,
+    Credential? credential,
+  ) async {
     Credential? authorized;
     var authorization = credential?.field('tv_status') == 'expired'
         ? 'expired'
@@ -91,12 +247,10 @@ class UcConnector extends CookieCloudConnector {
       );
     }
     try {
-      return session.mode == BrowseMode.share
-          ? await downloadFallback(session, file, credential)
-          : await super.download(session, file, credential);
+      return await downloadFallback(session, file, credential);
     } on UcOriginalContentMismatch catch (error) {
       throw UcTvAuthorizationRequired(
-        '${error.message}。请点击「授权并继续」，或在 UC 账号菜单完成「TV 播放授权」后重试',
+        '${error.message}。可尝试「TV 播放授权」后重试原文件，或选择「下载可播放版本」',
       );
     }
   }

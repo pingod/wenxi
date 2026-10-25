@@ -9,7 +9,9 @@ import '../core/json.dart';
 import '../diagnostics/app_log.dart';
 
 class StateKeyRead {
+  StateKeyRead({this.needsMigration = false});
   final keys = <Uint8List>[];
+  final bool needsMigration;
   bool unavailable = false, invalid = false;
   String? primary, copy;
   bool needsRepair(Uint8List key) =>
@@ -17,12 +19,14 @@ class StateKeyRead {
 }
 
 class _KeyLocation {
-  const _KeyLocation(this.namespace, {this.native = false});
+  const _KeyLocation(this.namespace, {this.backend = ''});
   final String? namespace;
-  final bool native;
+  final String backend;
+  bool get native => backend == LocalStateKey.nativeBackend;
+  bool get privateFiles => backend == LocalStateKey.privateBackend;
   Json toJson() => {
     'namespace': namespace,
-    if (native) 'backend': LocalStateKey.nativeBackend,
+    if (backend.isNotEmpty) 'backend': backend,
   };
 }
 
@@ -32,8 +36,8 @@ class StateKeyFallback {
   final _KeyLocation _location;
 }
 
-/// Only a namespace and a password-encrypted key envelope live beside the state.
-/// A second secure record repairs individual records, not a lost OS keystore.
+/// Android keeps two key records in the app's private, non-backed-up directory.
+/// Old Keystore backends are read only to migrate authenticated existing data.
 class LocalStateKey {
   LocalStateKey(this.directory, this.storage, {bool? nativeAndroid})
     : nativeAndroid = nativeAndroid ?? Platform.isAndroid;
@@ -41,6 +45,8 @@ class LocalStateKey {
   final FlutterSecureStorage storage;
   final bool nativeAndroid;
   static const nativeBackend = 'android-keystore-aes-v2';
+  static const privateBackend = 'android-private-files-v1';
+  static const privateDirectoryName = 'state-keys-private-v1';
   static const name = 'asterlink.flutter.state-key.v1';
   static const locationName = 'state-key-location.json';
   static const recoveryName = 'state-key-recovery.json';
@@ -62,14 +68,17 @@ class LocalStateKey {
   _KeyLocation _parseLocation(Json location) {
     final value = location['namespace'];
     final backend = location.str('backend');
-    require(backend.isEmpty || backend == nativeBackend, '本地密钥存储格式不支持');
+    require(
+      backend.isEmpty || backend == nativeBackend || backend == privateBackend,
+      '本地密钥存储格式不支持',
+    );
     require(
       location.containsKey('namespace') &&
           ((value == null && backend.isEmpty) ||
               (value is String && _namespacePattern.hasMatch(value))),
       '本地密钥位置记录损坏',
     );
-    return _KeyLocation(value as String?, native: backend == nativeBackend);
+    return _KeyLocation(value as String?, backend: backend);
   }
 
   Future<({_KeyLocation active, _KeyLocation? fallback})> _pointer() async {
@@ -127,10 +136,17 @@ class LocalStateKey {
     }
   }
 
-  Future<StateKeyRead> read() async {
+  Future<StateKeyRead> read({bool readLegacyWithoutPointer = true}) async {
     final result = StateKeyRead();
     _KeyLocation location;
     try {
+      // An empty Android installation never needs to initialize an OS keystore.
+      // The caller must check for encrypted snapshots and recovery metadata first.
+      if (nativeAndroid &&
+          !readLegacyWithoutPointer &&
+          !await localFile(locationName).exists()) {
+        return result;
+      }
       location = (await _pointer()).active;
     } on FormatException {
       result.invalid = true;
@@ -138,12 +154,17 @@ class LocalStateKey {
     } on AppException {
       result.invalid = true;
       return result;
+    } on FileSystemException {
+      result.unavailable = true;
+      return result;
     }
     return _readLocation(location);
   }
 
   Future<StateKeyRead> _readLocation(_KeyLocation location) async {
-    final result = StateKeyRead();
+    final result = StateKeyRead(
+      needsMigration: nativeAndroid && !location.privateFiles,
+    );
     final namespace = location.namespace;
     // A pointer to an existing namespace is not a fresh installation, even if
     // every record disappears. Never replace its key with a random one.
@@ -153,12 +174,14 @@ class LocalStateKey {
     }
     for (final copy in [false, true]) {
       try {
-        final value = await _read(
-          '${_name(namespace)}${copy ? '.copy' : ''}',
-          namespace,
-          native: location.native,
-          copy: copy,
-        );
+        final value = location.privateFiles
+            ? await _readPrivate(namespace!, copy)
+            : await _read(
+                '${_name(namespace)}${copy ? '.copy' : ''}',
+                namespace,
+                native: location.native,
+                copy: copy,
+              );
         if (copy) {
           result.copy = value;
         } else {
@@ -173,6 +196,8 @@ class LocalStateKey {
         }
       } on PlatformException {
         result.unavailable = true;
+      } on FileSystemException {
+        result.unavailable = true;
       } on FormatException {
         result.invalid = true;
       }
@@ -183,21 +208,30 @@ class LocalStateKey {
 
   Future<List<StateKeyFallback>> readFallbacks() async {
     try {
-      final location = (await _pointer()).fallback;
+      final pointer = await _pointer();
+      final location = pointer.fallback;
       if (location == null) return [];
+      // Once migrated, even a damaged key file must not access Keystore again.
+      if (pointer.active.privateFiles && !location.privateFiles) return [];
       final saved = await _readLocation(location);
       return [for (final key in saved.keys) StateKeyFallback._(key, location)];
     } on AppException {
       return [];
     } on FormatException {
       return [];
+    } on FileSystemException {
+      return [];
     }
   }
 
   /// Only call after this exact key decrypts the newest local snapshot.
   Future<void> useFallback(StateKeyFallback fallback) async {
-    final previous = (await _pointer()).active;
-    await _writePointer(fallback._location, previous);
+    if (nativeAndroid || fallback._location.privateFiles) {
+      await _savePrivate(fallback.key);
+    } else {
+      final previous = (await _pointer()).active;
+      await _writePointer(fallback._location, previous);
+    }
     DiagnosticLog.active?.record('state_key.fallback_restored');
   }
 
@@ -212,12 +246,12 @@ class LocalStateKey {
         ),
       );
 
-  Future<_KeyLocation?> _verifiedPrevious(Uint8List key) async {
+  Future<_KeyLocation?> _verifiedPrivatePrevious(Uint8List key) async {
     try {
       final pointer = await _pointer();
-      // Preserve an independent legacy fallback across subsequent native repairs.
-      for (final location in [pointer.fallback, pointer.active]) {
-        if (location == null) continue;
+      // New writes, password recovery and later repairs never probe OS storage.
+      for (final location in [pointer.active, pointer.fallback]) {
+        if (location == null || !location.privateFiles) continue;
         final saved = await _readLocation(location);
         if (saved.keys.any((candidate) => listEquals(candidate, key))) {
           return location;
@@ -227,6 +261,8 @@ class LocalStateKey {
       // A verified password recovery may replace damaged pointer metadata.
     } on FormatException {
       // Leave damaged metadata to the existing archive/rollback mechanism.
+    } on FileSystemException {
+      // A verified password can also recover unreadable pointer metadata.
     }
     return null;
   }
@@ -289,9 +325,17 @@ class LocalStateKey {
 
   Future<void> save(Uint8List key) async {
     final location = (await _pointer()).active;
-    if (nativeAndroid && location.native) {
-      // Repair an existing native store without overwriting its usable record.
-      await saveFresh(key);
+    if (nativeAndroid || location.privateFiles) {
+      await _savePrivate(key);
+      if (!location.privateFiles) {
+        DiagnosticLog.active?.record(
+          'state_key.storage_migrated',
+          fields: {
+            'from': location.backend.isEmpty ? 'legacy' : location.backend,
+            'to': privateBackend,
+          },
+        );
+      }
     } else {
       require(!location.native, '此设备不支持原本的密钥存储');
       await _write(key, location.namespace);
@@ -300,10 +344,12 @@ class LocalStateKey {
 
   Future<void> saveForImport(Uint8List key) async {
     if (nativeAndroid) {
-      // Import changes account data, not the device key. Do not migrate a
-      // healthy existing user's storage merely because they import a backup.
       final saved = await read();
-      if (saved.keys.any((candidate) => listEquals(candidate, key))) return;
+      if (!saved.needsMigration &&
+          !saved.needsRepair(key) &&
+          saved.keys.any((candidate) => listEquals(candidate, key))) {
+        return;
+      }
     }
     await saveFresh(key);
   }
@@ -311,36 +357,50 @@ class LocalStateKey {
   /// Call only with a key authenticated against local data or a verified backup.
   /// Old storage is left intact; the pointer switches only after durable writes.
   Future<void> saveFresh(Uint8List key) async {
-    final namespace =
-        'state_${CryptoBox.random(16).map((b) => b.toRadixString(16).padLeft(2, '0')).join()}';
     require(key.length == 32, '本地密钥格式错误');
-    final previous = nativeAndroid ? await _verifiedPrevious(key) : null;
     if (nativeAndroid) {
-      try {
-        require(
-          await channel.invokeMethod<bool>('writeStateKey', {
-                'namespace': namespace,
-                'value': key,
-              }) ==
-              true,
-          '本地加密密钥保存失败',
-        );
-        for (final copy in [false, true]) {
-          require(
-            await _read('', namespace, native: true, copy: copy) ==
-                base64Encode(key),
-            '本地加密密钥保存校验失败',
-          );
-        }
-      } on PlatformException catch (error) {
-        _recordFailure('native_write', error);
-        rethrow;
-      }
-    } else {
-      await _write(key, namespace);
+      await _savePrivate(key);
+      return;
+    }
+    final namespace = _newNamespace();
+    await _write(key, namespace);
+    await _writePointer(_KeyLocation(namespace), null);
+  }
+
+  static String _newNamespace() =>
+      'state_${CryptoBox.random(16).map((b) => b.toRadixString(16).padLeft(2, '0')).join()}';
+
+  File _privateFile(String namespace, bool copy) => localFile(
+    p.join(privateDirectoryName, namespace, copy ? 'copy.bin' : 'primary.bin'),
+  );
+
+  Future<String?> _readPrivate(String namespace, bool copy) async {
+    final file = _privateFile(namespace, copy);
+    if (!await file.exists()) return null;
+    if (await file.length() != 32) {
+      throw const FormatException('本地密钥文件损坏');
+    }
+    return base64Encode(await file.readAsBytes());
+  }
+
+  Future<void> _savePrivate(Uint8List key) async {
+    require(key.length == 32, '本地密钥格式错误');
+    final previous = await _verifiedPrivatePrevious(key);
+    final namespace = _newNamespace();
+    await _privateFile(namespace, false).parent.create(recursive: true);
+    for (final copy in [false, true]) {
+      await writeAtomic(_privateFile(namespace, copy), key);
+    }
+    // Reopen both final files before publishing the namespace. A failed write
+    // leaves the old pointer, old records and encrypted snapshots untouched.
+    for (final copy in [false, true]) {
+      require(
+        await _readPrivate(namespace, copy) == base64Encode(key),
+        '本地加密密钥保存校验失败，请检查可用存储空间后重试',
+      );
     }
     await _writePointer(
-      _KeyLocation(namespace, native: nativeAndroid),
+      _KeyLocation(namespace, backend: privateBackend),
       previous,
     );
   }

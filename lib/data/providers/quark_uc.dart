@@ -12,6 +12,12 @@ import '../../core/operation_progress.dart';
 
 part 'uploads/quark_upload.dart';
 
+class QuarkUcCapacityExceeded extends AppException {
+  const QuarkUcCapacityExceeded([
+    super.message = '网盘空间不足，可尝试打开实用性功能的突破文件大小限制再试',
+  ]);
+}
+
 /// Related protocols share mapping code; UC session and transfer parameters stay explicit.
 class QuarkUcConnector extends CloudConnector {
   QuarkUcConnector(
@@ -84,15 +90,28 @@ class QuarkUcConnector extends CloudConnector {
   };
   String url(String path, [Map<String, Object?> extra = const {}]) =>
       query('$base/1/clouddrive/$path', {'pr': product, 'fr': 'pc', ...extra});
+
+  AppException providerError(String message, String fallback, {int? code}) {
+    if (code == 32003 ||
+        RegExp(
+          r'^capacity\s+limit\b',
+          caseSensitive: false,
+        ).hasMatch(message.trim())) {
+      return const QuarkUcCapacityExceeded();
+    }
+    return AppException(message.ifEmpty(fallback));
+  }
+
   Json success(HttpResult result) {
     final j = result.json;
-    require(
-      result.successful &&
-          j.integer('status', j.integer('code') == 0 ? 200 : -1) == 200,
-      j
-          .str('message')
-          .ifEmpty('${platform.shortName}请求失败（HTTP ${result.status}）'),
-    );
+    if (!result.successful ||
+        j.integer('status', j.integer('code') == 0 ? 200 : -1) != 200) {
+      throw providerError(
+        j.str('message'),
+        '${platform.shortName}请求失败（HTTP ${result.status}）',
+        code: j.integer('code'),
+      );
+    }
     return j['data'] is Map ? j.obj('data') : {'data': j['data']};
   }
 
@@ -611,11 +630,14 @@ class QuarkUcConnector extends CloudConnector {
           headers(cookie),
         ),
       );
-      require(
-        !{3, 4}.contains(data.integer('status')) &&
-            !{3, 4}.contains(data.integer('task_status')),
-        data.str('message').ifEmpty('${platform.shortName}异步任务失败'),
-      );
+      if ({3, 4}.contains(data.integer('status')) ||
+          {3, 4}.contains(data.integer('task_status'))) {
+        throw providerError(
+          data.str('message'),
+          '${platform.shortName}异步任务失败',
+          code: data.integer('code'),
+        );
+      }
       if (data.integer('finished_at') > 0 ||
           data.integer('status') == 2 ||
           data.integer('task_status') == 2) {

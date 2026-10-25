@@ -1,3 +1,5 @@
+import 'dart:convert';
+import 'package:crypto/crypto.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/http.dart';
 import 'package:asterlink/data/providers/baidu_public_password.dart';
@@ -21,17 +23,36 @@ class BaiduPublicFixture {
       'rejected': false,
     }),
   };
+  Json get authenticatedState {
+    final account = Credential('UC fixture', {
+      'primary': '__pus=fixture-private-uc',
+    }, updatedAt: 7);
+    final identity = sha256.convert(
+      utf8.encode('legacy-${CloudPlatform.uc.key}|${account.updatedAt}'),
+    );
+    return {
+      'credentials': {CloudPlatform.uc.key: account.toJson()},
+      'secrets': {
+        ...passwordSecrets,
+        'publicParser.mfDg22.ucPassword.$identity':
+            passwordSecrets[BaiduPublicPasswords.cacheKey],
+      },
+    };
+  }
+
   bool publicFailure = false;
   String? returnedId;
   String? userAgent = ua;
   String uaKey = 'ua';
   List<String> urls = ['https://download.baidupcs.com/file/fixture'];
+  String dlink = '', fileName = name;
   ParsedLink get link => LinkParser.parse(url).single;
 
   Json file([String parent = '/']) => {
     'fs_id': fileId,
-    'server_filename': name,
-    'path': parent == '/' ? '/$name' : '$parent/$name',
+    'server_filename': fileName,
+    'path': parent == '/' ? '/$fileName' : '$parent/$fileName',
+    if (dlink.isNotEmpty) 'dlink': dlink,
     'size': 4,
     'is_dir': 0,
     'md5': '08d6c05a21512a79a1dfeb9d2a8f262f',
@@ -72,7 +93,7 @@ class BaiduPublicFixture {
           'data': [
             {
               'fs_id': returnedId ?? fileId,
-              'filename': name,
+              'filename': fileName,
               if (userAgent != null) uaKey: userAgent,
               'message': '请求成功',
               'urls': urls,

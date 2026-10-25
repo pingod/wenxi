@@ -1,0 +1,14 @@
+group = 'com.asterlink.source_runtime'
+version = '1.0.0'
+buildscript {
+    repositories { google(); mavenCentral() }
+    dependencies { classpath 'com.android.tools.build:gradle:8.13.1' }
+}
+apply plugin: 'com.android.library'
+android {
+    namespace = 'com.asterlink.source_runtime'
+    compileSdk = 36
+    ndkVersion = '28.2.13676358'
+    defaultConfig { minSdk = 23 }
+    externalNativeBuild { cmake { path = file('../src/CMakeLists.txt') } }
+}

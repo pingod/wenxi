@@ -78,7 +78,7 @@ String diagnosticSummary(DiagnosticLog log, Json native, {String note = ''}) {
   if (reports.isNotEmpty) {
     text
       ..writeln()
-      ..writeln('已保存的 Android 异常（最多 2 条）：');
+      ..writeln('已保存的原生异常（最多 2 条）：');
     for (final report in reports.take(2)) {
       text.writeln(
         '- ${timestamp(report['time'])} · ${clean(report['event'], 120)}',
@@ -89,6 +89,7 @@ String diagnosticSummary(DiagnosticLog log, Json native, {String note = ''}) {
           '  ${clean(cause['type'], 120)}：${clean(cause['message'])}',
         );
       }
+      _windowsFault(text, report, clean);
     }
   }
   final exits = native.list('exits').toList()
@@ -102,6 +103,7 @@ String diagnosticSummary(DiagnosticLog log, Json native, {String note = ''}) {
         '- ${timestamp(exit['time'])} · ${_exitLabel(exit.str('reason'))}'
         ' [${clean(exit.str('reason'), 80)}]',
       );
+      _windowsFault(text, exit, clean);
     }
   }
   if (native.boolean('collectionFailed') ||
@@ -114,6 +116,23 @@ String diagnosticSummary(DiagnosticLog log, Json native, {String note = ''}) {
   return LogRedactor.text(text.toString(), limit: 10000);
 }
 
+void _windowsFault(
+  StringBuffer text,
+  Json report,
+  String Function(Object?, [int]) clean,
+) {
+  final details = <String>[
+    if (report.str('exceptionCode').isNotEmpty)
+      '异常代码=${clean(report['exceptionCode'], 40)}',
+    if (report.str('faultModule').isNotEmpty)
+      '模块=${clean(report['faultModule'], 160)}',
+    if (report.str('faultOffset').isNotEmpty)
+      '偏移=${clean(report['faultOffset'], 40)}',
+    if (report.str('version').isNotEmpty) '版本=${clean(report['version'], 40)}',
+  ];
+  if (details.isNotEmpty) text.writeln('  ${details.join(' · ')}');
+}
+
 String _eventLabel(String event) => switch (event) {
   'flutter.framework' => '界面异常',
   'flutter.unhandled_async' => '异步操作异常',
@@ -122,11 +141,13 @@ String _eventLabel(String event) => switch (event) {
   'player.terminal_error' => '播放中断',
   'cloud.playback_source_failed' => '播放取源失败',
   'web_login.initialize_failed' => '网页登录初始化失败',
+  'webview.environment.attempt_failed' => '网页登录环境恢复记录',
   'web_login.resource_failed' => '网页登录网络错误',
   'web_login.http_failed' => '网页登录 HTTP 错误',
   'web_login.renderer_gone' => '网页登录渲染进程退出',
   'web_login.validation_failed' => '网页登录验证失败',
   'web_login.credential_read_failed' => '网页登录状态读取失败',
+  'web_login.browser_state_read_failed' => '网页登录状态读取失败',
   'web_login.page_script_failed' => '登录页面处理失败',
   _ when event.startsWith('download.') => '下载相关记录',
   _ when event.startsWith('player.') => '播放相关记录',

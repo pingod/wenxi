@@ -12,12 +12,14 @@ import java.util.Locale
 class ExternalOpenRequest(private val context: Context) {
     /** Called on the intake worker: querying an external document provider must not block the UI. */
     fun parse(intent: Intent): Map<String, Any>? {
-        if (intent.action != Intent.ACTION_VIEW && intent.action != Intent.ACTION_SEND) return null
+        if (intent.action !in setOf(Intent.ACTION_VIEW, Intent.ACTION_SEND, Intent.ACTION_PROCESS_TEXT)) return null
         return try {
             val mime = intent.type.orEmpty().substringBefore(';').lowercase(Locale.ROOT)
             val player = intent.component?.className == "${context.packageName}.PlayerEntry"
-            if (intent.action == Intent.ACTION_SEND && !player && mime.startsWith("text/")) {
-                val text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()?.trim().orEmpty()
+            if (intent.action == Intent.ACTION_PROCESS_TEXT ||
+                intent.action == Intent.ACTION_SEND && !player && mime.startsWith("text/")) {
+                val key = if (intent.action == Intent.ACTION_PROCESS_TEXT) Intent.EXTRA_PROCESS_TEXT else Intent.EXTRA_TEXT
+                val text = intent.getCharSequenceExtra(key)?.toString()?.trim().orEmpty()
                 if (text.isBlank() || text.length > MAX_TEXT) invalid("外部应用没有提供有效的下载链接")
                 else mapOf("kind" to "share", "text" to text, "name" to name(intent, null), "headers" to headers(intent))
             } else {
@@ -28,7 +30,13 @@ class ExternalOpenRequest(private val context: Context) {
                 val scheme = uri.scheme?.lowercase(Locale.ROOT)
                 val isPlayer = player || (intent.component?.className != "${context.packageName}.DownloadEntry" &&
                     (mime.startsWith("video/") || mime in STREAM_TYPES))
-                if (scheme == "magnet" && !isPlayer) {
+                if (scheme == "wenxi" && !player) {
+                    if (uri.toString().length > MAX_URI) invalid("外部链接过长")
+                    else mapOf("launchUri" to uri.toString())
+                } else if (LinkOpening.isShareEntry(intent.component?.className)) {
+                    if (!validUri(uri, false)) invalid("网盘分享地址无效")
+                    else mapOf("kind" to "share", "text" to uri.toString())
+                } else if (scheme == "magnet" && !isPlayer) {
                     if (uri.toString().length > MAX_URI) invalid("外部链接过长")
                     else mapOf("kind" to "share", "text" to uri.toString())
                 } else if (!validUri(uri, isPlayer)) {

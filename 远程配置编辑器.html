@@ -77,7 +77,7 @@
                 <div class="field"><label for="field-announcement-content">公告正文</label><textarea id="field-announcement-content" data-path="announcement.content" rows="5" maxlength="8192" placeholder="在这里填写公告内容，直接回车即可换行。"></textarea><span class="count" data-count-for="announcement.content" data-limit="8192"></span><p class="hint">按普通文字显示，支持多行。</p></div>
                 <div class="field-divider"><div class="minor-heading"><h3>跳转按钮</h3><small>选填 · 两项同时填写或留空</small></div><div class="form-row">
                   <div class="field"><label for="field-announcement-buttonText">按钮文字</label><input id="field-announcement-buttonText" data-path="announcement.buttonText" maxlength="24" placeholder="例如 查看详情"></div>
-                  <div class="field"><label for="field-announcement-buttonUrl">跳转地址</label><input id="field-announcement-buttonUrl" data-path="announcement.buttonUrl" type="url" maxlength="2048" placeholder="https://…" spellcheck="false"></div>
+                  <div class="field"><label for="field-announcement-buttonUrl">跳转地址</label><input id="field-announcement-buttonUrl" data-path="announcement.buttonUrl" type="url" maxlength="2048" placeholder="https://…" spellcheck="false"><p class="hint">必须使用 HTTPS；粘贴 qm.qq.com 的 HTTP 群链接时会自动升级为 HTTPS。</p></div>
                 </div></div>
               </div>
             </div>
@@ -101,7 +101,7 @@
           <div class="json-card"><div class="json-head"><strong><span>{ }</span>config.json</strong><small>实时生成</small></div><pre class="json-scroll" tabindex="0" aria-label="生成的 JSON"><code id="json-output"></code></pre><div class="json-meta"><span>UTF-8 · schema 1</span><span id="json-size"></span></div></div>
           <div class="output-actions"><button class="button" id="copy-json"><svg aria-hidden="true"><use href="#i-copy"/></svg>复制 JSON</button><button class="button primary" data-download><svg aria-hidden="true"><use href="#i-download"/></svg>下载文件</button></div>
           <div class="check-card"><div class="check-heading" id="check-heading"><svg aria-hidden="true"><use href="#i-check"/></svg><span id="check-title" role="status">正在检查配置</span></div><p class="check-subtitle" id="check-subtitle"></p><ul class="check-list" id="error-list"></ul><ul class="check-list" id="warning-list"></ul></div>
-          <div class="check-card" aria-label="发布前核对"><div class="field"><label for="live-url">线上配置入口</label><input id="live-url" type="url" maxlength="2048" spellcheck="false" value="https://gitee.com/dzys/cs/raw/master/config.json"></div><button class="button compact" id="check-live" style="margin-top:12px">核对线上修订号</button><p class="hint" id="live-status" role="status">尚未核对线上版本。</p><p class="hint">核对只读取线上文件。网络或浏览器跨域限制导致失败时，可核对刚下载的副本，或使用项目中的发布校验命令。</p><button class="text-button" id="reference-open">用已下载的线上 JSON 核对</button></div>
+          <div class="check-card" aria-label="发布前核对"><div class="field"><label for="live-url">线上配置入口</label><input id="live-url" type="url" maxlength="2048" spellcheck="false" value="https://gitee.com/dzys/cs/raw/master/config.json"></div><button class="button compact" id="pull-live" style="margin-top:12px">拉取并编辑线上配置</button> <button class="button compact" id="check-live">核对线上修订号</button><p class="hint" id="live-status" role="status">尚未核对线上版本。</p><p class="hint">拉取会读取 raw JSON 并填入编辑器。网络或浏览器跨域限制导致失败时，可核对刚下载的副本，或使用项目中的发布校验命令。</p><button class="text-button" id="reference-open">用已下载的线上 JSON 核对</button></div>
           <div class="publish-help"><strong>让配置在应用中生效</strong><ol><li>先导入线上配置，再修改需要的内容。</li><li>核对线上修订号，再下载或复制完整 JSON。</li><li>替换 Gitee 上的 config.json 并提交。</li></ol><a href="https://gitee.com/dzys/cs/blob/master/config.json" target="_blank" rel="noopener noreferrer">打开 Gitee 配置文件 ↗</a><p style="margin-top:7px">在应用内打开“软件公告”或“检查更新”可立即刷新配置。</p><button class="text-button" id="new-config-footer" style="margin-top:8px">＋ 新建空白配置</button></div>
           <p class="save-summary" id="export-summary" role="status" hidden></p>
         </aside>
@@ -411,9 +411,22 @@
       try {
         return await Promise.race([
           (async () => {
-            const response = await fetcher(url.trim(),{cache:'no-store',credentials:'omit',referrerPolicy:'no-referrer',signal:controller.signal});
+            const sourceUrl = url.trim();
+            const gitee = sourceUrl.match(/^https:\/\/gitee\.com\/([^/]+)\/([^/]+)\/(?:raw|blob)\/([^/]+)\/(.+)$/);
+            const requestUrl = gitee
+              ? `https://gitee.com/api/v5/repos/${encodeURIComponent(gitee[1])}/${encodeURIComponent(gitee[2])}/contents/${gitee[4].split('/').map(encodeURIComponent).join('/')}?ref=${encodeURIComponent(gitee[3])}`
+              : sourceUrl;
+            const response = await fetcher(requestUrl,{cache:'no-store',credentials:'omit',referrerPolicy:'no-referrer',signal:controller.signal});
             if (response.status !== 200 || (response.url && !https(response.url))) throw new Error('配置入口未返回完整的 HTTPS 文件。');
             if (Number(response.headers.get('content-length')) > MAX_BYTES) throw new Error('线上文件超过 256 KiB。');
+            if (gitee) {
+              const payload = await response.json();
+              if (payload.type !== 'file' || typeof payload.content !== 'string') throw new Error('Gitee 内容接口未返回可读取的文件。');
+              const binary = atob(payload.content.replace(/\s/g,''));
+              if (binary.length > MAX_BYTES) throw new Error('线上文件超过 256 KiB。');
+              const bytes = Uint8Array.from(binary,c => c.charCodeAt(0));
+              return parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes),{strict:false});
+            }
             if (!response.body?.getReader) throw new Error('浏览器无法流式读取文件，请使用下载后的 JSON 核对。');
             reader = response.body.getReader();
             const chunks = []; let length = 0;
@@ -579,7 +592,8 @@
       renderJson(json); text('json-size',`${(C.bytes(json+'\n')/1024).toFixed(2)} / 256 KiB`);
       text('source-state',source);
       text('live-status',liveMessage);
-      $('check-live').disabled = liveBusy; $('live-url').disabled = liveBusy;
+      $('pull-live').disabled = liveBusy; $('check-live').disabled = liveBusy; $('live-url').disabled = liveBusy;
+      text('pull-live',liveBusy ? '正在拉取…' : '拉取并编辑线上配置');
       text('check-live',liveBusy ? '正在核对…' : '核对线上修订号');
       document.querySelectorAll('[data-expiry-section]').forEach(input => {
         const path = input.dataset.expirySection;
@@ -687,8 +701,30 @@
       published = merged.published; referenceFloor = merged.minimumRevision;
       referenceOrigin = origin; referenceAt = Date.now(); liveConfirmed = origin === 'live';
       const invalid = C.validate(value);
-      liveMessage = `${origin === 'live' ? '已联网核对' : '已核对下载副本'} · ${new Date(referenceAt).toLocaleTimeString()}${invalid.length ? `；请修正线上字段：${invalid.slice(0,3).map(e=>e.path).join('、')}。` : '。'}新版应用按获取到的内容更新。`;
+      liveMessage = `${origin === 'live' ? '已联网核对' : '已核对下载副本'} · revision ${value.revision} · ${new Date(referenceAt).toLocaleTimeString()}${invalid.length ? `；请修正线上字段：${invalid.slice(0,3).map(e=>e.path).join('、')}。` : '。'}新版应用按获取到的内容更新。`;
       applyAutoRevision(); syncFields(); render(); saveDraft();
+    }
+    function hasUnsavedChanges() {
+      if (checkpoint) return config.revision !== checkpoint.revision || !C.sameContent(config,checkpoint);
+      return !C.sameContent(config,C.template());
+    }
+    async function pullLive() {
+      if (liveBusy) return;
+      if (hasUnsavedChanges() && !window.confirm('当前编辑器有未导出的修改。拉取线上配置会覆盖当前表单，是否继续？')) return;
+      liveBusy = true; liveConfirmed = false; liveMessage = '正在拉取线上配置，最长等待 15 秒…'; render();
+      try {
+        const value = await C.fetchPublished(referenceUrl);
+        const imported = C.normalize(value);
+        const errors = C.validate(imported);
+        if (errors.length) throw new Error(errors.map(e => `${e.path ? e.path + '：' : ''}${e.message}`).join('\n'));
+        acceptReference(value,'live');
+        config = imported; checkpoint = C.clone(imported); source = `已同步线上配置 · revision ${imported.revision}`;
+        applyAutoRevision(); $('export-summary').hidden = true; syncFields(); render(); saveDraft();
+        toast(`已拉取线上配置 revision ${imported.revision}，现在可以直接修改。`);
+      } catch (error) {
+        liveMessage = `线上拉取未完成：${error instanceof TypeError ? '网络或浏览器跨域限制阻止了读取。' : error.message}`;
+        render();
+      } finally { liveBusy = false; render(); }
     }
     async function checkLive() {
       if (liveBusy) return;
@@ -699,12 +735,27 @@
     }
 
     mountFields(); restoreDraft(); syncFields(); showSection(activeSection); render(); saveDraft();
+    function upgradeQqLink(value) {
+      if (typeof value !== 'string') return value;
+      try {
+        const url = new URL(value.trim());
+        if (url.protocol === 'http:' && url.hostname.toLowerCase() === 'qm.qq.com' && url.pathname === '/cgi-bin/qm/qr') {
+          url.protocol = 'https:';
+          return url.toString();
+        }
+      } catch (_) { /* Keep incomplete input unchanged until it becomes a URL. */ }
+      return value;
+    }
     document.addEventListener('input',event => {
       const input = event.target;
       if (!input.matches('[data-path]')) return;
       let value = input.type === 'checkbox' ? input.checked : input.type === 'radio' ? input.value === 'true' : input.type === 'number' ? (input.value === '' ? null : Number(input.value)) : input.value;
       if (input.type === 'datetime-local') value = C.localToUtc(input.value);
       if (input.type === 'radio' && !input.checked) return;
+      if (input.dataset.path === 'announcement.buttonUrl') {
+        value = upgradeQqLink(value);
+        if (input.value !== value) input.value = value;
+      }
       set(input.dataset.path,value); changed(input.dataset.path);
     });
     document.querySelectorAll('[data-section]').forEach(button => { button.addEventListener('click',() => { showSection(button.dataset.section); window.scrollTo({top:0,behavior:'auto'}); scheduleSave(); }); });
@@ -728,6 +779,7 @@
     document.querySelectorAll('[data-download]').forEach(button => { button.addEventListener('click',download); });
     $('copy-json').addEventListener('click',copy);
     $('live-url').addEventListener('input',() => { referenceUrl = $('live-url').value.trim(); published = null; referenceAt = null; referenceOrigin = ''; referenceFloor = 0; liveConfirmed = false; liveMessage = '入口已改变，请重新核对。'; render(); scheduleSave(); });
+    $('pull-live').addEventListener('click',pullLive);
     $('check-live').addEventListener('click',checkLive);
     $('reference-open').addEventListener('click',() => { $('reference-error').hidden = true; $('reference-dialog').showModal(); $('reference-text').focus(); });
     $('apply-reference').addEventListener('click',() => {

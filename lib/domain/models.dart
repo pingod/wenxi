@@ -1,5 +1,6 @@
 import 'dart:math';
 import '../core/json.dart';
+import 'download_network_policy.dart';
 import 'uploads.dart';
 
 String newId() {
@@ -158,6 +159,71 @@ class ParsedLink {
       kind == LinkKind.cloudShare ||
       kind == LinkKind.unsupportedCloud && shareId != null;
   String? get cloudLabel => platform?.label ?? unsupportedPlatform?.label;
+  String get textForCopy {
+    final code = passcode;
+    if (!isCloudShare || code == null || code.isEmpty) return url;
+    final keys = {
+      'pwd',
+      'pass',
+      'passcode',
+      'password',
+      'accesscode',
+      if (platform == CloudPlatform.pikpak) 'pass_code',
+      if (platform == CloudPlatform.ctfile) 'p',
+      if (platform == CloudPlatform.ctfile ||
+          platform == CloudPlatform.feijipan)
+        'code',
+    };
+    // A manually corrected code must replace an embedded old code. Keep every
+    // unrelated query byte intact, especially share IDs and nested URLs.
+    String replaceCodes(String query) => query
+        .split('&')
+        .map((field) {
+          final separator = field.indexOf('=');
+          if (separator < 0) return field;
+          final key = field.substring(0, separator);
+          try {
+            if (!keys.contains(Uri.decodeQueryComponent(key).toLowerCase())) {
+              return field;
+            }
+          } on FormatException {
+            return field;
+          }
+          try {
+            if (Uri.decodeQueryComponent(field.substring(separator + 1)) ==
+                code) {
+              return field;
+            }
+          } on FormatException {
+            // Replace malformed old escaping with the successfully used code.
+          }
+          return '$key=${Uri.encodeQueryComponent(code)}';
+        })
+        .join('&');
+
+    final hash = url.indexOf('#');
+    var address = hash < 0 ? url : url.substring(0, hash);
+    final query = address.indexOf('?');
+    if (query >= 0) {
+      address =
+          '${address.substring(0, query + 1)}${replaceCodes(address.substring(query + 1))}';
+    }
+    if (hash >= 0) {
+      var fragment = url.substring(hash + 1);
+      final query = fragment.indexOf('?');
+      if (query >= 0) {
+        fragment =
+            '${fragment.substring(0, query + 1)}${replaceCodes(fragment.substring(query + 1))}';
+      } else if (RegExp(r'^[A-Za-z0-9]{1,12}$').hasMatch(fragment)) {
+        fragment = Uri.encodeQueryComponent(code);
+      } else {
+        fragment = replaceCodes(fragment);
+      }
+      address = '$address#$fragment';
+    }
+    return '$address 提取码：$code';
+  }
+
   ParsedLink withPasscode(String value) => ParsedLink(
     id: id,
     source: source,
@@ -420,6 +486,7 @@ class DownloadSpec {
     this.torrent,
     this.appUpdateKey,
     this.guestDownload = false,
+    this.networkPolicy,
   });
   final String url, fileName, relativePath;
   final Map<String, String> headers;
@@ -429,12 +496,14 @@ class DownloadSpec {
   final Json? source, torrent;
   final String? appUpdateKey;
   final bool guestDownload;
+  final DownloadNetworkPolicy? networkPolicy;
   bool get isTorrent => torrent != null;
   bool get needsPreparation => !isTorrent && url.isEmpty && source != null;
   CloudPlatform? get platform => CloudPlatform.fromKey(
     source?.str('platform') ?? asJson(source?['session']).str('platform'),
   );
   DownloadSpec copyWith({
+    String? url,
     String? relativePath,
     Json? source,
     String? fileName,
@@ -443,7 +512,7 @@ class DownloadSpec {
     bool? guestDownload,
     String? profile,
   }) => DownloadSpec(
-    url: url,
+    url: url ?? this.url,
     fileName: fileName ?? this.fileName,
     relativePath: relativePath ?? this.relativePath,
     headers: headers,
@@ -456,6 +525,7 @@ class DownloadSpec {
     torrent: torrent,
     appUpdateKey: appUpdateKey ?? this.appUpdateKey,
     guestDownload: guestDownload ?? this.guestDownload,
+    networkPolicy: networkPolicy,
   );
   Json toJson() => {
     'url': url,
@@ -471,6 +541,7 @@ class DownloadSpec {
     'torrent': torrent,
     if (appUpdateKey != null) 'appUpdateKey': appUpdateKey,
     if (guestDownload) 'guestDownload': true,
+    if (networkPolicy != null) 'networkPolicy': networkPolicy!.toJson(),
   };
   factory DownloadSpec.fromJson(Json j) => DownloadSpec(
     url: j.str('url'),
@@ -488,6 +559,9 @@ class DownloadSpec {
     torrent: j['torrent'] == null ? null : j.obj('torrent'),
     appUpdateKey: j['appUpdateKey'] as String?,
     guestDownload: j.boolean('guestDownload', false),
+    networkPolicy: j['networkPolicy'] == null
+        ? null
+        : DownloadNetworkPolicy.fromJson(j.obj('networkPolicy')),
   );
 }
 

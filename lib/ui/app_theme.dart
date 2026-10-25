@@ -33,8 +33,8 @@ class AppAppearance extends ThemeExtension<AppAppearance> {
       glassStyle: style,
       glassColor: Color(colors.glass),
       glassOpacity: switch (style) {
-        GlassStyle.clear => dark ? .70 : .55,
-        GlassStyle.frosted => dark ? .92 : .88,
+        GlassStyle.clear => dark ? .80 : .72,
+        GlassStyle.frosted => dark ? .94 : .92,
         GlassStyle.solid => 1,
       },
       blurSigma: switch (style) {
@@ -43,9 +43,9 @@ class AppAppearance extends ThemeExtension<AppAppearance> {
         GlassStyle.solid => 0,
       },
       lensColor: Color.alphaBlend(
-        Color(colors.accent).withValues(alpha: dark ? .15 : .07),
+        Color(colors.accent).withValues(alpha: dark ? .18 : .08),
         Color(colors.surface),
-      ).withValues(alpha: style == GlassStyle.solid ? 1 : .82),
+      ).withValues(alpha: style == GlassStyle.solid ? 1 : .94),
     );
   }
 

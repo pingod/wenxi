@@ -4,15 +4,18 @@ import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/core/crypto_box.dart';
+import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/backup.dart';
 import 'package:asterlink/data/startup_recovery.dart';
 import 'package:asterlink/data/state_key.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/diagnostics/app_log.dart';
+import 'package:asterlink/domain/models.dart';
 
 class _LegacyStorage extends FlutterSecureStorage {
   bool broken = false;
   String failure = 'InvalidKeyException';
+  int reads = 0, writes = 0;
   @override
   Future<String?> read({
     required String key,
@@ -23,29 +26,53 @@ class _LegacyStorage extends FlutterSecureStorage {
     AppleOptions? mOptions,
     WindowsOptions? wOptions,
   }) async {
+    reads++;
     if (broken) {
       throw PlatformException(code: 'Exception', message: failure);
     }
     return super.read(key: key, aOptions: aOptions);
   }
+
+  @override
+  Future<void> write({
+    required String key,
+    required String? value,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    writes++;
+    if (broken) {
+      throw PlatformException(code: 'Exception', message: failure);
+    }
+    await super.write(key: key, value: value, aOptions: aOptions);
+  }
 }
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  const password = 'fixture-password';
   late Directory directory;
   late _LegacyStorage legacy;
-  // Native disk/keystore are shared between fresh Dart facades. Their real
-  // persistence and cold unwrap behavior are separately tested in Kotlin.
+  late Uint8List backup;
+  // Existing native records survive new Dart facades, just as on an upgrade.
+  // All newly written keys must live on disk without using either OS backend.
   late Map<String, Map<bool, Uint8List>> records;
   late Set<String> blocked;
-  late bool failColdRead;
-  late int writes;
+  late bool nativeBroken;
+  late int nativeCalls;
   LocalStateKey keys() => LocalStateKey(directory, legacy, nativeAndroid: true);
   Future<StateStore> open() => StateStore.open(directory, localKey: keys());
   File file(String name) => File('${directory.path}/$name');
-  Future<Map<String, dynamic>> location() async =>
-      jsonDecode(await file(LocalStateKey.locationName).readAsString())
-          as Map<String, dynamic>;
+  File keyFile(String namespace, {bool copy = false}) => file(
+    '${LocalStateKey.privateDirectoryName}/$namespace/'
+    '${copy ? 'copy.bin' : 'primary.bin'}',
+  );
+  Future<Json> location() async =>
+      asJson(jsonDecode(await file(LocalStateKey.locationName).readAsString()));
   StartupRecovery recovery() => StartupRecovery(
     StateRecoveryRequired(
       directory,
@@ -54,49 +81,89 @@ void main() {
     storage: legacy,
     localKey: keys(),
   );
-  Future<Uint8List> backup() async {
+  Future<Uint8List> seedLegacy({bool namespaced = false}) async {
+    final localKey = LocalStateKey(directory, legacy, nativeAndroid: false);
+    final old = await StateStore.open(directory, localKey: localKey);
+    try {
+      await old.put('favorite', 'old');
+      await old.put('favorite', 'latest');
+    } finally {
+      old.dispose();
+    }
+    final key = (await localKey.read()).keys.single;
+    if (namespaced) await localKey.saveFresh(key);
+    return key;
+  }
+
+  Future<({String namespace, Uint8List key})> seedNative({
+    Uint8List? key,
+    Json? data,
+    Json? fallback,
+  }) async {
+    key ??= CryptoBox.random(32);
+    final namespace =
+        'state_${CryptoBox.random(16).map((b) => b.toRadixString(16).padLeft(2, '0')).join()}';
+    records[namespace] = {
+      false: Uint8List.fromList(key),
+      true: Uint8List.fromList(key),
+    };
+    await file(LocalStateKey.locationName).writeAsString(
+      jsonEncode({
+        'namespace': namespace,
+        'backend': LocalStateKey.nativeBackend,
+        'fallback': ?fallback,
+      }),
+      flush: true,
+    );
+    await file('state-v1.enc').writeAsBytes(
+      CryptoBox.seal(key, utf8.encode(jsonEncode({'schema': 1, ...?data}))),
+      flush: true,
+    );
+    return (namespace: namespace, key: key);
+  }
+
+  Future<void> losePrivateRecords() async {
+    final namespace = (await location()).str('namespace');
+    await keyFile(namespace).delete();
+    await keyFile(namespace, copy: true).delete();
+  }
+
+  setUpAll(() async {
     final source = StateStore.memory({
       'settings': {'theme': 'Dark'},
     });
     try {
-      return await BackupRepository(source).create('fixture-password');
+      await Vault(source).putCredential(
+        CloudPlatform.baidu,
+        Credential('备份账号', {'primary': 'BDUSS=fixture-only'}),
+      );
+      backup = await BackupRepository(source).create(password);
     } finally {
       source.dispose();
     }
-  }
+  });
 
   setUp(() async {
-    directory = await Directory.systemTemp.createTemp('state-native-');
+    directory = await Directory.systemTemp.createTemp('state-android-');
     legacy = _LegacyStorage();
     FlutterSecureStorage.setMockInitialValues({});
     records = {};
     blocked = {};
-    failColdRead = false;
-    writes = 0;
+    nativeBroken = false;
+    nativeCalls = 0;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(LocalStateKey.channel, (call) async {
+          nativeCalls++;
+          expect(call.method, 'readStateKey');
           final args = Map<String, dynamic>.from(call.arguments as Map);
           final namespace = args['namespace'] as String;
-          if (call.method == 'writeStateKey') {
-            writes++;
-            final value = args['value'] as Uint8List;
-            records[namespace] = {
-              false: Uint8List.fromList(value),
-              true: Uint8List.fromList(value),
-            };
-            if (failColdRead) blocked.add(namespace);
-            return true;
+          if (nativeBroken || blocked.contains(namespace)) {
+            throw PlatformException(
+              code: 'state_key_storage',
+              details: 'UnrecoverableKeyException',
+            );
           }
-          if (call.method == 'readStateKey') {
-            if (blocked.contains(namespace)) {
-              throw PlatformException(
-                code: 'state_key_storage',
-                details: 'UnrecoverableKeyException',
-              );
-            }
-            return records[namespace]?[args['copy'] == true];
-          }
-          fail('Unexpected native method ${call.method}');
+          return records[namespace]?[args['copy'] == true];
         });
   });
   tearDown(() async {
@@ -128,271 +195,429 @@ void main() {
   );
 
   test(
-    'missing records behind a native pointer cannot silently initialize',
+    'fresh Android install and repeated restarts never access broken Keystore',
     () async {
+      legacy.broken = true;
+      nativeBroken = true;
       final first = await open();
-      first.dispose();
-      final pointer = await file(LocalStateKey.locationName).readAsBytes();
-      records.clear();
-      await expectLater(open(), throwsA(isA<StateRecoveryRequired>()));
-      expect(writes, 1);
-      expect(await file(LocalStateKey.locationName).readAsBytes(), pointer);
-    },
-  );
-
-  test(
-    'first launch survives repeated process recreation without legacy backend',
-    () async {
-      final first = await open();
+      await Vault(first).putCredential(
+        CloudPlatform.quark,
+        Credential('首次登录', {'primary': 'cookie=fixture-only'}),
+      );
       await first.put('favorite', 'kept');
       first.dispose();
-      expect((await location())['backend'], LocalStateKey.nativeBackend);
-      legacy.broken = true;
+      final pointer = await location();
+      expect(pointer.str('backend'), LocalStateKey.privateBackend);
+      expect(
+        await keyFile(pointer.str('namespace')).readAsBytes(),
+        await keyFile(pointer.str('namespace'), copy: true).readAsBytes(),
+      );
       for (var i = 0; i < 4; i++) {
         final next = await open();
         expect(next.data['favorite'], 'kept');
+        expect(
+          Vault(next).credential(CloudPlatform.quark)?.primary,
+          'cookie=fixture-only',
+        );
         await next.put('restart', i);
         next.dispose();
       }
-      expect(writes, 1);
+      expect(await location(), pointer);
+      expect(nativeCalls, 0);
+      expect(legacy.reads, 0);
+      expect(legacy.writes, 0);
+      expect(
+        utf8.decode(
+          await file('state-v1.enc').readAsBytes(),
+          allowMalformed: true,
+        ),
+        isNot(contains('cookie=fixture-only')),
+      );
     },
   );
 
+  test('first private write failure cannot orphan encrypted state', () async {
+    legacy.broken = true;
+    nativeBroken = true;
+    final blocker = file(LocalStateKey.privateDirectoryName);
+    await blocker.writeAsString('occupied');
+    await expectLater(open(), throwsA(isA<FileSystemException>()));
+    expect(await file(LocalStateKey.locationName).exists(), isFalse);
+    expect(await file('state-v1.enc').exists(), isFalse);
+    await blocker.delete();
+    final next = await open();
+    await next.put('favorite', 'retry');
+    next.dispose();
+    final restarted = await open();
+    expect(restarted.data['favorite'], 'retry');
+    restarted.dispose();
+    expect(nativeCalls, 0);
+    expect(legacy.reads, 0);
+    expect(legacy.writes, 0);
+  });
+
   test(
-    'first write failing cold read publishes neither pointer nor state',
+    'pointer publication failure leaves both durable private copies',
     () async {
-      failColdRead = true;
-      await expectLater(open(), throwsA(isA<PlatformException>()));
+      final blocker = Directory(file('${LocalStateKey.locationName}.tmp').path);
+      await blocker.create();
+      await expectLater(open(), throwsA(isA<FileSystemException>()));
       expect(await file(LocalStateKey.locationName).exists(), isFalse);
       expect(await file('state-v1.enc').exists(), isFalse);
-      failColdRead = false;
+      final namespaces = await Directory(
+        file(LocalStateKey.privateDirectoryName).path,
+      ).list().toList();
+      expect(namespaces, hasLength(1));
+      final primary = File('${namespaces.single.path}/primary.bin');
+      final copy = File('${namespaces.single.path}/copy.bin');
+      expect(await primary.length(), 32);
+      expect(await primary.readAsBytes(), await copy.readAsBytes());
+      await blocker.delete();
       final next = await open();
-      await next.put('favorite', 'retry');
+      await next.put('retry', true);
       next.dispose();
-      final restarted = await open();
-      expect(restarted.data['favorite'], 'retry');
-      restarted.dispose();
+      final reopened = await open();
+      expect(reopened.data['retry'], true);
+      reopened.dispose();
+      expect(nativeCalls, 0);
+      expect(legacy.reads, 0);
     },
   );
 
   test(
-    'healthy legacy users keep original key and storage across repeated launches',
+    'missing private records cannot initialize even without a snapshot',
     () async {
-      final old = await StateStore.open(directory, storage: legacy);
-      await old.put('favorite', 'legacy');
-      old.dispose();
-      final oldKey = await legacy.read(key: StateStore.keyName);
-      final encrypted = await file('state-v1.enc').readAsBytes();
-      failColdRead = true;
-      for (var i = 0; i < 4; i++) {
-        final next = await open();
-        expect(next.data['favorite'], 'legacy');
-        next.dispose();
-      }
-      expect(await legacy.read(key: StateStore.keyName), oldKey);
-      expect(await file('state-v1.enc').readAsBytes(), encrypted);
-      expect(writes, 0);
-      expect(await file(LocalStateKey.locationName).exists(), isFalse);
-    },
-  );
-
-  test(
-    'healthy namespaced legacy users keep pointer and import without migration',
-    () async {
-      final old = await StateStore.open(directory, storage: legacy);
-      await old.put('favorite', 'legacy');
-      old.dispose();
-      final oldKey = base64Decode(
-        (await legacy.read(key: StateStore.keyName))!,
-      );
-      await LocalStateKey(
-        directory,
-        legacy,
-        nativeAndroid: false,
-      ).saveFresh(oldKey);
+      final first = await open();
+      first.dispose();
       final pointer = await file(LocalStateKey.locationName).readAsBytes();
-      failColdRead = true;
-      final readable = await open();
-      expect(readable.data['favorite'], 'legacy');
-      await BackupRepository(
-        readable,
-      ).restore(await backup(), 'fixture-password');
-      readable.dispose();
-      final next = await open();
-      expect(next.data['favorite'], 'legacy');
-      expect((next.data['settings'] as Map)['theme'], 'Dark');
-      next.dispose();
+      await losePrivateRecords();
+      await expectLater(open(), throwsA(isA<StateRecoveryRequired>()));
       expect(await file(LocalStateKey.locationName).readAsBytes(), pointer);
-      expect(writes, 0);
+      expect(await file('state-v1.enc').exists(), isFalse);
+      expect(nativeCalls, 0);
+      expect(legacy.reads, 0);
     },
   );
 
-  test('wrong legacy key cannot migrate or overwrite encrypted data', () async {
-    final old = await StateStore.open(directory, storage: legacy);
-    await old.put('favorite', 'old');
-    old.dispose();
+  test('missing private records preserve existing encrypted state', () async {
+    final first = await open();
+    await first.put('favorite', 'kept');
+    first.dispose();
+    final pointer = await file(LocalStateKey.locationName).readAsBytes();
     final encrypted = await file('state-v1.enc').readAsBytes();
-    final wrongKey = base64Encode(CryptoBox.random(32));
-    FlutterSecureStorage.setMockInitialValues({
-      StateStore.keyName: wrongKey,
-      '${StateStore.keyName}.copy': wrongKey,
-    });
+    await losePrivateRecords();
     await expectLater(open(), throwsA(isA<StateRecoveryRequired>()));
-    expect(writes, 0);
+    expect(await file(LocalStateKey.locationName).readAsBytes(), pointer);
     expect(await file('state-v1.enc').readAsBytes(), encrypted);
+    expect(nativeCalls, 0);
+    expect(legacy.reads, 0);
+  });
+
+  for (final damage in ['missing', 'truncated', 'wrong-key']) {
+    test('private primary $damage repairs from authenticated copy', () async {
+      final first = await open();
+      await first.put('favorite', 'latest');
+      first.dispose();
+      final previous = (await location()).str('namespace');
+      final originalKey = await keyFile(previous, copy: true).readAsBytes();
+      final encrypted = await file('state-v1.enc').readAsBytes();
+      if (damage == 'missing') {
+        await keyFile(previous).delete();
+      } else {
+        await keyFile(previous).writeAsBytes(
+          damage == 'truncated' ? [1, 2, 3] : CryptoBox.random(32),
+          flush: true,
+        );
+      }
+      legacy.broken = true;
+      nativeBroken = true;
+      final repaired = await open();
+      expect(repaired.data['favorite'], 'latest');
+      repaired.dispose();
+      final active = (await location()).str('namespace');
+      expect(active, isNot(previous));
+      expect(await keyFile(active).readAsBytes(), originalKey);
+      expect(await keyFile(active, copy: true).readAsBytes(), originalKey);
+      expect(await keyFile(previous, copy: true).readAsBytes(), originalKey);
+      expect(await file('state-v1.enc').readAsBytes(), encrypted);
+      final next = await open();
+      expect(next.data['favorite'], 'latest');
+      next.dispose();
+      expect(nativeCalls, 0);
+      expect(legacy.reads, 0);
+    });
+  }
+
+  test(
+    'private repair retains a file fallback without probing OS storage',
+    () async {
+      final first = await open();
+      await first.put('favorite', 'latest');
+      first.dispose();
+      final previous = (await location()).str('namespace');
+      await keyFile(previous).delete();
+      final repaired = await open();
+      repaired.dispose();
+      expect((await location()).obj('fallback').str('namespace'), previous);
+      await losePrivateRecords();
+      legacy.broken = true;
+      nativeBroken = true;
+      final fallback = await open();
+      expect(fallback.data['favorite'], 'latest');
+      fallback.dispose();
+      expect((await location()).str('backend'), LocalStateKey.privateBackend);
+      expect(nativeCalls, 0);
+      expect(legacy.reads, 0);
+    },
+  );
+
+  test('private mode ignores an obsolete Keystore fallback', () async {
+    final first = await open();
+    await first.put('favorite', 'latest');
+    first.dispose();
+    await file(LocalStateKey.locationName).writeAsString(
+      jsonEncode({
+        ...await location(),
+        'fallback': {'namespace': null},
+      }),
+      flush: true,
+    );
+    await losePrivateRecords();
+    legacy.broken = true;
+    nativeBroken = true;
+    await expectLater(open(), throwsA(isA<StateRecoveryRequired>()));
+    expect(nativeCalls, 0);
+    expect(legacy.reads, 0);
   });
 
   for (final namespaced in [false, true]) {
     test(
-      'native failure falls back to authenticated legacy data (namespace=$namespaced)',
+      'healthy legacy storage migrates once (namespace=$namespaced)',
       () async {
-        final old = await StateStore.open(directory, storage: legacy);
-        await old.put('favorite', 'old');
-        await old.put('favorite', 'latest');
-        old.dispose();
-        final key = base64Decode((await legacy.read(key: StateStore.keyName))!);
-        if (namespaced) {
-          await LocalStateKey(
-            directory,
-            legacy,
-            nativeAndroid: false,
-          ).saveFresh(key);
-        }
-        final oldNamespace = namespaced
-            ? (await location())['namespace']
-            : null;
-        // Explicitly simulate a completed switch. Ordinary startup never switches.
-        await keys().saveFresh(key);
-        final nativeNamespace = (await location())['namespace'] as String;
-        expect((await location())['fallback'], {'namespace': oldNamespace});
+        final key = await seedLegacy(namespaced: namespaced);
         final encrypted = await file('state-v1.enc').readAsBytes();
-        blocked.add(nativeNamespace);
-        final next = await open();
-        expect(next.data['favorite'], 'latest');
-        await next.put('after-fallback', true);
-        next.dispose();
-        expect((await location())['namespace'], oldNamespace);
-        expect((await location())['backend'], isNull);
-        expect(records.containsKey(nativeNamespace), isTrue);
+        final oldValue = await legacy.read(key: StateStore.keyName);
+        nativeBroken = true;
+        final migrated = await open();
+        expect(migrated.data['favorite'], 'latest');
+        migrated.dispose();
+        final pointer = await location();
+        expect(pointer.str('backend'), LocalStateKey.privateBackend);
+        expect(await keyFile(pointer.str('namespace')).readAsBytes(), key);
+        expect(await legacy.read(key: StateStore.keyName), oldValue);
+        expect(await file('state-v1.enc').readAsBytes(), encrypted);
+        legacy.broken = true;
+        final reads = legacy.reads, writes = legacy.writes;
         for (var i = 0; i < 3; i++) {
-          final restarted = await open();
-          expect(restarted.data['after-fallback'], true);
-          restarted.dispose();
+          final next = await open();
+          expect(next.data['favorite'], 'latest');
+          next.dispose();
         }
-        expect(writes, 1);
-        expect(await file('state-v1.enc.bak').readAsBytes(), encrypted);
+        expect(await location(), pointer);
+        expect(legacy.reads, reads);
+        expect(legacy.writes, writes);
+        expect(nativeCalls, 0);
       },
     );
   }
 
   test(
-    'wrong native key falls back before considering older state backup',
+    'healthy native key migrates unchanged before Keystore can fail',
     () async {
-      final old = await StateStore.open(directory, storage: legacy);
-      await old.put('favorite', 'latest');
-      old.dispose();
-      final key = base64Decode((await legacy.read(key: StateStore.keyName))!);
-      await keys().saveFresh(key);
-      final namespace = (await location())['namespace'] as String;
-      records[namespace] = {
-        false: CryptoBox.random(32),
-        true: CryptoBox.random(32),
-      };
-      final recovered = await open();
-      expect(recovered.data['favorite'], 'latest');
-      recovered.dispose();
-      expect((await location())['backend'], isNull);
+      final old = await seedNative(data: {'favorite': 'latest'});
+      final encrypted = await file('state-v1.enc').readAsBytes();
+      final first = await open();
+      expect(first.data['favorite'], 'latest');
+      first.dispose();
+      final pointer = await location();
+      expect(pointer.str('backend'), LocalStateKey.privateBackend);
+      expect(await keyFile(pointer.str('namespace')).readAsBytes(), old.key);
+      expect(records[old.namespace]![false], old.key);
+      expect(await file('state-v1.enc').readAsBytes(), encrypted);
+      nativeBroken = true;
+      legacy.broken = true;
+      final calls = nativeCalls;
+      for (var i = 0; i < 3; i++) {
+        final next = await open();
+        expect(next.data['favorite'], 'latest');
+        next.dispose();
+      }
+      expect(nativeCalls, calls);
+      expect(legacy.reads, 0);
+      expect(legacy.writes, 0);
     },
   );
 
   test(
-    'stale fallback cannot roll newer state back to an older backup',
+    'failed migration preserves native pointer and data until retry',
     () async {
-      final old = await StateStore.open(directory, storage: legacy);
-      await old.put('favorite', 'old');
-      old.dispose();
-      final older = await file('state-v1.enc').readAsBytes();
-      final differentKey = CryptoBox.random(32);
-      await keys().saveFresh(differentKey);
-      // A different key must never automatically retain the old fallback.
-      expect((await location())['fallback'], isNull);
-      final pointer = {
-        ...await location(),
-        'fallback': {'namespace': null},
-      };
-      await file(
-        LocalStateKey.locationName,
-      ).writeAsString(jsonEncode(pointer), flush: true);
-      final current = CryptoBox.seal(
-        differentKey,
-        utf8.encode('{"schema":1,"favorite":"latest"}'),
+      await seedNative(data: {'favorite': 'latest'});
+      final pointer = await file(LocalStateKey.locationName).readAsBytes();
+      final encrypted = await file('state-v1.enc').readAsBytes();
+      final blocker = Directory(file('${LocalStateKey.locationName}.tmp').path);
+      await blocker.create();
+      final readable = await open();
+      expect(readable.data['favorite'], 'latest');
+      readable.dispose();
+      expect(await file(LocalStateKey.locationName).readAsBytes(), pointer);
+      expect(await file('state-v1.enc').readAsBytes(), encrypted);
+      await blocker.delete();
+      final retry = await open();
+      expect(retry.data['favorite'], 'latest');
+      retry.dispose();
+      expect((await location()).str('backend'), LocalStateKey.privateBackend);
+      expect(await file('state-v1.enc').readAsBytes(), encrypted);
+    },
+  );
+
+  test(
+    'wrong legacy keys cannot migrate or overwrite encrypted data',
+    () async {
+      await seedLegacy();
+      final encrypted = await file('state-v1.enc').readAsBytes();
+      final wrongKey = base64Encode(CryptoBox.random(32));
+      FlutterSecureStorage.setMockInitialValues({
+        StateStore.keyName: wrongKey,
+        '${StateStore.keyName}.copy': wrongKey,
+      });
+      await expectLater(open(), throwsA(isA<StateRecoveryRequired>()));
+      expect(await file(LocalStateKey.locationName).exists(), isFalse);
+      expect(
+        await Directory(file(LocalStateKey.privateDirectoryName).path).exists(),
+        isFalse,
       );
-      await file('state-v1.enc').writeAsBytes(current, flush: true);
+      expect(await file('state-v1.enc').readAsBytes(), encrypted);
+      expect(nativeCalls, 0);
+    },
+  );
+
+  test(
+    'broken legacy storage with existing data cannot become an empty install',
+    () async {
+      await seedLegacy();
+      final encrypted = await file('state-v1.enc').readAsBytes();
+      legacy.broken = true;
+      nativeBroken = true;
+      await expectLater(open(), throwsA(isA<StateRecoveryRequired>()));
+      expect(await file(LocalStateKey.locationName).exists(), isFalse);
+      expect(await file('state-v1.enc').readAsBytes(), encrypted);
+    },
+  );
+
+  for (final namespaced in [false, true]) {
+    for (final wrongKey in [false, true]) {
+      test('native failure migrates authenticated legacy fallback '
+          '(namespace=$namespaced, wrongKey=$wrongKey)', () async {
+        final key = await seedLegacy(namespaced: namespaced);
+        final fallback = namespaced ? await location() : {'namespace': null};
+        final native = await seedNative(
+          key: key,
+          data: {'favorite': 'latest'},
+          fallback: fallback,
+        );
+        final encrypted = await file('state-v1.enc').readAsBytes();
+        if (wrongKey) {
+          records[native.namespace] = {
+            false: CryptoBox.random(32),
+            true: CryptoBox.random(32),
+          };
+        } else {
+          blocked.add(native.namespace);
+        }
+        final migrated = await open();
+        expect(migrated.data['favorite'], 'latest');
+        migrated.dispose();
+        expect((await location()).str('backend'), LocalStateKey.privateBackend);
+        expect(await file('state-v1.enc').readAsBytes(), encrypted);
+        expect(records.containsKey(native.namespace), isTrue);
+        nativeBroken = true;
+        legacy.broken = true;
+        final calls = nativeCalls, reads = legacy.reads;
+        final next = await open();
+        expect(next.data['favorite'], 'latest');
+        next.dispose();
+        expect(nativeCalls, calls);
+        expect(legacy.reads, reads);
+      });
+    }
+  }
+
+  test(
+    'stale native fallback cannot roll newer data back to an old snapshot',
+    () async {
+      await seedLegacy();
+      final older = await file('state-v1.enc').readAsBytes();
+      final native = await seedNative(
+        data: {'favorite': 'new-key-data'},
+        fallback: {'namespace': null},
+      );
       await file('state-v1.enc.bak').writeAsBytes(older, flush: true);
-      blocked.add(pointer['namespace'] as String);
+      final current = await file('state-v1.enc').readAsBytes();
+      final pointer = await file(LocalStateKey.locationName).readAsBytes();
+      blocked.add(native.namespace);
       await expectLater(open(), throwsA(isA<StateRecoveryRequired>()));
       expect(await file('state-v1.enc').readAsBytes(), current);
       expect(await file('state-v1.enc.bak').readAsBytes(), older);
-      expect(await location(), pointer);
-      // An interrupted write has a newer .tmp but no primary: still reject the
-      // old .bak even though its key remains readable in the fallback store.
+      expect(await file(LocalStateKey.locationName).readAsBytes(), pointer);
+      // Interrupted commits can have a newer .tmp without the primary.
       await file('state-v1.enc').rename(file('state-v1.enc.tmp').path);
       await expectLater(open(), throwsA(isA<StateRecoveryRequired>()));
       expect(await file('state-v1.enc.tmp').readAsBytes(), current);
       expect(await file('state-v1.enc').exists(), isFalse);
-      expect(writes, 1);
-    },
-  );
-
-  test(
-    'failed native switch leaves a healthy legacy pointer and state untouched',
-    () async {
-      final old = await StateStore.open(directory, storage: legacy);
-      await old.put('favorite', 'kept');
-      old.dispose();
-      final key = base64Decode((await legacy.read(key: StateStore.keyName))!);
-      await LocalStateKey(
-        directory,
-        legacy,
-        nativeAndroid: false,
-      ).saveFresh(key);
-      final pointer = await file(LocalStateKey.locationName).readAsBytes();
-      final encrypted = await file('state-v1.enc').readAsBytes();
-      failColdRead = true;
-      await expectLater(
-        keys().saveFresh(key),
-        throwsA(isA<PlatformException>()),
-      );
-      expect(await file(LocalStateKey.locationName).readAsBytes(), pointer);
-      expect(await file('state-v1.enc').readAsBytes(), encrypted);
-      final next = await open();
-      expect(next.data['favorite'], 'kept');
-      next.dispose();
-    },
-  );
-
-  test(
-    'legacy copy repair keeps the same backend when native storage fails',
-    () async {
-      final old = await StateStore.open(directory, storage: legacy);
-      await old.put('favorite', 'kept');
-      old.dispose();
-      await legacy.delete(key: StateStore.keyName);
-      failColdRead = true;
-      final next = await open();
-      expect(next.data['favorite'], 'kept');
-      next.dispose();
       expect(
-        await legacy.read(key: StateStore.keyName),
-        await legacy.read(key: '${StateStore.keyName}.copy'),
+        await Directory(file(LocalStateKey.privateDirectoryName).path).exists(),
+        isFalse,
       );
-      expect(writes, 0);
-      expect(await file(LocalStateKey.locationName).exists(), isFalse);
     },
   );
 
   test(
-    'invalid optional fallback cannot break a healthy current store',
+    'different private key never retains or accepts a stale fallback',
+    () async {
+      final first = await open();
+      await first.put('favorite', 'old');
+      first.dispose();
+      final oldPointer = await location();
+      final older = await file('state-v1.enc').readAsBytes();
+      final key = CryptoBox.random(32);
+      await keys().saveFresh(key);
+      expect((await location())['fallback'], isNull);
+      final current = CryptoBox.seal(
+        key,
+        utf8.encode('{"schema":1,"favorite":"latest"}'),
+      );
+      await file('state-v1.enc').writeAsBytes(current, flush: true);
+      await file('state-v1.enc.bak').writeAsBytes(older, flush: true);
+      await losePrivateRecords();
+      final pointer = {...await location(), 'fallback': oldPointer};
+      await file(
+        LocalStateKey.locationName,
+      ).writeAsString(jsonEncode(pointer), flush: true);
+      await expectLater(open(), throwsA(isA<StateRecoveryRequired>()));
+      expect(await file('state-v1.enc').readAsBytes(), current);
+      expect(await file('state-v1.enc.bak').readAsBytes(), older);
+      expect(await location(), pointer);
+      expect(nativeCalls, 0);
+      expect(legacy.reads, 0);
+    },
+  );
+
+  test('invalid namespace is rejected before any key access', () async {
+    await file(LocalStateKey.locationName).writeAsString(
+      jsonEncode({
+        'namespace': '../outside',
+        'backend': LocalStateKey.privateBackend,
+      }),
+      flush: true,
+    );
+    await expectLater(open(), throwsA(isA<StateRecoveryRequired>()));
+    expect(nativeCalls, 0);
+    expect(legacy.reads, 0);
+    expect(await file('state-v1.enc').exists(), isFalse);
+  });
+
+  test(
+    'invalid optional fallback cannot break healthy private storage',
     () async {
       final first = await open();
       await first.put('favorite', 'kept');
@@ -407,19 +632,18 @@ void main() {
       final next = await open();
       expect(next.data['favorite'], 'kept');
       next.dispose();
-      expect(writes, 1);
+      expect(nativeCalls, 0);
+      expect(legacy.reads, 0);
     },
   );
 
   test(
-    'temporary native key failure preserves data and retry reopens it',
+    'temporary native failure preserves data, retry then migrates',
     () async {
-      final first = await open();
-      await first.put('favorite', 'kept');
-      first.dispose();
+      final native = await seedNative(data: {'favorite': 'kept'});
       final pointer = await file(LocalStateKey.locationName).readAsBytes();
       final encrypted = await file('state-v1.enc').readAsBytes();
-      blocked.add((await location())['namespace'] as String);
+      blocked.add(native.namespace);
       await expectLater(
         open(),
         throwsA(
@@ -430,81 +654,187 @@ void main() {
           ),
         ),
       );
-      expect(writes, 1);
       expect(await file(LocalStateKey.locationName).readAsBytes(), pointer);
       expect(await file('state-v1.enc').readAsBytes(), encrypted);
       blocked.clear();
       final next = await open();
       expect(next.data['favorite'], 'kept');
       next.dispose();
+      expect((await location()).str('backend'), LocalStateKey.privateBackend);
     },
   );
 
   test(
-    'damaged native record repairs from authenticated copy into fresh namespace',
+    'missing native records behind a pointer never initialize silently',
     () async {
-      final first = await open();
-      await first.put('favorite', 'kept');
-      first.dispose();
-      final previous = (await location())['namespace'] as String;
-      records[previous]![false] = CryptoBox.random(32);
-      final repaired = await open();
-      expect(repaired.data['favorite'], 'kept');
-      repaired.dispose();
-      expect((await location())['namespace'], isNot(previous));
-      expect(records.containsKey(previous), isTrue);
-      final next = await open();
-      expect(next.data['favorite'], 'kept');
-      next.dispose();
+      await seedNative(data: {'favorite': 'kept'});
+      final pointer = await file(LocalStateKey.locationName).readAsBytes();
+      final encrypted = await file('state-v1.enc').readAsBytes();
+      records.clear();
+      await expectLater(open(), throwsA(isA<StateRecoveryRequired>()));
+      expect(await file(LocalStateKey.locationName).readAsBytes(), pointer);
+      expect(await file('state-v1.enc').readAsBytes(), encrypted);
     },
   );
 
   test(
-    'reinitialize bypasses broken legacy store and survives repeated restarts',
+    'native primary damage migrates the key from its authenticated copy',
     () async {
-      final old = await StateStore.open(directory, storage: legacy);
-      await old.put('favorite', 'old');
-      old.dispose();
-      final original = await file('state-v1.enc').readAsBytes();
+      final native = await seedNative(data: {'favorite': 'latest'});
+      records[native.namespace]![false] = CryptoBox.random(32);
+      final migrated = await open();
+      expect(migrated.data['favorite'], 'latest');
+      migrated.dispose();
+      expect(
+        await keyFile((await location()).str('namespace')).readAsBytes(),
+        native.key,
+      );
+      expect(records[native.namespace]![true], native.key);
+    },
+  );
+
+  test(
+    'export password restores newest native state without working Keystore',
+    () async {
+      await seedNative(data: {'favorite': 'at-export'});
+      // Simulate an unlocked old installation whose compatibility migration could
+      // not yet finish. Export must still protect its in-memory, authenticated key.
+      final blocker = file(LocalStateKey.privateDirectoryName);
+      await blocker.writeAsString('occupied');
+      final initial = await open();
+      try {
+        final pointer = await file(LocalStateKey.locationName).readAsBytes();
+        final encrypted = await file('state-v1.enc').readAsBytes();
+        await BackupRepository(initial).exportTo(password, (_) async => true);
+        expect(await file(LocalStateKey.locationName).readAsBytes(), pointer);
+        expect(await file('state-v1.enc').readAsBytes(), encrypted);
+        await initial.put('favorite', 'after-export');
+      } finally {
+        initial.dispose();
+      }
+      final latest = await file('state-v1.enc').readAsBytes();
+      await blocker.delete();
+      nativeBroken = true;
       legacy.broken = true;
+      await expectLater(open(), throwsA(isA<StateRecoveryRequired>()));
+      await recovery().unlock(password);
+      final calls = nativeCalls;
+      final next = await open();
+      expect(next.data['favorite'], 'after-export');
+      next.dispose();
+      expect((await location()).str('backend'), LocalStateKey.privateBackend);
+      expect(await file('state-v1.enc').readAsBytes(), latest);
+      expect(nativeCalls, calls);
+      expect(legacy.reads, 0);
+      expect(legacy.writes, 0);
+    },
+  );
+
+  test(
+    'private import and password recovery survive total Keystore failure',
+    () async {
+      legacy.broken = true;
+      nativeBroken = true;
+      final first = await open();
+      final pointer = await file(LocalStateKey.locationName).readAsBytes();
+      final key = (await keys().read()).keys.single;
+      await BackupRepository(first).restore(backup, password);
+      await first.put('after-import', true);
+      first.dispose();
+      expect(await file(LocalStateKey.locationName).readAsBytes(), pointer);
+      final latest = await file('state-v1.enc').readAsBytes();
+      await losePrivateRecords();
+      await expectLater(
+        recovery().unlock('wrong-password'),
+        throwsA(isA<AppException>()),
+      );
+      expect(await file(LocalStateKey.locationName).readAsBytes(), pointer);
+      await recovery().unlock(password);
+      for (var i = 0; i < 3; i++) {
+        final next = await open();
+        expect(next.data['after-import'], true);
+        expect(
+          Vault(next).credential(CloudPlatform.baidu)?.primary,
+          'BDUSS=fixture-only',
+        );
+        next.dispose();
+      }
+      expect((await keys().read()).keys.single, key);
+      expect(await file('state-v1.enc').readAsBytes(), latest);
+      expect(nativeCalls, 0);
+      expect(legacy.reads, 0);
+      expect(legacy.writes, 0);
+    },
+  );
+
+  test(
+    'backup restore archives locked native data and uses private storage',
+    () async {
+      await seedNative(data: {'favorite': 'old'});
+      final original = await file('state-v1.enc').readAsBytes();
+      final pointer = await file(LocalStateKey.locationName).readAsBytes();
+      nativeBroken = true;
+      legacy.broken = true;
+      final result = await recovery().restore(backup, password);
+      expect(result.accounts, 1);
+      expect(
+        await File('${result.archive.path}/state-v1.enc').readAsBytes(),
+        original,
+      );
+      expect(
+        await File(
+          '${result.archive.path}/${LocalStateKey.locationName}',
+        ).readAsBytes(),
+        pointer,
+      );
+      final calls = nativeCalls;
+      for (var i = 0; i < 3; i++) {
+        final next = await open();
+        expect(next.data.obj('settings').str('theme'), 'Dark');
+        expect(
+          Vault(next).credential(CloudPlatform.baidu)?.primary,
+          'BDUSS=fixture-only',
+        );
+        next.dispose();
+      }
+      expect((await location()).str('backend'), LocalStateKey.privateBackend);
+      expect(nativeCalls, calls);
+      expect(legacy.reads, 0);
+      expect(legacy.writes, 0);
+    },
+  );
+
+  test(
+    'reinitialize works with both old OS backends completely unavailable',
+    () async {
+      await seedLegacy();
+      final original = await file('state-v1.enc').readAsBytes();
+      nativeBroken = true;
+      legacy.broken = true;
+      final writes = legacy.writes;
       final result = await recovery().reinitialize();
       expect(
         await File('${result.archive.path}/state-v1.enc').readAsBytes(),
         original,
       );
+      final reads = legacy.reads;
       for (var i = 0; i < 3; i++) {
         final next = await open();
         expect(next.data['favorite'], isNull);
         next.dispose();
       }
-      expect(writes, 1);
+      expect((await location()).str('backend'), LocalStateKey.privateBackend);
+      expect(nativeCalls, 0);
+      expect(legacy.reads, reads);
+      expect(legacy.writes, writes);
     },
   );
 
   test(
-    'backup import and password unlock rebind durable native key once',
+    'failed replacement rolls back snapshot, pointer and recovery envelope',
     () async {
       final first = await open();
-      await BackupRepository(first).restore(await backup(), 'fixture-password');
-      await first.put('after-import', true);
-      first.dispose();
-      blocked.add((await location())['namespace'] as String);
-      await recovery().unlock('fixture-password');
-      legacy.broken = true;
-      for (var i = 0; i < 3; i++) {
-        final next = await open();
-        expect(next.data['after-import'], true);
-        next.dispose();
-      }
-      expect(writes, 2);
-    },
-  );
-
-  test(
-    'failed reinitialize rolls back state, pointer and recovery envelope',
-    () async {
-      final first = await open();
-      await BackupRepository(first).restore(await backup(), 'fixture-password');
+      await BackupRepository(first).restore(backup, password);
       first.dispose();
       final originals = {
         for (final name in [
@@ -514,19 +844,26 @@ void main() {
         ])
           name: await file(name).readAsBytes(),
       };
-      blocked.add((await location())['namespace'] as String);
-      failColdRead = true;
+      await losePrivateRecords();
+      final blocker = Directory(file('${LocalStateKey.locationName}.tmp').path);
+      await blocker.create();
       await expectLater(
         recovery().reinitialize(),
-        throwsA(isA<PlatformException>()),
+        throwsA(isA<FileSystemException>()),
       );
       for (final entry in originals.entries) {
         expect(await file(entry.key).readAsBytes(), entry.value);
       }
-      failColdRead = false;
-      await recovery().unlock('fixture-password');
+      await blocker.delete();
+      await recovery().unlock(password);
       final next = await open();
+      expect(
+        Vault(next).credential(CloudPlatform.baidu)?.primary,
+        'BDUSS=fixture-only',
+      );
       next.dispose();
+      expect(nativeCalls, 0);
+      expect(legacy.reads, 0);
     },
   );
 }

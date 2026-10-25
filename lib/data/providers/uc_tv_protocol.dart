@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import '../../core/json.dart';
+import '../../diagnostics/app_log.dart';
 import '../../domain/auth.dart';
 import '../../domain/models.dart';
 import '../http.dart';
@@ -301,8 +302,9 @@ class UcTvProtocol {
     String device,
     String access,
     String fid,
-    CloudFile file,
-  ) async {
+    CloudFile file, {
+    String Function()? currentCookie,
+  }) async {
     require(validSecret(access) && fid.isNotEmpty, 'UC 原文件下载授权信息不完整');
     final json = _data(
       await _get('/file', device, {
@@ -331,9 +333,23 @@ class UcTvProtocol {
       'UC 未返回有效的原文件下载地址',
     );
 
+    // UC's original-file nodes use the web account for authenticated Range
+    // requests. Keep these credentials off the TV API and foreign CDN hosts.
+    final headers = <String, String>{};
+    if (uri!.host == 'uc.cn' || uri.host.endsWith('.uc.cn')) {
+      final cookie = currentCookie?.call() ?? '';
+      if (cookie.isNotEmpty) {
+        headers['Cookie'] = LoginCredentials.normalize(
+          CloudPlatform.uc,
+          cookie,
+        );
+      }
+    }
+
     // The download endpoint is distinct from streaming. Verify its actual
     // object too, including files without an extension, before handing it off.
-    final probe = await http.peek(url, const {
+    final probe = await http.peek(url, {
+      ...headers,
       'Accept-Encoding': 'identity',
     }, maxBytes: 2);
     RequestScope.checkpoint();
@@ -358,18 +374,42 @@ class UcTvProtocol {
         probe.header('content-range') == 'bytes */0') {
       total = 0;
     }
-    require(
-      (encoding.isEmpty || encoding == 'identity') && total != null,
-      'UC 原文件长度检查失败（HTTP ${probe.status}），请重试',
+    final validResponse =
+        (encoding.isEmpty || encoding == 'identity') && total != null;
+    // Record only response metadata, never signed URLs, credentials, or body
+    // bytes. A successful TV grant can still yield a replacement object.
+    DiagnosticLog.event(
+      'uc_tv.original_probe',
+      fields: {
+        'platform': 'uc',
+        'file': DiagnosticLog.reference(fid),
+        'route': 'authorized_original',
+        'host': uri.host,
+        'status': probe.status,
+        'listedBytes': file.size,
+        'expectedBytes': size,
+        'receivedTotal': total,
+        'responseBytes': length,
+        'hasWebSession': headers.containsKey('Cookie'),
+        'result': !validResponse
+            ? 'invalid_response'
+            : total == size
+            ? 'matched'
+            : 'size_mismatch',
+      },
     );
-    require(total == size, 'UC 授权下载返回的内容与原文件大小不一致，已停止下载');
+    require(validResponse, 'UC 原文件长度检查失败（HTTP ${probe.status}），请重试');
+    require(
+      total == size,
+      'UC 授权下载返回的内容与原文件大小不一致，可能受到原站下载限制；请先在 UC 官方客户端确认该文件能否下载',
+    );
     return DownloadSpec(
       url: url,
       fileName: file.name,
       expectedSize: total!,
       checksumType: file.hashType,
       checksumValue: file.hashValue,
-      headers: const {},
+      headers: headers,
     );
   }
 }

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/GopeedLab/gopeed/internal/btpolicy"
+	"github.com/GopeedLab/gopeed/internal/outputfile"
 	corebt "github.com/GopeedLab/gopeed/internal/protocol/bt"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	"github.com/GopeedLab/gopeed/pkg/download"
@@ -275,13 +276,18 @@ func beginTorrent(input request) error {
 	}
 	if taskID, ok := taskIDs[input.ID]; ok {
 		task := core.GetTask(taskID)
-		if task != nil && task.Protocol == "bt" && task.Meta.Res != nil && task.Meta.Res.Hash == info.Hash && task.Meta.Opts != nil && filepath.Clean(task.Meta.Opts.Path) == dir && len(task.Meta.Opts.SelectFiles) == 1 && task.Meta.Opts.SelectFiles[0] == input.TorrentIndex {
+		if task != nil {
 			if err = core.PauseAndSave(taskID); err != nil {
+				return err
+			}
+		}
+		if task != nil && task.Protocol == "bt" && outputMatches(task, input) && task.Meta.Res != nil && task.Meta.Res.Hash == info.Hash && task.Meta.Opts != nil && filepath.Clean(task.Meta.Opts.Path) == dir && len(task.Meta.Opts.SelectFiles) == 1 && task.Meta.Opts.SelectFiles[0] == input.TorrentIndex {
+			if err = bindOutput(input, torrentTaskPath(task)); err != nil {
 				return err
 			}
 			if task.Status == base.DownloadStatusDone {
 				path := torrentTaskPath(task)
-				st, e := os.Stat(path)
+				st, e := outputfile.Stat(path)
 				if e == nil && st.Mode().IsRegular() && st.Size() == chosen.Size {
 					remember(&download.Event{Task: task})
 					return nil
@@ -291,6 +297,7 @@ func beginTorrent(input request) error {
 				stateMu.Lock()
 				progress := states[input.ID]
 				progress.Status, progress.Error = "running", ""
+				progress.Path = snapshotOutputPath(task, torrentTaskPath(task))
 				states[input.ID] = progress
 				stateMu.Unlock()
 				return core.ContinueBatch(&download.TaskFilter{IDs: []string{taskID}})
@@ -311,14 +318,26 @@ func beginTorrent(input request) error {
 	if err = clearTaskPayload(dir); err != nil {
 		return err
 	}
+	logical := filepath.Join(dir, chosen.Path)
+	if err = bindOutput(input, logical); err != nil {
+		return err
+	}
+	if err = outputfile.Reset(logical, chosen.Size); err != nil {
+		outputfile.Remove(input.ID)
+		return err
+	}
 	token := fmt.Sprintf("%s-%d", input.ID, time.Now().UnixNano())
 	req := &base.Request{URL: input.TorrentData, Labels: map[string]string{"asterlinkId": input.ID, "asterlinkGeneration": token}}
+	if input.OutputKey != "" {
+		req.Labels[outputKeyLabel] = input.OutputKey
+	}
 	stateMu.Lock()
 	generations[input.ID] = token
-	states[input.ID] = snapshot{Status: "running", Total: chosen.Size}
+	states[input.ID] = snapshot{Status: "running", Total: chosen.Size, Path: input.OutputPath}
 	stateMu.Unlock()
 	taskID, err := core.CreateDirect(req, &base.Options{Path: dir, SelectFiles: []int{input.TorrentIndex}})
 	if err != nil {
+		outputfile.Remove(input.ID)
 		return err
 	}
 	taskIDs[input.ID] = taskID

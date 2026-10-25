@@ -16,6 +16,10 @@ const minRangeSize int64 = 256 * 1024
 const quarkRangeSize int64 = 64 * 1024
 const aliyunConnections = 8
 
+// Guangya can reject a 64-range burst with 503 even after normal retries.
+// Reduce only an overloaded node; healthy nodes keep the configured budget.
+var guangyaHosts = newAdaptiveHostLimiter(4, 2*time.Minute)
+
 // Baidu's preview CDN accepts bounded reads but can reject a whole-file Range
 // with 403/31326. Read consecutive windows on the existing single connection;
 // checkpoint chunks continue to describe file ownership, not HTTP requests.
@@ -121,6 +125,9 @@ func acquireConnection(ctx context.Context, host string) (func(), error) {
 func acquireProfileConnection(ctx context.Context, host, profile string) (func(), error) {
 	if profile == "xunlei" {
 		return acquireXunleiConnection(ctx, host)
+	}
+	if profile == "guangya" {
+		return guangyaHosts.acquire(ctx, host)
 	}
 	if profile == "aliyun" {
 		// Also cover resumed checkpoints with the old, larger number of ranges

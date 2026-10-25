@@ -4,12 +4,15 @@ import 'package:asterlink/core/json.dart';
 import 'package:asterlink/domain/xunlei_kouling.dart';
 
 void main() {
-  test('recognizes and normalizes Chinese Xunlei commands', () {
-    expect(XunleiKouling.looksLike('【张三丰资源】'), isTrue);
-    expect(XunleiKouling.normalize('「张三丰资源」'), '张三丰资源');
-    expect(XunleiKouling.looksLike('张三丰 资源'), isFalse);
-    expect(XunleiKouling.looksLike('https://pan.xunlei.com/s/abc'), isFalse);
-  });
+  test(
+    'normalizes surrounding decorations without filtering the token content',
+    () {
+      expect(XunleiKouling.normalize('【张三丰资源】'), '张三丰资源');
+      expect(XunleiKouling.normalize('「张三丰资源」'), '张三丰资源');
+      expect(XunleiKouling.normalize('张三丰 资源'), '张三丰 资源');
+      expect(XunleiKouling.normalize('@new_令牌+123'), '@new_令牌+123');
+    },
+  );
 
   test('builds the jump URL with encoded keyword and channel fields', () {
     final url = XunleiKouling.jumpUrl('张三丰资源');

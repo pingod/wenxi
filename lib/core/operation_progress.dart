@@ -9,6 +9,8 @@ enum OperationStage {
   waitTransfer('等待转存完成'),
   downloadLink('获取下载链接'),
   playbackLink('获取播放链接'),
+  parserQueue('等待解析'),
+  serverParse('解析文件'),
   cleanup('删除临时转存');
 
   const OperationStage(this.label);
@@ -24,12 +26,14 @@ class OperationStep {
     this.stage,
     this.status, {
     this.itemsRead,
+    this.queuePosition,
     this.waitingForRetry = false,
   });
   final int id;
   final OperationStage stage;
   final OperationStepStatus status;
   final int? itemsRead;
+  final int? queuePosition;
   final bool waitingForRetry;
 }
 
@@ -113,6 +117,44 @@ class OperationProgress extends ValueNotifier<List<OperationStep>> {
     }
   }
 
+  static void reportServerStage(OperationStage stage, {int? queuePosition}) {
+    final active =
+        Zone.current[_activeStepsKey] as List<(_ProgressBinding, int)>? ??
+        const [];
+    for (final (binding, id) in active) {
+      binding.progress._serverStage(
+        binding.generation,
+        id,
+        stage,
+        queuePosition,
+      );
+    }
+  }
+
+  void _serverStage(
+    int generation,
+    int id,
+    OperationStage stage,
+    int? position,
+  ) {
+    if (!_current(generation)) return;
+    final index = value.indexWhere(
+      (step) => step.id == id && step.status == OperationStepStatus.running,
+    );
+    if (index < 0) return;
+    if (value[index].stage == stage && value[index].queuePosition == position) {
+      return;
+    }
+    final entries = value.toList();
+    entries[index] = OperationStep(
+      id,
+      stage,
+      OperationStepStatus.running,
+      queuePosition: stage == OperationStage.parserQueue ? position : null,
+    );
+    _publish(entries);
+  }
+
   void _files(int generation, int id, int count, bool waitingForRetry) {
     if (!_current(generation)) return;
     final index = value.indexWhere(
@@ -163,7 +205,13 @@ class OperationProgress extends ValueNotifier<List<OperationStep>> {
     _publish([
       for (final step in value)
         step.id == id
-            ? OperationStep(id, step.stage, status, itemsRead: step.itemsRead)
+            ? OperationStep(
+                id,
+                step.stage,
+                status,
+                itemsRead: step.itemsRead,
+                queuePosition: step.queuePosition,
+              )
             : step,
     ]);
   }
@@ -188,6 +236,7 @@ class OperationProgress extends ValueNotifier<List<OperationStep>> {
                       ? OperationStepStatus.cancelled
                       : OperationStepStatus.failed,
                   itemsRead: step.itemsRead,
+                  queuePosition: step.queuePosition,
                 )
               : step,
       ]);

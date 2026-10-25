@@ -1,4 +1,5 @@
 #include <DispatcherQueue.h>
+#include <cstdint>
 #include <flutter/method_channel.h>
 #include <flutter/standard_method_codec.h>
 
@@ -57,21 +58,31 @@ namespace flutter_inappwebview_plugin
   {
     auto result_ = std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>(std::move(result));
 
+    if (map_contains(webViewEnvironments, id)) {
+      result_->Error("webview_environment_exists", "WebViewEnvironment already exists");
+      return;
+    }
     auto webViewEnvironment = std::make_unique<WebViewEnvironment>(plugin, id);
-    webViewEnvironment->create(std::move(settings),
+    auto* pendingEnvironment = webViewEnvironment.get();
+    // Creation can fail synchronously. Register first so its failure callback
+    // can remove the failed environment instead of leaving it in the map.
+    webViewEnvironments.insert({ id, std::move(webViewEnvironment) });
+    pendingEnvironment->create(std::move(settings),
       [this, id, result_](HRESULT errorCode)
       {
         if (succeededOrLog(errorCode)) {
           result_->Success(true);
         }
         else {
-          result_->Error("0", "Cannot create WebViewEnvironment: " + getHRMessage(errorCode));
+          result_->Error("webview_environment_create", "Cannot create WebViewEnvironment: " + getHRMessage(errorCode),
+            flutter::EncodableValue(flutter::EncodableMap{
+              { flutter::EncodableValue("hresult"), flutter::EncodableValue(static_cast<int64_t>(static_cast<uint32_t>(errorCode))) }
+            }));
           if (map_contains(webViewEnvironments, id)) {
             webViewEnvironments.erase(id);
           }
         }
       });
-    webViewEnvironments.insert({ id, std::move(webViewEnvironment) });
   }
 
   void WebViewEnvironmentManager::createOrGetDefaultWebViewEnvironment(const std::function<void(WebViewEnvironment*)> completionHandler)

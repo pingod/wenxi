@@ -20,6 +20,7 @@ class Pan123Connector extends CloudConnector {
     this.taskDelay = const Duration(seconds: 1),
     this.listDelay = const Duration(milliseconds: 600),
     this.listWait = RequestScope.wait,
+    this.uploadWait = RequestScope.wait,
     this.stageCleanup,
     DateTime Function()? now,
   }) : now = now ?? DateTime.now;
@@ -29,6 +30,7 @@ class Pan123Connector extends CloudConnector {
   final Duration taskDelay;
   final Duration listDelay;
   final Future<void> Function(Duration) listWait;
+  final Future<void> Function(Duration) uploadWait;
   final DateTime Function() now;
   final _uuids = <String, Future<String>>{};
   final _refreshing = <int, (Credential, Future<Credential>)>{};
@@ -84,6 +86,14 @@ class Pan123Connector extends CloudConnector {
         kind: 'http',
         status: 429,
         retryAfter: result.header('retry-after'),
+        retryable: true,
+      );
+    }
+    if (result.status >= 500) {
+      throw HttpRequestFailure(
+        '123 服务暂时不可用（HTTP ${result.status}）',
+        kind: 'http',
+        status: result.status,
         retryable: true,
       );
     }
@@ -943,66 +953,209 @@ class Pan123Connector extends CloudConnector {
         c,
       ),
     ).obj('data');
+    final etag = await io.digest(md5);
     final pre = await post('upload_request', {
       'driveId': 0,
       'duplicate': 1,
-      'etag': await io.digest(md5),
+      'etag': etag,
       'fileName': source.name,
       'parentFileId': int.tryParse(parent) ?? 0,
       'size': source.size,
       'type': 0,
     });
-    var id = pre.str('FileId').ifEmpty(pre.obj('Info').str('FileId'));
-    require(id.isNotEmpty, '123 未返回上传文件标识');
-    if (!pre.boolean('Reuse')) {
-      require(pre.str('Key').isNotEmpty, '123 未创建上传任务');
-      if (pre.str('AccessKeyId').isNotEmpty &&
-          pre.str('SecretAccessKey').isNotEmpty) {
-        await io.s3(
-          endpoint: pre.str('EndPoint'),
-          bucket: pre.str('Bucket'),
-          object: pre.str('Key'),
-          access: pre.str('AccessKeyId'),
-          secret: pre.str('SecretAccessKey'),
-          token: pre.str('SessionToken'),
-          region: '123pan',
-          pathStyle: true,
-        );
-        final completed = await post('upload_complete', {'fileId': id});
-        id = completed.obj('file_info').str('FileId').ifEmpty(id);
-      } else {
-        const chunkSize = 16 * 1024 * 1024;
-        final count = max(1, (source.size / chunkSize).ceil());
-        final body = <String, dynamic>{
-          'StorageNode': pre['StorageNode'],
-          'bucket': pre['Bucket'],
-          'key': pre['Key'],
-          'uploadId': pre['UploadId'],
-        };
-        for (var i = 0; i < count; i++) {
-          final urls = await post(
-            count == 1
-                ? 's3_upload_object/auth'
-                : 's3_repare_upload_parts_batch',
-            {...body, 'partNumberStart': i + 1, 'partNumberEnd': i + 2},
-          );
-          await io.send(
-            urls.obj('presignedUrls').str('${i + 1}'),
-            start: i * chunkSize,
-            end: min(source.size, (i + 1) * chunkSize),
-          );
-        }
-        io.progress(UploadPhase.finishing, source.size);
-        final completed = await post('upload_complete/v2', {
-          ...body,
-          'fileId': id,
-          'fileSize': source.size,
-          'isMultipart': count > 1,
-        });
-        id = completed.obj('file_info').str('FileId').ifEmpty(id);
-      }
+    final reuse = pre.boolean('Reuse');
+    final id = reuse
+        ? pre.obj('Info').str('FileId').ifEmpty(pre.str('FileId'))
+        : pre.str('FileId').ifEmpty(pre.obj('Info').str('FileId'));
+    require((int.tryParse(id) ?? 0) > 0, '123 未返回上传文件标识');
+    CloudFile completedFile(Json info) => _uploadedFile(
+      info,
+      pre: pre,
+      id: id,
+      parent: parent,
+      source: source,
+      etag: etag,
+    );
+    if (reuse) {
+      io.progress(UploadPhase.finishing, source.size);
+      return completedFile(pre.obj('Info'));
     }
-    return io.confirm(() => list(s, parent, c), id: id);
+    require(pre.str('Key').isNotEmpty, '123 未创建上传任务');
+    final body = <String, dynamic>{
+      'StorageNode': pre['StorageNode'],
+      'bucket': pre['Bucket'],
+      'key': pre['Key'],
+      'uploadId': pre['UploadId'],
+    };
+    late final String completePath;
+    late final Json completeBody;
+    if (pre.str('AccessKeyId').isNotEmpty &&
+        pre.str('SecretAccessKey').isNotEmpty) {
+      await io.s3(
+        endpoint: pre.str('EndPoint'),
+        bucket: pre.str('Bucket'),
+        object: pre.str('Key'),
+        access: pre.str('AccessKeyId'),
+        secret: pre.str('SecretAccessKey'),
+        token: pre.str('SessionToken'),
+        region: '123pan',
+        pathStyle: true,
+      );
+      completePath = 'upload_complete';
+      completeBody = {'fileId': id};
+    } else {
+      const chunkSize = 16 * 1024 * 1024;
+      final count = max(1, (source.size / chunkSize).ceil());
+      for (var i = 0; i < count; i++) {
+        final urls = await post(
+          count == 1 ? 's3_upload_object/auth' : 's3_repare_upload_parts_batch',
+          {...body, 'partNumberStart': i + 1, 'partNumberEnd': i + 2},
+        );
+        await io.send(
+          urls.obj('presignedUrls').str('${i + 1}'),
+          start: i * chunkSize,
+          end: min(source.size, (i + 1) * chunkSize),
+        );
+      }
+      completePath = 'upload_complete/v2';
+      completeBody = {
+        ...body,
+        'fileId': id,
+        'fileSize': source.size,
+        'isMultipart': count > 1,
+      };
+    }
+    io.progress(UploadPhase.finishing, source.size);
+    Json completed = {};
+    try {
+      completed = await post(completePath, completeBody);
+    } on HttpRequestFailure catch (error) {
+      RequestScope.checkpoint();
+      if (!error.retryable) rethrow;
+      // The server may have committed before the response was lost. Query
+      // the same upload; never submit another upload or repeat the merge.
+      DiagnosticLog.event(
+        'upload.confirm.recover',
+        fields: {'platform': platform.key, 'kind': error.kind},
+      );
+    }
+    if (completed.obj('file_info').integer('FileId') > 0) {
+      return completedFile(completed.obj('file_info'));
+    }
+    return _waitUploadedFile(s, parent, c, {
+      ...body,
+      'fileId': id,
+      'fileSize': source.size,
+      'isMultipart': completeBody['isMultipart'] ?? false,
+    }, completedFile);
+  }
+
+  CloudFile _uploadedFile(
+    Json info, {
+    required Json pre,
+    required String id,
+    required String parent,
+    required UploadFile source,
+    required String etag,
+  }) {
+    RequestScope.checkpoint();
+    final resultId = info.str('FileId').ifEmpty(id);
+    require((int.tryParse(resultId) ?? 0) > 0, '123 上传回执的文件标识无效，请刷新目录确认');
+    require(
+      !info.containsKey('Size') || info.integer('Size', -1) == source.size,
+      '上传后的文件大小不一致，请重新检查',
+    );
+    require(
+      !info.containsKey('Type') || info.integer('Type', -1) == 0,
+      '123 上传回执不是文件，请刷新目录确认',
+    );
+    require(
+      info.str('ParentFileId').isEmpty || info.str('ParentFileId') == parent,
+      '123 上传回执的目录不一致，请刷新目录确认',
+    );
+    final remoteHash = info.str('Etag');
+    require(
+      remoteHash.isEmpty || remoteHash.toLowerCase() == etag.toLowerCase(),
+      '上传后的文件校验标识不一致，请重新检查',
+    );
+    return _files({
+      'InfoList': [
+        {
+          'FileId': resultId,
+          'FileName': source.name,
+          'ParentFileId': parent,
+          'Size': source.size,
+          'Type': 0,
+          'Etag': etag,
+          'S3KeyFlag': pre.str('S3KeyFlag'),
+          'StorageNode': pre.str('StorageNode'),
+          ...info,
+        },
+      ],
+    }, parent).single;
+  }
+
+  Future<CloudFile> _waitUploadedFile(
+    BrowseSession s,
+    String parent,
+    Credential c,
+    Json body,
+    CloudFile Function(Json) completedFile,
+  ) async {
+    // Match the official web client's asynchronous merge protocol. A normal
+    // directory refresh is not an upload acknowledgement and can lag behind.
+    const path = '/b/api/file/upload_complete/result';
+    final deadline = now().add(const Duration(minutes: 15));
+    var failures = 0;
+    for (
+      var attempt = 0;
+      attempt < 450 && now().isBefore(deadline);
+      attempt++
+    ) {
+      RequestScope.checkpoint();
+      var delay = const Duration(seconds: 2);
+      try {
+        final data = check(
+          await getAuth(query('https://yun.123pan.cn$path', body), path, c),
+        ).obj('data');
+        failures = 0;
+        final info = data.obj('file_info');
+        if (info.integer('FileId') > 0) return completedFile(info);
+        delay = Duration(seconds: data.integer('duration', 2).clamp(1, 10));
+      } on HttpRequestFailure catch (error) {
+        RequestScope.checkpoint();
+        if (!error.retryable) rethrow;
+        failures++;
+        // A transient failure in the confirmation request must not trigger a
+        // fresh upload. Back off, then verify the file once if it persists.
+        if (failures >= 4) break;
+        delay = Duration(seconds: min(10, failures * 2));
+      }
+      await uploadWait(delay);
+    }
+    // An ID lookup in the destination is the last recovery path if the merge
+    // result stays unavailable. Only a matching ID, size and hash can succeed.
+    try {
+      final matches = (await list(
+        s,
+        parent,
+        c,
+      )).where((f) => f.id == body.str('fileId') && !f.isDirectory).toList();
+      if (matches.length == 1) {
+        final file = matches.single;
+        completedFile({
+          'FileId': file.id,
+          'Size': file.size,
+          'ParentFileId': file.parentId,
+          'Etag': file.hashValue ?? '',
+        });
+        return file;
+      }
+    } on HttpRequestFailure catch (error) {
+      RequestScope.checkpoint();
+      if (!error.retryable) rethrow;
+    }
+    throw const AppException('123 上传已提交，但暂未确认完成，请先刷新目标目录，避免重复上传');
   }
 
   @override

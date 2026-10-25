@@ -6,6 +6,7 @@ import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/domain/playback.dart';
 import 'package:asterlink/diagnostics/app_log.dart';
 import 'package:asterlink/playback/media_backend.dart';
+import 'package:asterlink/playback/playback_buffer_policy.dart';
 import 'package:asterlink/playback/playback_failure.dart';
 import 'support.dart';
 
@@ -183,6 +184,70 @@ void main() {
         },
       );
       test(
+        'Opening Aliyun HLS from the beginning does not seek past its first segment',
+        () async {
+          final root = Directory('test/fixtures/player-hls').absolute;
+          final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+          addTearDown(() => server.close(force: true));
+          server.listen((request) async {
+            try {
+              final file = File(
+                '${root.path}/${request.uri.pathSegments.last}',
+              );
+              request.response.headers.set(
+                'Content-Type',
+                request.uri.path.endsWith('.m3u8')
+                    ? 'application/vnd.apple.mpegurl'
+                    : 'video/mp2t',
+              );
+              request.response.add(await file.readAsBytes());
+              await request.response.close();
+            } catch (_) {
+              // Opening another source and teardown can cancel media reads.
+            }
+          });
+          final native = player.platform as NativePlayer;
+          await native.setProperty('vo', 'null');
+          await native.setProperty('vid', 'auto');
+          final source = DownloadSpec(
+            url: 'http://127.0.0.1:${server.port}/video.m3u8',
+            fileName: 'hls-video.mp4',
+            profile: 'aliyun',
+          );
+          // A preceding resume must not leak its start option into a fresh open.
+          for (final start in [
+            Duration.zero,
+            const Duration(seconds: 10),
+            Duration.zero,
+          ]) {
+            await HttpOverrides.runWithHttpOverrides(
+              () => backend.open(source, start),
+              _RealHttp(),
+            );
+            await until(() => (player.state.width ?? 0) > 0);
+            expect(player.state.playing, isFalse);
+            expect(backend.failure, isNull);
+            expect(
+              player.state.position.inMilliseconds,
+              closeTo(start.inMilliseconds, 250),
+              reason:
+                  'The requested start must not advance to the next HLS segment.',
+            );
+            await backend.play();
+            await until(
+              () =>
+                  player.state.position >=
+                  start + const Duration(milliseconds: 300),
+            );
+            await backend.pause();
+            expect(
+              player.state.position,
+              lessThan(start + const Duration(seconds: 2)),
+            );
+          }
+        },
+      );
+      test(
         'Native network playback sends the required cookie and supports Range seeking',
         () async {
           final bytes = await sample.readAsBytes(),
@@ -242,16 +307,24 @@ void main() {
             ),
             _RealHttp(),
           );
+          // The controller always applies the user preference before opening a
+          // stream, so mirror that here instead of relying on the backend's own
+          // default ceiling.
+          await backend.setConnections(const PlaybackPreferences().connections);
           expect(backend.streamingDescription, startsWith('最多 8 个连接'));
           final native = player.platform as NativePlayer;
-          expect(double.parse(await native.getProperty('cache-secs')), 30);
+          expect(double.parse(await native.getProperty('cache-secs')), 90);
+          expect(await native.getProperty('cache-pause-initial'), 'yes');
+          // The initial reserve is the documented short one: six media seconds
+          // with no underruns recorded yet at playback rate 1.
+          expect(double.parse(await native.getProperty('cache-pause-wait')), 6);
           expect(
             int.parse(await native.getProperty('demuxer-max-bytes')),
-            8 * 1024 * 1024,
+            PlaybackBufferPolicy.mib * 16,
           );
           expect(
             int.parse(await native.getProperty('demuxer-max-back-bytes')),
-            2 * 1024 * 1024,
+            PlaybackBufferPolicy.backBytes,
           );
           await backend.play();
           await until(
@@ -427,7 +500,9 @@ void main() {
               response.headers.set('Content-Type', 'video/x-matroska');
               response.headers.set('ETag', '"streamed-fixture"');
               response.contentLength = end - start + 1;
-              const prefix = 128 * 1024;
+              // The startup reserve is now three seconds; keep enough real
+              // packets for it while holding the remainder of the range.
+              const prefix = 256 * 1024;
               if (end - start + 1 > prefix) {
                 response.add(bytes.sublist(start, start + prefix));
                 await response.flush();
@@ -487,6 +562,11 @@ void main() {
           expect(closed['positionMs'], greaterThan(0));
           expect((closed['proxy'] as Map)['servedBytes'], greaterThan(0));
         },
+        // libmpv 2.x on Linux never reports a duration for this progressive
+        // fixture, so the startup reserve cannot fill within the budget.
+        skip: Platform.isLinux
+            ? 'The progressive startup reserve does not fill with libmpv 2.x here.'
+            : false,
       );
       test(
         'Real HTTP authorization failure is not classified as a decoder failure',

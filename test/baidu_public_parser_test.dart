@@ -4,6 +4,7 @@ import 'package:asterlink/data/cleanup_outbox.dart';
 import 'package:asterlink/data/cloud_repository.dart';
 import 'package:asterlink/data/http.dart';
 import 'package:asterlink/data/providers/baidu.dart';
+import 'package:asterlink/data/providers/baidu_public_parser.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/auth.dart';
 import 'package:asterlink/domain/baidu_share_route.dart';
@@ -27,7 +28,7 @@ void main() {
     http = FakeHttp(fixture.respond);
     connector = BaiduConnector(
       http,
-      store: Vault(StateStore.memory({'secrets': fixture.passwordSecrets})),
+      store: Vault(StateStore.memory(fixture.authenticatedState)),
     );
   });
 
@@ -35,6 +36,117 @@ void main() {
     fixture.link,
     account,
     route: BaiduShareRoute.publicParser,
+  );
+
+  test('video playback forwards the exact source dlink as an array', () async {
+    fixture.fileName = '示例视频.mp4';
+    fixture.dlink =
+        'https://d.pcs.baidu.com/file/video?sign=a%2Bb%2Fc&name=video%20one.mp4';
+    final session = await open();
+    final file = (await connector.list(session, '/', null)).first;
+    final spec = await connector.playback(session, file, null);
+    expect(http.calls, hasLength(2));
+    expect(http.calls.last.json['dlink'], [fixture.dlink]);
+    expect(http.calls.last.json['fs_id'], [int.parse(file.id)]);
+    expect(spec.url, fixture.urls.single);
+    expect(spec.url, isNot(fixture.dlink));
+    expect(spec.fileName, '示例视频.mp4');
+  });
+
+  test(
+    'files without a source dlink send the same empty array as the site',
+    () async {
+      final session = await open();
+      final file = (await connector.list(session, '/', null)).first;
+      await connector.download(session, file, null);
+      expect(http.calls, hasLength(2));
+      expect(http.calls.last.json['dlink'], isEmpty);
+      expect(http.calls.last.json.containsKey('dlink'), true);
+    },
+  );
+
+  test('source dlink is selected by file ID instead of list order', () async {
+    fixture.dlink = 'https://d.pcs.baidu.com/file/selected?sign=keep%2Bexact';
+    http = FakeHttp((request) {
+      final response = fixture.respond(request);
+      if (!request.uri.path.endsWith('/get_file_list')) return response;
+      final data = response.json;
+      (data.obj('data')['list'] as List).insert(0, {
+        ...fixture.file(),
+        'fs_id': '123',
+        'server_filename': '其他视频.mp4',
+        'dlink': 'https://d.pcs.baidu.com/file/other',
+      });
+      return jsonResponse(data);
+    });
+    connector = BaiduConnector(
+      http,
+      store: Vault(StateStore.memory(fixture.authenticatedState)),
+    );
+    final session = await open();
+    final file = (await connector.list(
+      session,
+      '/',
+      null,
+    )).singleWhere((file) => file.id == BaiduPublicFixture.fileId);
+    await connector.download(session, file, null);
+    expect(http.calls.last.json['dlink'], [fixture.dlink]);
+  });
+
+  test(
+    'restored nested downloads reload dlink without persisting the signed hint',
+    () async {
+      fixture.dlink = 'https://d.pcs.baidu.com/file/old?sign=old-secret';
+      final session = await open();
+      final file = (await connector.list(
+        session,
+        BaiduPublicFixture.folder,
+        null,
+      )).single;
+      final savedFile = file.toJson(), savedSession = session.toJson();
+      expect(encoded(savedFile), isNot(contains('old-secret')));
+      expect(encoded(savedSession), isNot(contains('old-secret')));
+      fixture.dlink = 'https://d.pcs.baidu.com/file/new?sign=fresh%2Bvalue';
+      final restarted = BaiduConnector(
+        http,
+        store: Vault(StateStore.memory(fixture.authenticatedState)),
+      );
+      await restarted.download(
+        BrowseSession.fromJson(savedSession),
+        CloudFile.fromJson(savedFile),
+        null,
+      );
+      expect(
+        http.calls[http.calls.length - 2].uri.path,
+        endsWith('/get_file_list'),
+      );
+      expect(
+        http.calls[http.calls.length - 2].json['dir'],
+        BaiduPublicFixture.folder,
+      );
+      expect(http.calls.last.json['dlink'], [fixture.dlink]);
+    },
+  );
+
+  test(
+    'expired source hints are refreshed before requesting a new link',
+    () async {
+      var now = DateTime.now();
+      final parser = BaiduPublicParser(
+        http,
+        store: Vault(StateStore.memory(fixture.authenticatedState)),
+        clock: () => now,
+      );
+      fixture.dlink = 'https://d.pcs.baidu.com/file/old';
+      final session = await parser.openShare(fixture.link);
+      final file = (await parser.list(session, '/')).first;
+      now = now.add(const Duration(minutes: 11));
+      fixture.dlink = 'https://d.pcs.baidu.com/file/new';
+      await parser.download(session, file);
+      expect(http.calls, hasLength(3));
+      expect(http.calls[1].uri.path, endsWith('/get_file_list'));
+      expect(http.calls.last.json['dlink'], [fixture.dlink]);
+    },
   );
 
   test(
@@ -195,7 +307,7 @@ void main() {
     () async {
       connector = BaiduConnector(
         FakeHttp((_) => const HttpResult(200, '<html>unavailable</html>')),
-        store: Vault(StateStore.memory({'secrets': fixture.passwordSecrets})),
+        store: Vault(StateStore.memory(fixture.authenticatedState)),
       );
       await expectLater(
         open(),
@@ -228,9 +340,7 @@ void main() {
     'default anonymous share downloads and expired links keep the public route',
     () async {
       final state = StateStore.memory(),
-          vault = Vault(
-            StateStore.memory({'secrets': fixture.passwordSecrets}),
-          );
+          vault = Vault(StateStore.memory(fixture.authenticatedState));
       final repository = CloudRepository(
         http,
         vault,

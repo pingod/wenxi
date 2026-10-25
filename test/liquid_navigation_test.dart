@@ -12,6 +12,7 @@ void main() {
     double scale = 1,
     bool reduceMotion = true,
     ValueNotifier<NavigationTransferStatus>? transfers,
+    ValueChanged<int>? onSelected,
   }) async {
     await tester.binding.setSurfaceSize(const Size(320, 640));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -31,7 +32,10 @@ void main() {
                 bottomNavigationBar: AppNavigation(
                   selectedIndex: selected,
                   transfers: transfers,
-                  onSelected: (index) => setState(() => selected = index),
+                  onSelected: (index) {
+                    onSelected?.call(index);
+                    setState(() => selected = index);
+                  },
                 ),
               ),
             ),
@@ -76,6 +80,77 @@ void main() {
     expect(find.text('page-3'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  for (final rtl in [false, true]) {
+    testWidgets('long press scrubs without lag and commits once (rtl: $rtl)', (
+      tester,
+    ) async {
+      final selections = <int>[];
+      await render(
+        tester,
+        rtl: rtl,
+        reduceMotion: false,
+        onSelected: selections.add,
+      );
+      final first = tester.getCenter(
+        find.byKey(const ValueKey('navigation-0')),
+      );
+      final last = tester.getCenter(find.byKey(const ValueKey('navigation-3')));
+      final target = tester.getCenter(
+        find.byKey(const ValueKey('navigation-2')),
+      );
+      final gesture = await tester.startGesture(first);
+      await tester.pump(kLongPressTimeout + const Duration(milliseconds: 1));
+      // Continuous movement, a reversal, and vertical drift all belong to the
+      // same long press. Selection changes only when the finger is released.
+      for (final point in [
+        Offset.lerp(first, last, .4)!,
+        last,
+        target.translate(0, -22),
+      ]) {
+        await gesture.moveTo(point);
+        await tester.pump(const Duration(milliseconds: 16));
+        expect(
+          tester.getCenter(find.byKey(const Key('navigation-lens'))).dx,
+          closeTo(point.dx, .5),
+        );
+        expect(find.text('page-0'), findsOneWidget);
+        expect(selections, isEmpty);
+      }
+      await gesture.up();
+      await tester.pumpAndSettle();
+      expect(find.text('page-2'), findsOneWidget);
+      expect(selections, [2]);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('cancelled long press rolls back and the next tap works', (
+    tester,
+  ) async {
+    await render(tester, reduceMotion: false);
+    final target = tester.getCenter(find.byKey(const ValueKey('navigation-3')));
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byKey(const ValueKey('navigation-0'))),
+    );
+    await tester.pump(kLongPressTimeout + const Duration(milliseconds: 1));
+    await gesture.moveTo(target);
+    await tester.pump();
+    await gesture.cancel();
+    await tester.pumpAndSettle();
+    expect(find.text('page-0'), findsOneWidget);
+    expect(
+      tester.getCenter(find.byKey(const Key('navigation-lens'))).dx,
+      closeTo(
+        tester.getCenter(find.byKey(const ValueKey('navigation-0'))).dx,
+        .5,
+      ),
+    );
+    await tester.tap(find.byKey(const ValueKey('navigation-1')));
+    await tester.pumpAndSettle();
+    expect(find.text('page-1'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
   testWidgets('animated selection settles on the requested tab', (
     tester,
   ) async {
@@ -88,6 +163,74 @@ void main() {
     expect(find.text('page-3'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  for (final rail in [false, true]) {
+    testWidgets(
+      'hidden resources preserve page IDs and navigation (rail: $rail)',
+      (tester) async {
+        await tester.binding.setSurfaceSize(Size(rail ? 1024 : 393, 864));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        var selected = 1;
+        var hidden = true;
+        late StateSetter update;
+        await tester.pumpWidget(
+          MaterialApp(
+            home: StatefulBuilder(
+              builder: (context, setState) {
+                update = setState;
+                Widget navigation() => AppNavigation(
+                  rail: rail,
+                  hideResources: hidden,
+                  selectedIndex: selected,
+                  onSelected: (index) => setState(() => selected = index),
+                );
+                return Scaffold(
+                  body: Row(
+                    children: [
+                      if (rail) navigation(),
+                      Expanded(child: Text('page-$selected')),
+                    ],
+                  ),
+                  bottomNavigationBar: rail ? null : navigation(),
+                );
+              },
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byKey(const ValueKey('navigation-1')), findsNothing);
+        await tester.tap(find.byKey(const ValueKey('navigation-0')));
+        await tester.pumpAndSettle();
+        expect(find.text('page-0'), findsOneWidget);
+        for (final index in [2, 3, 4]) {
+          await tester.tap(find.byKey(ValueKey('navigation-$index')));
+          await tester.pumpAndSettle();
+          expect(find.text('page-$index'), findsOneWidget);
+        }
+        if (!rail) {
+          final first = tester.getCenter(
+            find.byKey(const ValueKey('navigation-0')),
+          );
+          final downloads = tester.getCenter(
+            find.byKey(const ValueKey('navigation-3')),
+          );
+          await tester.dragFrom(first, downloads - first);
+          await tester.pumpAndSettle();
+          expect(find.text('page-3'), findsOneWidget);
+        }
+        final before = selected;
+        update(() => hidden = false);
+        await tester.pumpAndSettle();
+        expect(find.byKey(const ValueKey('navigation-1')), findsOneWidget);
+        expect(find.text('page-$before'), findsOneWidget);
+        update(() => hidden = true);
+        await tester.pumpAndSettle();
+        expect(find.byKey(const ValueKey('navigation-1')), findsNothing);
+        expect(find.text('page-$before'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
 
   testWidgets(
     'press previews the touched tab without switching; cancellation rolls back',

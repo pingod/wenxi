@@ -80,6 +80,27 @@ void main() {
       isNull,
     );
   });
+  test(
+    'Large-screen subtitle sizes persist without changing existing sizes',
+    () async {
+      for (final size in [22.0, 40.0, 80.0, 120.0]) {
+        final history = PlaybackStore(StateStore.memory());
+        await history.savePreferences(
+          history.preferences.copyWith(subtitleSize: size),
+        );
+        expect(PlaybackStore(history.store).preferences.subtitleSize, size);
+      }
+      expect(PlaybackPreferences.fromJson({}).subtitleSize, 22);
+      expect(
+        PlaybackPreferences.fromJson({'subtitleSize': 999}).subtitleSize,
+        120,
+      );
+      expect(
+        PlaybackPreferences.fromJson({'subtitleSize': double.nan}).subtitleSize,
+        22,
+      );
+    },
+  );
   test('Resume ignores completed tails and clamps invalid positions', () {
     PlaybackBookmark bookmark(int seconds, {bool done = false}) =>
         PlaybackBookmark(

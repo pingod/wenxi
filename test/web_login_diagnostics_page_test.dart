@@ -47,9 +47,11 @@ class _Cookies extends PlatformCookieManager {
   final values = <String, List<Cookie>>{};
   int deleteAllCalls = 0;
   bool failRead = false;
+  bool failClear = false;
   @override
   Future<bool> deleteAllCookies() async {
     deleteAllCalls++;
+    if (failClear) throw StateError('Fixture cookie cleanup failed');
     return true;
   }
 
@@ -275,6 +277,7 @@ void main() {
     platform.cookies.values.clear();
     platform.cookies.deleteAllCalls = 0;
     platform.cookies.failRead = false;
+    platform.cookies.failClear = false;
     directory = Directory.systemTemp.createTempSync('asterlink-web-log-test-');
     services = _Services(directory);
     log = DiagnosticLog.open(null);
@@ -344,6 +347,80 @@ void main() {
     });
     await tester.pumpAndSettle();
   }
+
+  testWidgets(
+    'Xunlei offers account-center login and captures only the returning cloud session',
+    (tester) async {
+      const cloud = CloudPlatform.xunlei;
+      var validations = 0;
+      services.login.webAuthenticators[cloud] = (credential) async {
+        validations++;
+        expect(credential.field('refreshToken'), refreshToken);
+        return LoginResult(credential, const CloudAccount('迅雷网页登录测试'));
+      };
+      await openLogin(tester, cloud);
+      final target = WebLoginTarget.targets[cloud]!;
+      final native = _StorageController(420, target, navigateDuringRead: false);
+      final (view, web) = attach(420, instance: native);
+      final entry = view.params.initialUrlRequest!.url!;
+      expect(entry.host, 'i.xunlei.com');
+      expect(entry.path, '/center/account/personal/login/');
+      expect(entry.queryParameters['redirect_url'], 'https://pan.xunlei.com/');
+
+      // The fallback also clears the account center when document-start
+      // injection is unavailable, without reading its separate token.
+      await detect(tester);
+      expect(native.clears, 1);
+      expect(native.reloads, 1);
+      for (final page in [
+        target.url,
+        'https://account.xiaomi.com/fe/service/login/password',
+        'https://open-api-auth.xunlei.com/platform',
+        '${target.url}&code=fixture-callback',
+      ]) {
+        native.url = WebUri(page);
+        expect(
+          await view.params.shouldOverrideUrlLoading!(
+            web,
+            NavigationAction(
+              request: URLRequest(url: native.url),
+              isForMainFrame: true,
+            ),
+          ),
+          NavigationActionPolicy.ALLOW,
+        );
+        await detect(tester);
+        expect(native.reads, 0);
+        expect(native.clears, 1);
+        expect(validations, 0);
+        expect(services.vault.credential(cloud), isNull);
+      }
+
+      // Session storage on the cloud origin is independent of the account
+      // center, so its previous account must be cleared once as well.
+      native
+        ..url = WebUri('https://pan.xunlei.com/')
+        ..prepared = false;
+      await detect(tester);
+      expect(native.clears, 2);
+      expect(native.reloads, 2);
+      expect(validations, 0);
+      await detect(tester);
+      expect(native.reads, 1);
+      expect(validations, 1);
+      expect(
+        services.vault.credential(cloud)?.field('refreshToken'),
+        refreshToken,
+      );
+      expect(find.byType(WebLoginPage), findsNothing);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+    variant: const TargetPlatformVariant({
+      TargetPlatform.android,
+      TargetPlatform.windows,
+    }),
+  );
 
   testWidgets(
     'Tianyi mobile login keeps the official viewport through navigation and popups',
@@ -417,6 +494,9 @@ void main() {
           WebLoginTarget.targets[cloud]!,
           navigateDuringRead: false,
         )..prepared = true;
+        if (cloud == CloudPlatform.xunlei) {
+          native.url = WebUri('https://pan.xunlei.com/');
+        }
         final (view, _) = attach(300, instance: native);
         expect(
           view.params.initialUserScripts!.any(
@@ -1162,6 +1242,69 @@ void main() {
     expect(platform.cookies.deleteAllCalls, 1);
     expect(platform.views.single.params.initialSettings!.incognito, isTrue);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('Cookie cleanup failure does not open a reused account session', (
+    tester,
+  ) async {
+    platform.cookies.failClear = true;
+    await render(tester);
+    expect(find.text('重试'), findsOneWidget);
+    expect(platform.views, isEmpty);
+    expect(
+      log.entries().any(
+        (entry) => entry.event == 'web_login.initialize_failed',
+      ),
+      isTrue,
+    );
+    platform.cookies.failClear = false;
+    await tester.tap(find.text('重试'));
+    await tester.pumpAndSettle();
+    expect(find.byType(InAppWebView), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('Baidu login records each phase without saving credentials', (
+    tester,
+  ) async {
+    const cloud = CloudPlatform.baidu;
+    services.login.webAuthenticators[cloud] = (credential) async =>
+        LoginResult(credential, const CloudAccount('百度测试'));
+    await openLogin(tester, cloud);
+    attach(501);
+    for (final url in WebLoginTarget.targets[cloud]!.cookieUrls(null)) {
+      platform.cookies.values[url] = [
+        Cookie(name: 'BDUSS', value: 'fixture-private-bduss' * 10),
+      ];
+    }
+    await detect(tester);
+    expect(find.byType(WebLoginPage), findsNothing);
+    final entries = log.entries();
+    final events = entries.map((entry) => entry.event).toList();
+    expect(
+      events,
+      containsAll([
+        'web_login.poll_started',
+        'web_login.browser_state_read_started',
+        'web_login.browser_state_read_completed',
+        'web_login.validation_started',
+        'web_login.validation_succeeded',
+        'web_login.cookie_cleanup_completed',
+        'web_login.close_requested',
+        'web_login.closed',
+      ]),
+    );
+    final read = entries.firstWhere(
+      (entry) => entry.event == 'web_login.browser_state_read_completed',
+    );
+    expect(read.data['fields'], containsPair('hasLoginSession', true));
+    expect(read.data['fields'], containsPair('poll', 1));
+    expect(
+      entries.map((entry) => entry.detail).join('\n'),
+      isNot(contains('private-bduss')),
+    );
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
   });
 
   testWidgets(

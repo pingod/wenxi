@@ -7,7 +7,7 @@
     "reason": "Decrypted and reviewed JVM compatibility vector: fixture/test-only credentials, fixture UUID and a repeated-character device ID. See test/fixtures/README.md."
   },
   "test/baidu_public_parser_test.dart": {
-    "sha256": "d3828d54d66f9044e7d3a5f8c2a688cf3a7332092eac4ae831f437745af712f6",
+    "sha256": "e620ab0460f469c977309234e082eb4e7aa9a29fa5fb0526b3c976a9e464f39a",
     "reason": "Synthetic user:password URL exercises rejection of credential-bearing parser download links; the fixture transport never accesses the network."
   },
   "test/remote_control_resilience_test.dart": {
@@ -19,7 +19,7 @@
     "reason": "Synthetic credential-bearing URLs on reserved example/test hosts exercise rejection of unsafe URLs."
   },
   "test/tianyi_test.dart": {
-    "sha256": "045b6c55bdb923e022b4de00a6b877f1058b6579fb13149f0b38b1fdf9977ad4",
+    "sha256": "5aab7e5cf90a53979d984b1a5cf4d0dea3256b7ecf2abad1468736db3f0fc8be",
     "reason": "Synthetic credential-bearing URLs on reserved example/test hosts exercise rejection of unsafe URLs."
   },
   "test/uc_tv_test.dart": {
@@ -29,5 +29,13 @@
   "tool/remote-control-editor.test.cjs": {
     "sha256": "847e339af1fbfcba585bcf7d9709f50cd73d1e1469fc1e4be99d48f5d1c39c56",
     "reason": "Synthetic credential-bearing URLs on reserved example/test hosts exercise rejection of unsafe URLs."
+  },
+  "native/gopeed/bind/asterlink/parser_http_test.go": {
+    "sha256": "d7ac69c43e997c2f1d5b9a0abe539cb654c7ef5d32cf5416be7f44d2bf06377e",
+    "reason": "Synthetic user:password URL on the reserved parser.example host exercises parser request validation; this case never sends a request."
+  },
+  "test/parser_hub_endpoint_test.dart": {
+    "sha256": "48e3309ea28ce1464bc826c20d486f125d61797f4366118e98db2e060faba5fb",
+    "reason": "Synthetic user:password URL on the reserved example.test host exercises rejection of credential-bearing parser hub addresses without network access."
   }
 }

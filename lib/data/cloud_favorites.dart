@@ -5,6 +5,19 @@ import '../domain/models.dart';
 import 'cloud_repository.dart';
 import 'state_store.dart';
 
+enum CloudFavoriteSort {
+  manual('手动排序'),
+  newest('最近收藏'),
+  recent('最近使用'),
+  name('名称排序');
+
+  const CloudFavoriteSort(this.label);
+  final String label;
+
+  static CloudFavoriteSort fromName(String value) =>
+      values.where((sort) => sort.name == value).firstOrNull ?? manual;
+}
+
 class CloudFavorite {
   const CloudFavorite({
     required this.id,
@@ -15,13 +28,17 @@ class CloudFavorite {
     required this.createdAt,
     this.isShareLink = false,
     this.customName = '',
+    this.pinned = false,
+    this.sortOrder,
+    this.lastOpenedAt = 0,
   });
   final String id, directoryId;
   final BrowseSession session;
   final CloudFile file;
   final List<(String, String)> trail;
-  final int createdAt;
-  final bool isShareLink;
+  final int createdAt, lastOpenedAt;
+  final int? sortOrder;
+  final bool isShareLink, pinned;
   final String customName;
   String get name => customName.ifEmpty(file.name);
   String get location => isShareLink
@@ -57,6 +74,9 @@ class CloudFavorite {
     'createdAt': createdAt,
     'isShareLink': isShareLink,
     'customName': customName,
+    'pinned': pinned,
+    if (sortOrder != null) 'sortOrder': sortOrder,
+    'lastOpenedAt': lastOpenedAt,
   };
   factory CloudFavorite.fromJson(Json j) => CloudFavorite(
     id: j.str('id'),
@@ -67,6 +87,11 @@ class CloudFavorite {
     createdAt: j.integer('createdAt'),
     isShareLink: j.boolean('isShareLink'),
     customName: j.str('customName').trim(),
+    pinned: j.boolean('pinned'),
+    sortOrder: j['sortOrder'] != null && j.integer('sortOrder', -1) >= 0
+        ? j.integer('sortOrder')
+        : null,
+    lastOpenedAt: j.integer('lastOpenedAt') > 0 ? j.integer('lastOpenedAt') : 0,
   );
 }
 
@@ -74,10 +99,99 @@ class CloudFavorites {
   CloudFavorites(this.store, this.cloud);
   final StateStore store;
   final CloudRepository cloud;
-  List<CloudFavorite> get all => [
-    for (final j in store.data.list('cloudFavorites'))
-      CloudFavorite.fromJson(j),
-  ]..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+  CloudFavoriteSort get sort =>
+      CloudFavoriteSort.fromName(store.data.str('cloudFavoriteSort'));
+
+  List<CloudFavorite> get all => _ordered(store.data, sort);
+
+  static List<CloudFavorite> _ordered(Json data, CloudFavoriteSort sort) {
+    final favorites = data
+        .list('cloudFavorites')
+        .map(CloudFavorite.fromJson)
+        .toList();
+    final positions = {
+      for (final (index, favorite) in favorites.indexed) favorite.id: index,
+    };
+    int manual(CloudFavorite a, CloudFavorite b) {
+      final order = (a.sortOrder ?? 0x7fffffffffffffff).compareTo(
+        b.sortOrder ?? 0x7fffffffffffffff,
+      );
+      if (order != 0) return order;
+      final created = b.createdAt.compareTo(a.createdAt);
+      return created != 0
+          ? created
+          : positions[a.id]!.compareTo(positions[b.id]!);
+    }
+
+    return favorites..sort((a, b) {
+      if (a.pinned != b.pinned) return a.pinned ? -1 : 1;
+      final compared = switch (sort) {
+        CloudFavoriteSort.manual => manual(a, b),
+        CloudFavoriteSort.newest => b.createdAt.compareTo(a.createdAt),
+        CloudFavoriteSort.recent => b.lastOpenedAt.compareTo(a.lastOpenedAt),
+        CloudFavoriteSort.name => a.name.toLowerCase().compareTo(
+          b.name.toLowerCase(),
+        ),
+      };
+      return compared != 0 ? compared : manual(a, b);
+    });
+  }
+
+  static void _saveOrder(Json draft, List<String> ids) {
+    final positions = {for (final (index, id) in ids.indexed) id: index};
+    draft['cloudFavorites'] = [
+      for (final favorite in draft.list('cloudFavorites'))
+        {...favorite, 'sortOrder': positions[favorite.str('id')]!},
+    ];
+  }
+
+  Future<void> setSort(CloudFavoriteSort value) =>
+      store.put('cloudFavoriteSort', value.name);
+
+  /// Replace only the visible slots, keeping hidden accounts and search results
+  /// in place. A drag preserves the current display as the new manual order.
+  Future<void> reorder(List<String> visibleIds) {
+    final requested = List<String>.of(visibleIds);
+    require(requested.toSet().length == requested.length, '收藏排序不能包含重复项');
+    return store.change((draft) {
+      final current = _ordered(
+        draft,
+        CloudFavoriteSort.fromName(draft.str('cloudFavoriteSort')),
+      );
+      final byId = {for (final favorite in current) favorite.id: favorite};
+      final requestedSet = requested.toSet();
+      final pinned = requested.where((id) => byId[id]?.pinned == true).iterator;
+      final regular = requested
+          .where((id) => byId[id]?.pinned == false)
+          .iterator;
+      final ids = [
+        for (final favorite in current)
+          if (!requestedSet.contains(favorite.id))
+            favorite.id
+          else if ((favorite.pinned ? pinned : regular).moveNext())
+            (favorite.pinned ? pinned : regular).current,
+      ];
+      _saveOrder(draft, ids);
+      draft['cloudFavoriteSort'] = CloudFavoriteSort.manual.name;
+    });
+  }
+
+  Future<void> setPinned(String id, bool pinned) => store.change((draft) {
+    final favorites = draft.list('cloudFavorites');
+    final index = favorites.indexWhere((favorite) => favorite.str('id') == id);
+    require(index >= 0, '该收藏已移除，请刷新后重试');
+    if (favorites[index].boolean('pinned') == pinned) return;
+    final ordered = _ordered(
+      draft,
+      CloudFavoriteSort.manual,
+    ).where((favorite) => favorite.id != id).toList();
+    favorites[index] = {...favorites[index], 'pinned': pinned};
+    draft['cloudFavorites'] = favorites;
+    final ids = ordered.map((favorite) => favorite.id).toList();
+    final regular = ordered.indexWhere((favorite) => !favorite.pinned);
+    ids.insert(pinned ? 0 : (regular < 0 ? ids.length : regular), id);
+    _saveOrder(draft, ids);
+  });
 
   String key(
     BrowseSession session,
@@ -175,6 +289,14 @@ class CloudFavorites {
           isShareLink: isShareLink,
         ).toJson(),
       ];
+      final ordered = _ordered(
+        draft,
+        CloudFavoriteSort.manual,
+      ).where((favorite) => favorite.id != id).toList();
+      final ids = ordered.map((favorite) => favorite.id).toList();
+      final regular = ordered.indexWhere((favorite) => !favorite.pinned);
+      ids.insert(regular < 0 ? ids.length : regular, id);
+      _saveOrder(draft, ids);
       return true;
     });
   }
@@ -234,6 +356,22 @@ class CloudFavorites {
         '收藏的文件已移动、删除或分享已失效',
       );
     }
+    await store.change((draft) {
+      final favorites = draft.list('cloudFavorites');
+      final index = favorites.indexWhere(
+        (item) => item.str('id') == favorite.id,
+      );
+      // A favorite or its account may have been removed while opening it.
+      if (index < 0) return;
+      var openedAt = DateTime.now().millisecondsSinceEpoch;
+      for (final item in favorites) {
+        if (item.integer('lastOpenedAt') >= openedAt) {
+          openedAt = item.integer('lastOpenedAt') + 1;
+        }
+      }
+      favorites[index] = {...favorites[index], 'lastOpenedAt': openedAt};
+      draft['cloudFavorites'] = favorites;
+    });
     return (
       session: session,
       trail: trail,

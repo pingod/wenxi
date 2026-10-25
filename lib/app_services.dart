@@ -13,12 +13,17 @@ import 'data/backgrounds.dart';
 import 'domain/appearance.dart';
 import 'domain/background.dart';
 import 'data/cleanup_outbox.dart';
+import 'data/resource_link_checks.dart';
+import 'data/resource_link_probe.dart';
 import 'data/cloud_repository.dart';
 import 'data/cloud_favorites.dart';
+import 'data/cloud_command_history.dart';
 import 'data/http.dart';
 import 'data/remote_control_http.dart';
 import 'data/remote_control_service.dart';
 import 'data/announcement_service.dart';
+import 'data/parser_rules/hub.dart';
+import 'data/parser_rules/native_http.dart';
 import 'data/app_update_service.dart';
 import 'data/github_update_service.dart';
 import 'data/providers/uc.dart';
@@ -36,6 +41,7 @@ import 'domain/auth.dart';
 import 'domain/models.dart';
 import 'domain/settings.dart';
 import 'download/download_manager.dart';
+import 'download/mobile_data_download_guard.dart';
 import 'download/transfer_activity.dart';
 import 'download/navigation_transfers.dart';
 import 'upload/upload_manager.dart';
@@ -45,6 +51,7 @@ import 'download/download_shutdown.dart';
 import 'download/download_overlay.dart';
 import 'download/transfer_http.dart';
 import 'platform/file_access.dart';
+import 'platform/download_network.dart';
 import 'platform/app_update_installer.dart';
 import 'platform/clipboard_links.dart';
 import 'platform/external_open.dart';
@@ -53,6 +60,7 @@ import 'platform/desktop_actions.dart';
 import 'platform/desktop_platform.dart';
 import 'platform/linux_actions.dart';
 import 'platform/windows_actions.dart';
+import 'platform/windows_webview.dart';
 import 'data/providers/ilanzou.dart';
 import 'data/providers/lanzou.dart';
 import 'data/providers/ctfile.dart';
@@ -61,6 +69,9 @@ import 'data/providers/pikpak.dart';
 import 'data/providers/weiyun.dart';
 import 'data/providers/wopan.dart';
 import 'data/providers/pan115.dart';
+import 'data/sources/service.dart';
+import 'data/resource_search.dart';
+import 'data/resource_search_api.dart';
 
 class AppServices extends ChangeNotifier {
   AppServices({
@@ -71,6 +82,7 @@ class AppServices extends ChangeNotifier {
     required this.files,
     JsonHttp? http,
     TransferHttp? transferHttp,
+    Future<DownloadNetwork> Function()? downloadNetworkReader,
     this.platformFeatures = true,
     this.clock = DateTime.now,
     Future<String?> Function()? clipboardReader,
@@ -83,6 +95,9 @@ class AppServices extends ChangeNotifier {
     DesktopActions? desktopActions,
     RandomAccessFile? instanceLock,
     LanService? lanService,
+    ParserRuleHub? parserRuleHub,
+    RemoteSources? remoteSources,
+    ResourceSearch? resourceSearch,
   }) : _instanceLock = instanceLock {
     vault = Vault(store);
     announcements = AnnouncementService(
@@ -115,13 +130,50 @@ class AppServices extends ChangeNotifier {
       read: clipboardReader ?? (platformFeatures ? null : () async => null),
     );
     cleanups = CleanupOutbox(store, http ?? DioJsonHttp());
+    this.resourceSearch =
+        resourceSearch ??
+        ResourceSearch(
+          store: store,
+          api: HttpResourceSearchApi(cleanups.http, store: store),
+          linkChecks: ResourceLinkChecks(
+            LocalResourceLinkCheckApi(clock: clock),
+            clock: clock,
+          ),
+          clock: clock,
+        );
+    parserRules =
+        parserRuleHub ??
+        ParserRuleHub(
+          store: vault,
+          directory: dataDirectory,
+          url: platformFeatures ? ParserRuleHub.buildUrl : '',
+          passwordDocumentHttp: platformFeatures
+              ? NativeParserRuleHttp(transport)
+              : null,
+          clock: clock,
+        );
+    parserRules.updateEndpoint(control.config.parserHubUrl);
+    sources =
+        remoteSources ??
+        RemoteSources(
+          hub: parserRules,
+          directory: dataDirectory,
+          enabled: platformFeatures,
+          clock: clock,
+          retainedArchives: () => downloads.tasks
+              .map((task) => task.spec.source?.str('catalogId') ?? '')
+              .where((id) => id.isNotEmpty)
+              .toSet(),
+        );
     cloud = CloudRepository(
       cleanups.http,
       vault,
       cleanups,
       clock: clock,
+      parserHub: parserRules,
       checkAccess: control.checkCloud,
       preparationRetries: () => settings.retries,
+      githubAcceleration: () => settings.githubAcceleration,
       directShareDownloadEnabled: (platform, authenticated) {
         final current = settings;
         return switch ((platform, authenticated)) {
@@ -245,15 +297,29 @@ class AppServices extends ChangeNotifier {
       cloud: cloud,
       foreground: backgroundTransfers ? transferActivity.sync : null,
     );
+    mobileDataDownloads = MobileDataDownloadGuard(
+      supported:
+          downloadNetworkReader != null ||
+          platformFeatures && Platform.isAndroid,
+      readNetwork: downloadNetworkReader ?? readDownloadNetwork,
+      reminderEnabled: () => settings.warnOnMobileDataDownload,
+      disableReminder: () =>
+          updateSettings({'warnOnMobileDataDownload': false}),
+    );
     downloads = DownloadManager(
       store: store,
       engine: engine,
       files: files,
       cleanups: cleanups,
       http: transfer,
-      refreshSource: cloud.refresh,
+      refreshSource: (spec) => RemoteSources.owns(spec)
+          ? sources.refreshDownload(spec)
+          : cloud.refresh(spec),
       checkNewCloudTask: control.checkCloud,
       onGuestDownload: requestGuestDownloadNotice,
+      confirmDownload: mobileDataDownloads.supported
+          ? mobileDataDownloads.confirm
+          : null,
       foreground: backgroundTransfers ? (_) => transferActivity.sync() : null,
     );
     navigationTransfers = NavigationTransfers(
@@ -290,6 +356,7 @@ class AppServices extends ChangeNotifier {
           uploads.activeCount > 0 ||
           lan.activeConnections > 0,
       shutdown: desktop.shutdown,
+      hibernate: desktop.hibernate,
       flush: store.flush,
     );
     downloadOverlay = DownloadOverlay(
@@ -327,11 +394,13 @@ class AppServices extends ChangeNotifier {
   late final CleanupOutbox cleanups;
   late final CloudRepository cloud;
   late final CloudFavorites favorites;
+  late final commandHistory = CloudCommandHistory(store);
   late final AccountLoginService login;
   late final BackupRepository backup;
   late final BackgroundRepository backgrounds;
   late final GopeedEngine engine;
   late final DownloadManager downloads;
+  late final MobileDataDownloadGuard mobileDataDownloads;
   late final UploadManager uploads;
   late final LanService lan;
   late final TransferActivity transferActivity;
@@ -349,8 +418,13 @@ class AppServices extends ChangeNotifier {
   final accountNeedsLogin = <CloudPlatform>{};
   final sharedText = ValueNotifier<String?>(null);
   final downloadNavigation = ValueNotifier<int>(0);
+  final resourceNavigation = ValueNotifier<int>(0);
   final lanNavigation = ValueNotifier<int>(0);
   final guestDownloadNotice = ValueNotifier<bool>(false);
+
+  late final ParserRuleHub parserRules;
+  late final RemoteSources sources;
+  late final ResourceSearch resourceSearch;
 
   void refreshPublicDownloadPassword() {
     if (!platformFeatures ||
@@ -358,7 +432,8 @@ class AppServices extends ChangeNotifier {
         !control.cloudEnabled(CloudPlatform.baidu)) {
       return;
     }
-    unawaited(cloud.publicPasswords.prefetch());
+    parserRules.start();
+    unawaited(parserRules.refresh());
   }
 
   void requestGuestDownloadNotice() {
@@ -381,6 +456,10 @@ class AppServices extends ChangeNotifier {
     }
   }
 
+  void requestResourceSearch() {
+    if (!_closed) resourceNavigation.value++;
+  }
+
   void requestLanPage() {
     if (!_closed) lanNavigation.value++;
   }
@@ -396,8 +475,15 @@ class AppServices extends ChangeNotifier {
   );
   String? migrationError;
   bool _closed = false;
-  WebViewEnvironment? _webEnvironment;
-  Future<WebViewEnvironment?>? _webStarting;
+  late final _webHost = WindowsWebViewHost(
+    primaryFolder: p.join(dataDirectory.path, 'webview'),
+    recoveryFolder: p.join(
+      (Platform.environment['LOCALAPPDATA'] ?? '').ifEmpty(dataDirectory.path),
+      'WenxiAssistant',
+      'WebView2',
+      'login-${DiagnosticLog.reference(p.normalize(dataDirectory.absolute.path))}',
+    ),
+  );
   AppSettings get settings => AppSettings.fromJson(store.data.obj('settings'));
 
   static DesktopActions _defaultDesktopActions({required bool supported}) =>
@@ -486,6 +572,7 @@ class AppServices extends ChangeNotifier {
   }
 
   Future<void> initialize() async {
+    sources.start();
     if (platformFeatures && Platform.isWindows) {
       windowsExternalOpenChannel.setMethodCallHandler((call) async {
         if (call.method == 'externalOpenAvailable') {
@@ -704,6 +791,7 @@ class AppServices extends ChangeNotifier {
 
   void _controlChanged() {
     if (_closed) return;
+    parserRules.updateEndpoint(control.config.parserHubUrl);
     for (final platform in CloudPlatform.values) {
       if (control.cloudEnabled(platform)) {
         if (_enabledClouds.add(platform)) unawaited(refreshAccount(platform));
@@ -732,6 +820,7 @@ class AppServices extends ChangeNotifier {
     required AppPalette palette,
     required GlassStyle glassStyle,
     BackgroundSettings? background,
+    bool? hideResourceNavigation,
   }) async {
     await store.change((draft) {
       require(['System', 'Light', 'Dark'].contains(mode), '外观模式无效');
@@ -740,6 +829,7 @@ class AppServices extends ChangeNotifier {
         'themePalette': palette.name,
         'glassStyle': glassStyle.name,
         if (background != null) 'background': background.toJson(),
+        'hideResourceNavigation': ?hideResourceNavigation,
       }).toJson();
     });
     if (background != null) await backgrounds.collectUnused();
@@ -791,9 +881,11 @@ class AppServices extends ChangeNotifier {
     ParsedLink link, {
     String? title,
     int? itemCount,
+    String? commandText,
     bool Function()? canCommit,
   }) => store.change((draft) {
     if (canCommit?.call() == false) return;
+    final createdAt = clock().millisecondsSinceEpoch;
     final existing = draft.list('history');
     draft['history'] = [
       {
@@ -803,36 +895,33 @@ class AppServices extends ChangeNotifier {
         'normalizedUrl': link.url,
         'fileName': title,
         'link': link.toJson(),
-        'createdAt': DateTime.now().millisecondsSinceEpoch,
+        'createdAt': createdAt,
         'status': 'parsed',
         'itemCount': itemCount,
       },
       ...existing.where((e) => e.str('normalizedUrl') != link.url).take(299),
     ];
+    if (commandText != null) {
+      CloudCommandHistory.record(
+        draft,
+        link,
+        commandText,
+        title: title,
+        itemCount: itemCount,
+        createdAt: createdAt,
+      );
+    }
   });
   Future<WebViewEnvironment?> webEnvironment() async {
     // Only the Windows WebView2 build needs an explicitly shared environment
     // (shared cookie jar plus popup windows). Android uses the default
     // platform view, and Linux has no embedded browser yet.
     if (!Platform.isWindows) return null;
-    if (_webEnvironment != null) return _webEnvironment;
-    return _webStarting ??= (() async {
-      try {
-        require(
-          (await WebViewEnvironment.getAvailableVersion())?.isNotEmpty == true,
-          '未找到 Microsoft Edge WebView2 Runtime，请安装后重新打开应用，或使用手动登录',
-        );
-        _webEnvironment = await WebViewEnvironment.create(
-          settings: WebViewEnvironmentSettings(
-            userDataFolder: p.join(dataDirectory.path, 'webview'),
-          ),
-        );
-        return _webEnvironment;
-      } catch (_) {
-        _webStarting = null;
-        rethrow;
-      }
-    })();
+    return _webHost.get();
+  }
+
+  void invalidateWebEnvironment(WebViewEnvironment? environment) {
+    if (Platform.isWindows) _webHost.invalidate(environment);
   }
 
   Json diagnostics() => {
@@ -844,6 +933,8 @@ class AppServices extends ChangeNotifier {
     'legacyImported': store.data.boolean('legacyImported'),
     'settings': settings.toJson()..remove('destination'),
     'remoteControl': control.diagnostics(),
+    'parserRules': parserRules.diagnostics(),
+    'sources': sources.diagnostics(),
     'accounts': {
       for (final platform in CloudPlatform.values)
         platform.key: LoginCredentials.stored(
@@ -871,7 +962,11 @@ class AppServices extends ChangeNotifier {
   };
   Future<void> close() async {
     if (_closed) return;
+    resourceSearch.dispose();
+    mobileDataDownloads.close();
     await cloud.publicPasswords.close();
+    await sources.close();
+    await parserRules.close();
     downloadShutdown.close();
     await downloadOverlay.close();
     control.removeListener(_controlChanged);
@@ -891,11 +986,13 @@ class AppServices extends ChangeNotifier {
       windowsExternalOpenChannel.setMethodCallHandler(null);
     }
     downloadNavigation.dispose();
+    resourceNavigation.dispose();
     lanNavigation.dispose();
     transferTab.dispose();
     guestDownloadNotice.dispose();
+    mobileDataDownloads.dispose();
     store.removeListener(_changed);
-    await _webEnvironment?.dispose();
+    await _webHost.close();
     await _instanceLock?.close();
   }
 }

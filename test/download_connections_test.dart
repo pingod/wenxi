@@ -73,7 +73,7 @@ void main() {
           await root.delete(recursive: true);
         });
       });
-      await tester.pumpWidget(AsterLinkApp(services, initialTab: 2));
+      await tester.pumpWidget(AsterLinkApp(services, initialTab: 3));
       await tester.pumpAndSettle();
       final badge = find.byKey(ValueKey('download-connections-$id'));
       expect(tester.widget<Text>(badge).data, '7 连接');

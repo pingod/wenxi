@@ -48,7 +48,7 @@ void main() {
         theme: appTheme(Brightness.light),
         home: MainShell(
           services,
-          initialTab: 2,
+          initialTab: 3,
           externalPlayerBuilder: (request) => _VideoStub(request, events),
         ),
       ),
@@ -208,6 +208,44 @@ void main() {
     expect(parse.current!.passcode, '1234');
     expect(find.text('新建下载'), findsNothing);
   });
+
+  scenario(
+    'a cold protocol open reaches the parser and warm opens replace it',
+    (tester) async {
+      await deliver({
+        'id': 'cold-resolve',
+        'launchUri': Uri(
+          scheme: 'wenxi',
+          host: 'resolve',
+          queryParameters: {
+            'url': 'https://pan.quark.cn/s/abc123',
+            'pwd': '1234',
+          },
+        ).toString(),
+      });
+      await render(tester);
+      final parse = tester.state<ParsePageState>(find.byType(ParsePage));
+      expect(parse.current!.url, 'https://pan.quark.cn/s/abc123');
+      expect(parse.code.text, '1234');
+      expect(find.text('新建下载'), findsNothing);
+      await deliver({
+        'id': 'warm-resolve',
+        'launchUri': Uri(
+          scheme: 'wenxi',
+          host: 'resolve',
+          queryParameters: {
+            'url': 'https://pan.baidu.com/s/1newShare',
+            'pwd': 'a1B2',
+          },
+        ).toString(),
+      });
+      await tester.pumpAndSettle();
+      expect(parse.current!.url, 'https://pan.baidu.com/s/1newShare');
+      expect(parse.code.text, 'a1B2');
+      expect(services.downloads.tasks, isEmpty);
+      expect(find.text('新建下载'), findsNothing);
+    },
+  );
 
   scenario(
     'a new external video disposes the old page and back returns to the app',

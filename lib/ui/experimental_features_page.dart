@@ -65,7 +65,7 @@ class ExperimentalFeaturesPage extends StatelessWidget {
               setting: guestSetting,
               title: '游客下载',
               description: guestDefaultOn
-                  ? '$guestDescription默认开启，已登录时也优先尝试游客下载，接口不可用时再使用账号下载。关闭后，已登录账号使用常规下载；未登录时仍自动尝试游客下载。'
+                  ? '$guestDescription已登录时优先使用账号解析下载。此开关默认开启，账号下载失败后允许尝试游客下载；关闭后仅使用账号下载。未登录时仍自动使用游客下载。'
                   : '$guestDescription未登录对应网盘时自动使用；登录后开启此项才会优先尝试游客下载。',
               value: guestEnabled,
             ),
@@ -82,8 +82,8 @@ class ExperimentalFeaturesPage extends StatelessWidget {
                 setting: 'quarkAuthenticatedDirectDownload',
                 title: '突破文件大小限制',
                 description:
-                    '需要登录对应网盘账号。空间不足、无法转存大文件时，可开启此功能尝试免转存下载。'
-                    '正常情况下不建议开启。',
+                    '需要登录夸克账号。默认正常转存下载；检测到网盘空间不足时，自动为当前下载尝试免转存，无需手动开启。'
+                    '开启后优先使用免转存下载，正常情况下建议保持关闭。',
                 value: authenticatedEnabled,
               ),
             ],

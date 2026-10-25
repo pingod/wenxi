@@ -110,6 +110,31 @@ function Get-AsterLinkDartDefines {
         "--dart-define-from-file=$baiduConfig"
     }
     $commandConfig = Join-Path (Split-Path -Parent $PSScriptRoot) '.local/cloud-command.defines.json'
+    $parserConfig = Join-Path (Split-Path -Parent $PSScriptRoot) '.local/parser-hub.defines.json'
+    if (Test-Path -LiteralPath $parserConfig -PathType Leaf) {
+        $parserHub = Get-Content -Raw -Encoding utf8 -LiteralPath $parserConfig | ConvertFrom-Json
+        $parserUri = $null
+        $parserHubUrl = [string]$parserHub.ASTERLINK_PARSER_HUB_URL
+        if ($parserHubUrl -and (
+            -not [Uri]::TryCreate($parserHubUrl, [UriKind]::Absolute, [ref]$parserUri) -or
+            $parserUri.Scheme -notin @('http', 'https') -or -not $parserUri.Host -or
+            $parserUri.Port -lt 1 -or $parserUri.UserInfo -or $parserUri.Query -or $parserUri.Fragment -or
+            $parserHubUrl.Length -gt 2048 -or $parserHubUrl -match '[\s\x00-\x1f\x7f\\]')) {
+            throw 'Invalid optional parser hub fallback URL.'
+        }
+        if ($parserHub.ASTERLINK_PARSER_HUB_KEY -notmatch '^wxp_[a-f0-9]{48}$' -or
+            $parserHub.ASTERLINK_PARSER_HUB_PUBLIC_KEY -notmatch '^[A-Za-z0-9+/=]{400,12000}$') {
+            throw 'Invalid private parser hub build configuration.'
+        }
+        if ($parserHub.PSObject.Properties.Name -contains 'ASTERLINK_PARSER_RULES_BACKUP_URL' -and $parserHub.ASTERLINK_PARSER_RULES_BACKUP_URL) {
+            $parserBackupUri = $null
+            if (-not [Uri]::TryCreate($parserHub.ASTERLINK_PARSER_RULES_BACKUP_URL, [UriKind]::Absolute, [ref]$parserBackupUri) -or
+                $parserBackupUri.Scheme -ne 'https' -or -not $parserBackupUri.Host -or $parserBackupUri.UserInfo -or $parserBackupUri.Fragment) {
+                throw 'Invalid parser rules backup URL; use a public HTTPS JSON address.'
+            }
+        }
+        "--dart-define-from-file=$parserConfig"
+    }
     if (Test-Path -LiteralPath $commandConfig -PathType Leaf) {
         $commandKeys = Get-Content -Raw -Encoding utf8 -LiteralPath $commandConfig | ConvertFrom-Json
         foreach ($entry in @(@('ASTERLINK_QUARK_COMMAND_KEY', 88), @('ASTERLINK_UC_COMMAND_KEY', 24))) {

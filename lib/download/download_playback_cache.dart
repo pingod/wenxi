@@ -2,7 +2,7 @@ import 'dart:typed_data';
 import '../domain/downloads.dart';
 import '../domain/models.dart';
 
-/// A playback reader owns a temporary hold on the task's private cache.
+/// A playback reader holds the task's downloaded bytes and any open target.
 /// Releasing it never pauses or deletes an unfinished download.
 class DownloadPlaybackCache {
   DownloadPlaybackCache({

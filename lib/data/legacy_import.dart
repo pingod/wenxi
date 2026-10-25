@@ -1,4 +1,5 @@
 import '../core/json.dart';
+import '../domain/download_retries.dart';
 import '../domain/downloads.dart';
 import '../domain/models.dart';
 import 'cleanup_outbox.dart';
@@ -51,7 +52,9 @@ class LegacyImporter {
           total: old.integer('totalBytes'),
           downloaded: old.integer('downloadedBytes'),
           connections: old.integer('threadCount', 64).clamp(1, 512),
-          retries: old.integer('retryLimit', 3).clamp(0, 3),
+          retries: old
+              .integer('retryLimit', defaultDownloadRetries)
+              .clamp(0, maxDownloadRetries),
           speedLimit: old.integer('speedLimitBytes'),
           destination: old['destinationTreeUri'] as String?,
           savedPath: old['savedUri'] as String?,

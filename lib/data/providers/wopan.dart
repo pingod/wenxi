@@ -17,25 +17,63 @@ class WopanProtocol {
   static const origin = 'https://panservice.mail.wo.cn';
   static const clientId = '1001000021';
   static const clientSecret = 'XFmi9GS2hzk98jGX';
+  static const webClientId = '1001000035';
+  static const webClientSecret = 'iELf0UL07o6I8eRK';
   static const iv = 'wNSOYIB1k1DjY5lA';
 
-  static String _key(String channel, String access) {
-    if (channel == 'api-user') return clientSecret;
+  static String clientFor(Credential credential) =>
+      credential.field('clientId') == webClientId ? webClientId : clientId;
+
+  static String secretFor(String client) =>
+      client == webClientId ? webClientSecret : clientSecret;
+
+  static Map<String, String> webHeaders(
+    int milliseconds, {
+    String access = '',
+  }) => {
+    'User-Agent': WebLoginTarget.desktopUserAgent,
+    'Origin': origin,
+    'Referer': '$origin/h5/wocloud_ai/login',
+    'X-PATH': '/h5/wocloud_ai/login',
+    'X-CM-SERVICE': 'PHONE',
+    'Client-Id': webClientId,
+    'X-YP-Client-Id': webClientId,
+    'clientId': webClientId,
+    'source-type': 'woapi',
+    'X-YP-Open-Version': 'v1.0',
+    'requestTime': '$milliseconds',
+    if (access.isNotEmpty) ...{
+      'Accesstoken': access,
+      'X-YP-Access-Token': access,
+    },
+  };
+
+  static String _key(String channel, String access, String client) {
+    if (channel == 'api-user') return secretFor(client);
     require(access.length >= 16, '联通云盘访问令牌无效，请重新登录');
     return access.substring(0, 16);
   }
 
-  static String encrypt(Json data, String channel, String access) =>
-      base64Encode(
-        CryptoBox.aesCbc(
-          true,
-          utf8.encode(jsonEncode(data)),
-          utf8.encode(_key(channel, access)),
-          utf8.encode(iv),
-        ),
-      );
+  static String encrypt(
+    Json data,
+    String channel,
+    String access, {
+    String client = clientId,
+  }) => base64Encode(
+    CryptoBox.aesCbc(
+      true,
+      utf8.encode(jsonEncode(data)),
+      utf8.encode(_key(channel, access, client)),
+      utf8.encode(iv),
+    ),
+  );
 
-  static Object decodeValue(Object? data, String channel, String access) {
+  static Object decodeValue(
+    Object? data,
+    String channel,
+    String access, {
+    String client = clientId,
+  }) {
     if (data is Map || data is List) return data!;
     require(data is String && data.isNotEmpty, '联通云盘返回的数据为空');
     try {
@@ -43,7 +81,7 @@ class WopanProtocol {
         CryptoBox.aesCbc(
           false,
           base64Decode(data as String),
-          utf8.encode(_key(channel, access)),
+          utf8.encode(_key(channel, access, client)),
           utf8.encode(iv),
         ),
       );
@@ -55,8 +93,13 @@ class WopanProtocol {
     }
   }
 
-  static Json decode(Object? data, String channel, String access) {
-    final value = decodeValue(data, channel, access);
+  static Json decode(
+    Object? data,
+    String channel,
+    String access, {
+    String client = clientId,
+  }) {
+    final value = decodeValue(data, channel, access, client: client);
     require(value is Map, '联通云盘响应格式错误');
     return asJson(value);
   }
@@ -282,6 +325,7 @@ class WopanConnector extends PersonalCloudConnector {
   }) async {
     sessions.checkpoint(session);
     final access = session.access;
+    final client = WopanProtocol.clientFor(session.credential);
     final body = {
       'header': WopanProtocol.header(
         channel,
@@ -290,9 +334,9 @@ class WopanConnector extends PersonalCloudConnector {
         100000 + Random.secure().nextInt(8999),
       ),
       'body': {
-        if (channel == 'api-user') 'clientId': WopanProtocol.clientId,
+        if (channel == 'api-user') 'clientId': client,
         if (classify) 'key': true else 'secret': true,
-        'param': WopanProtocol.encrypt(param, channel, access),
+        'param': WopanProtocol.encrypt(param, channel, access, client: client),
       },
     };
     final response = await (read ? http.readRequest : http.request)(
@@ -304,6 +348,8 @@ class WopanConnector extends PersonalCloudConnector {
         'Origin': 'https://pan.wo.cn',
         'Referer': 'https://pan.wo.cn/',
         if (access.isNotEmpty) 'Accesstoken': access,
+        if (client == WopanProtocol.webClientId)
+          ...WopanProtocol.webHeaders(sessions.now(), access: access),
       },
       contentType: 'application/json; charset=utf-8',
       followRedirects: false,
@@ -328,6 +374,7 @@ class WopanConnector extends PersonalCloudConnector {
     String channel,
     String access, {
     bool listResult = false,
+    String client = WopanProtocol.clientId,
   }) {
     final rsp = data.obj('RSP');
     if (_unauthorized(response, data)) {
@@ -341,28 +388,40 @@ class WopanConnector extends PersonalCloudConnector {
     );
     final payload = rsp['DATA'];
     if (payload == null || payload == '') return {};
-    final decoded = WopanProtocol.decodeValue(payload, channel, access);
+    final decoded = WopanProtocol.decodeValue(
+      payload,
+      channel,
+      access,
+      client: client,
+    );
     if (listResult && decoded is List) return {'list': decoded};
     require(decoded is Map, '联通云盘响应格式错误');
     return asJson(decoded);
   }
 
   Future<void> _renew(TokenSession session) async {
-    final (response, data, access) = await _request(
-      session,
-      'api-user',
-      'AppRefreshToken',
-      {
-        'refreshToken': session.refresh,
-        'clientSecret': WopanProtocol.clientSecret,
-      },
-    );
+    final (
+      response,
+      data,
+      access,
+    ) = await _request(session, 'api-user', 'AppRefreshToken', {
+      'refreshToken': session.refresh,
+      'clientSecret': WopanProtocol.secretFor(
+        WopanProtocol.clientFor(session.credential),
+      ),
+    });
     if (!response.successful ||
         data.str('STATUS') != '200' ||
         data.obj('RSP').str('RSP_CODE') != '0000') {
-      throw const AccountLoginRequired('联通云盘续期凭据已失效，请重新网页登录');
+      throw const AccountLoginRequired('联通云盘续期凭据已失效，请重新登录');
     }
-    final tokens = _checked(response, data, 'api-user', access);
+    final tokens = _checked(
+      response,
+      data,
+      'api-user',
+      access,
+      client: WopanProtocol.clientFor(session.credential),
+    );
     await sessions.update(session, sessions.refreshedFields(session, tokens));
   }
 
@@ -388,7 +447,7 @@ class WopanConnector extends PersonalCloudConnector {
         {
           ...param,
           if (channel == 'wohome' && key != 'ClassifyRule')
-            'clientId': WopanProtocol.clientId,
+            'clientId': WopanProtocol.clientFor(session.credential),
           if (key == 'AppQueryUser') 'accessToken': session.access,
         },
         read: read,
@@ -409,9 +468,10 @@ class WopanConnector extends PersonalCloudConnector {
         channel,
         access,
         listResult: key == 'GetDownloadUrl',
+        client: WopanProtocol.clientFor(session.credential),
       );
     }
-    throw const AccountLoginRequired('联通云盘登录已失效，请重新网页登录');
+    throw const AccountLoginRequired('联通云盘登录已失效，请重新登录');
   }
 
   Future<CloudAccount> _account(TokenSession session) async {

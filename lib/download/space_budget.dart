@@ -1,7 +1,8 @@
 import '../core/json.dart';
 
 class DownloadSpaceException extends AppException {
-  const DownloadSpaceException() : super('存储空间不足，进度已保留，请释放空间后继续');
+  const DownloadSpaceException({this.volume}) : super('存储空间不足，进度已保留，请释放空间后继续');
+  final String? volume;
 }
 
 class SpaceBudget {
@@ -25,18 +26,22 @@ class SpaceBudget {
   ) => _gate.run(() async {
     for (final entry in remaining.entries) {
       require(entry.value >= 0, '下载空间计算错误');
+      // Finished payloads only need room for their destination copy. A full
+      // cache volume must not block reading bytes that are already on disk.
+      if (entry.value == 0) continue;
       final free = await (availableOnVolume?.call(entry.key) ?? available());
       final others = _reservations.entries
           .where((e) => e.key != id)
           .fold(0, (sum, e) => sum + (e.value[entry.key] ?? 0));
-      // Some document providers do not expose capacity. Export still retains
-      // the complete cache and reports a provider error without losing it.
+      // Some document providers do not expose capacity. The writer reports
+      // storage errors while retaining the task's existing bytes/checkpoint.
       if (free >= 0 && free < others + entry.value + margin) {
-        throw const DownloadSpaceException();
+        throw DownloadSpaceException(volume: entry.key);
       }
     }
     _reservations[id] = {
-      for (final e in remaining.entries) e.key: e.value + margin,
+      for (final e in remaining.entries)
+        if (e.value > 0) e.key: e.value + margin,
     };
   });
   void consume(String id, String volume, int bytes) {

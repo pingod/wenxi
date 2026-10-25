@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import '../app_services.dart';
 import '../diagnostics/app_log.dart';
 import '../diagnostics/diagnostic_bundle.dart';
+import '../domain/download_retries.dart';
 import '../domain/settings.dart';
 import '../platform/desktop_platform.dart';
 import '../platform/native_engine.dart';
@@ -16,7 +17,11 @@ import 'diagnostics_page.dart';
 import 'download_protection_page.dart';
 import 'download_destination_dialog.dart';
 import 'experimental_features_page.dart';
+import 'github_acceleration_page.dart';
+import 'font_size_page.dart';
+import 'download_concurrency_dialog.dart';
 import 'contact_author_dialog.dart';
+import 'link_opening_page.dart';
 
 class MinePage extends StatelessWidget {
   const MinePage(this.services, {super.key, this.linkLauncher});
@@ -88,13 +93,12 @@ class MinePage extends StatelessWidget {
       final text = await askText(
         context,
         '自定义连接数',
-        initial:
-            '${key == 'aliyun' ? (current ?? profile.$2).clamp(1, maximum) : current ?? profile.$2}',
+        initial: '${services.settings.connectionsFor(null, key)}',
         hint: '1–$maximum',
         numeric: true,
       );
       if (text == null || !context.mounted) return;
-      value = int.tryParse(text);
+      value = int.tryParse(text.trim());
       if (value == null || value < 1 || value > maximum) {
         message(context, '连接数范围为 1–$maximum');
         return;
@@ -111,19 +115,14 @@ class MinePage extends StatelessWidget {
     await services.updateSettings({'downloadThreadOverrides': values});
   }
 
-  Future<void> _saveBytes(
-    BuildContext context,
-    Uint8List bytes,
-    String name,
-  ) async {
+  Future<bool> _saveBytes(Uint8List bytes, String name) async {
     if (Platform.isAndroid && services.platformFeatures) {
       final result = await nativeChannel.invokeMethod<String>('saveDocument', {
         'name': name,
         'bytes': bytes,
         'mime': 'application/json',
       });
-      if (result != null && context.mounted) message(context, '文件已导出');
-      return;
+      return result != null;
     }
     final location = await getSaveLocation(
       suggestedName: name,
@@ -131,13 +130,13 @@ class MinePage extends StatelessWidget {
         XTypeGroup(label: 'JSON', extensions: ['json']),
       ],
     );
-    if (location == null) return;
+    if (location == null) return false;
     await XFile.fromData(
       bytes,
       name: name,
       mimeType: 'application/json',
     ).saveTo(location.path);
-    if (context.mounted) message(context, '文件已导出');
+    return true;
   }
 
   Future<void> _export(BuildContext context) async {
@@ -183,27 +182,26 @@ class MinePage extends StatelessWidget {
     final password = await askText(
       context,
       '设置备份密码',
-      hint: '至少 6 位，请妥善保管',
+      hint: '至少 6 位；导出成功后也可用于恢复本机数据访问',
       secret: true,
     );
     if (password == null || !context.mounted) return;
-    final bytes = await busy(
+    final exported = await busy(
       context,
-      () => services.backup.create(
+      () => services.backup.exportTo(
         password,
+        (bytes) => context.mounted
+            ? _saveBytes(
+                bytes,
+                '文析助手-backup-${DateTime.now().millisecondsSinceEpoch}.json',
+              )
+            : Future.value(false),
         includeBackgroundImages: includeImages,
       ),
-      label: '正在加密备份…',
+      label: '正在导出备份并建立恢复保护…',
     );
-    if (bytes != null && context.mounted) {
-      await busy(
-        context,
-        () => _saveBytes(
-          context,
-          bytes,
-          '文析助手-backup-${DateTime.now().millisecondsSinceEpoch}.json',
-        ),
-      );
+    if (exported == true && context.mounted) {
+      message(context, '备份已导出，并建立本机密码恢复保护');
     }
   }
 
@@ -375,6 +373,18 @@ class MinePage extends StatelessWidget {
         _ => '跟随系统',
       },
     ),
+    _tile(
+      context,
+      Icons.format_size,
+      '字体大小',
+      '调整软件内的文字大小',
+      () => Navigator.of(
+        context,
+      ).push(MaterialPageRoute<void>(builder: (_) => FontSizePage(services))),
+      value: settings.fontScalePercent == 100
+          ? '跟随系统'
+          : '${settings.fontScalePercent}%',
+    ),
   ]);
 
   Widget _platformThreads(BuildContext context, AppSettings settings) =>
@@ -421,12 +431,22 @@ class MinePage extends StatelessWidget {
     BuildContext context,
     AppSettings settings,
   ) => _section(context, '链接识别', [
+    _tile(
+      context,
+      CupertinoIcons.link,
+      '链接唤起',
+      Platform.isAndroid ? '从浏览器、分享菜单或选中文字进入解析' : '通过网页按钮或复制链接进入解析',
+      () => Navigator.push<void>(
+        context,
+        MaterialPageRoute(builder: (_) => const LinkOpeningPage()),
+      ),
+    ),
     SwitchListTile.adaptive(
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       secondary: _settingIcon(context, CupertinoIcons.doc_on_clipboard),
       title: const Text('自动识别剪贴板链接', style: TextStyle(fontSize: 14)),
       subtitle: Text(
-        '启动或返回应用时识别分享、磁力和种子链接，点击后填入解析。',
+        '启动或返回应用时识别分享、磁力和种子链接，点击后直接进入解析流程。',
         style: TextStyle(fontSize: 12, height: 1.5, color: secondary(context)),
       ),
       value: settings.clipboardRecognition,
@@ -456,17 +476,60 @@ class MinePage extends StatelessWidget {
         context,
         CupertinoIcons.arrow_down_circle,
         'HTTP 下载连接数',
-        '单个下载的连接上限',
+        '普通链接与设为跟随全局的网盘使用',
         () => _number(context, '全局连接数', 'threads', settings.threads, 1, 512),
         value: '${settings.threads}',
       ),
+      _tile(
+        context,
+        CupertinoIcons.square_stack,
+        '同时下载任务数',
+        '其余任务自动排队',
+        () => editDownloadConcurrency(context, services),
+        value: '${settings.concurrent} 个',
+      ),
       _platformThreads(context, settings),
+      if (services.mobileDataDownloads.supported)
+        SwitchListTile.adaptive(
+          key: const ValueKey('mobile-data-download-warning-setting'),
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 16,
+            vertical: 4,
+          ),
+          secondary: _settingIcon(context, Icons.network_cell),
+          title: const Text('流量下载提醒', style: TextStyle(fontSize: 14)),
+          subtitle: Text(
+            '使用移动数据下载前提醒',
+            style: TextStyle(fontSize: 12, color: secondary(context)),
+          ),
+          value: settings.warnOnMobileDataDownload,
+          onChanged: (value) =>
+              services.updateSettings({'warnOnMobileDataDownload': value}),
+        ),
+      _tile(
+        context,
+        CupertinoIcons.globe,
+        'GitHub 加速',
+        '常用代理与自定义加速地址',
+        () => Navigator.push<void>(
+          context,
+          MaterialPageRoute(builder: (_) => GitHubAccelerationPage(services)),
+        ),
+        value: settings.githubAcceleration.label,
+      ),
       _tile(
         context,
         CupertinoIcons.arrow_2_circlepath,
         '失败重试次数',
         '',
-        () => _number(context, '失败重试次数', 'retries', settings.retries, 0, 3),
+        () => _number(
+          context,
+          '失败重试次数',
+          'retries',
+          settings.retries,
+          0,
+          maxDownloadRetries,
+        ),
         value: '${settings.retries} 次',
       ),
       _tile(
@@ -527,7 +590,7 @@ class MinePage extends StatelessWidget {
           context,
           CupertinoIcons.shield_lefthalf_fill,
           '后台下载保护',
-          Platform.isWindows ? '托盘下载与自动休眠保护' : '锁屏下载、通知与系统后台设置',
+          Platform.isWindows ? '最小化到托盘与自动休眠保护' : '锁屏下载、通知与系统后台设置',
           () => Navigator.push<void>(
             context,
             MaterialPageRoute(builder: (_) => const DownloadProtectionPage()),
@@ -552,6 +615,7 @@ class MinePage extends StatelessWidget {
         context,
         destination: directory,
         unfinished: unfinished,
+        directDownloads: services.downloads.files.directDownloads,
       );
       if (selected == null || !context.mounted) return;
       choice = selected;

@@ -12,19 +12,28 @@ import 'navigation_transfer_icon.dart';
 import '../domain/appearance.dart';
 import 'app_theme.dart';
 
+enum _NavigationGesture { drag, longPress }
+
 class LiquidBottomNavigation extends StatefulWidget {
   const LiquidBottomNavigation({
     super.key,
     required this.selectedIndex,
     required this.onSelected,
     required this.destinations,
+    this.destinationIds,
+    this.allowReselect = false,
     this.transfers,
   }) : assert(destinations.length > 1),
+       assert(
+         destinationIds == null || destinationIds.length == destinations.length,
+       ),
        assert(selectedIndex >= 0 && selectedIndex < destinations.length);
 
   final int selectedIndex;
   final ValueChanged<int> onSelected;
   final List<(String, String)> destinations;
+  final List<int>? destinationIds;
+  final bool allowReselect;
   final ValueListenable<NavigationTransferStatus>? transfers;
 
   @override
@@ -48,6 +57,7 @@ class _LiquidBottomNavigationState extends State<LiquidBottomNavigation>
   final _touch = ValueNotifier<Offset?>(null);
   ui.FragmentShader? _shader;
   double? _dragIndex;
+  _NavigationGesture? _gesture;
   int? _pressedIndex, _pointer;
   bool _cancelled = false, _reduceMotion = false;
 
@@ -92,14 +102,10 @@ class _LiquidBottomNavigationState extends State<LiquidBottomNavigation>
   }
 
   void _move(double target, {bool following = false}) {
-    if (_reduceMotion) {
+    if (_reduceMotion || following) {
+      // Follow the pointer in this frame. Restarting a tween on every move
+      // leaves the lens behind the finger, especially on high refresh displays.
       _position.value = target;
-    } else if (following) {
-      _position.animateTo(
-        target,
-        duration: const Duration(milliseconds: 45),
-        curve: Curves.easeOut,
-      );
     } else {
       final velocity = _position.velocity.clamp(-16.0, 16.0);
       _position.animateWith(
@@ -118,6 +124,7 @@ class _LiquidBottomNavigationState extends State<LiquidBottomNavigation>
     setState(() {
       _pressedIndex = null;
       _dragIndex = null;
+      _gesture = null;
     });
     if (_reduceMotion) {
       _press.value = 0;
@@ -132,7 +139,7 @@ class _LiquidBottomNavigationState extends State<LiquidBottomNavigation>
   void _choose(int index) {
     if (_cancelled) return;
     _finish(target: index);
-    if (index == widget.selectedIndex) return;
+    if (index == widget.selectedIndex && !widget.allowReselect) return;
     final platform = Theme.of(context).platform;
     if (!_reduceMotion &&
         (platform == TargetPlatform.android ||
@@ -155,13 +162,24 @@ class _LiquidBottomNavigationState extends State<LiquidBottomNavigation>
   @override
   Widget build(BuildContext context) {
     final dark = Theme.of(context).brightness == Brightness.dark;
+    final colors = Theme.of(context).colorScheme;
     final highContrast = MediaQuery.highContrastOf(context);
     final appearance = AppAppearance.of(context);
     final solid = highContrast || appearance.glassStyle == GlassStyle.solid;
+    final glassColor = appearance.glassColor.withValues(
+      alpha: solid ? 1 : appearance.glassOpacity,
+    );
+    final shadowColor = Color.lerp(
+      dark ? Colors.black : colors.onSurface,
+      colors.primary,
+      dark ? .08 : .16,
+    )!;
     final rtl = Directionality.of(context) == TextDirection.rtl;
     final count = widget.destinations.length;
     final active = themeAccent(context);
-    final foreground = Theme.of(context).colorScheme.onSurfaceVariant;
+    final foreground = highContrast || appearance.glassStyle == GlassStyle.clear
+        ? colors.onSurface
+        : colors.onSurfaceVariant;
     final height =
         64.0 +
         (MediaQuery.textScalerOf(context).scale(12) - 12).clamp(0.0, 24.0);
@@ -213,6 +231,28 @@ class _LiquidBottomNavigationState extends State<LiquidBottomNavigation>
                 } else {
                   _press.forward();
                 }
+              }
+
+              void startTracking(_NavigationGesture gesture, Offset point) {
+                if (_cancelled || _pointer == null) return;
+                _gesture = gesture;
+                track(point);
+              }
+
+              void finishTracking(_NavigationGesture gesture) {
+                if (_gesture != gesture) return;
+                final index = _dragIndex?.round();
+                if (!_cancelled && index != null) {
+                  _choose(index);
+                } else {
+                  _finish();
+                }
+              }
+
+              void cancelTracking(_NavigationGesture gesture) {
+                // The other recognizer is cancelled when a drag or long press
+                // wins. Only the active gesture may roll back its preview.
+                if (_gesture == gesture) _finish();
               }
 
               return MouseRegion(
@@ -267,29 +307,44 @@ class _LiquidBottomNavigationState extends State<LiquidBottomNavigation>
                     _finish();
                   },
                   child: GestureDetector(
-                    onHorizontalDragStart: (details) =>
-                        track(details.localPosition),
-                    onHorizontalDragUpdate: (details) =>
-                        track(details.localPosition),
-                    onHorizontalDragEnd: (_) {
-                      final index = _dragIndex?.round();
-                      if (!_cancelled && index != null) {
-                        _choose(index);
-                      } else {
-                        _finish();
+                    excludeFromSemantics: true,
+                    onHorizontalDragStart: (details) => startTracking(
+                      _NavigationGesture.drag,
+                      details.localPosition,
+                    ),
+                    onHorizontalDragUpdate: (details) {
+                      if (_gesture == _NavigationGesture.drag) {
+                        track(details.localPosition);
                       }
                     },
-                    onHorizontalDragCancel: _finish,
+                    onHorizontalDragEnd: (_) =>
+                        finishTracking(_NavigationGesture.drag),
+                    onHorizontalDragCancel: () =>
+                        cancelTracking(_NavigationGesture.drag),
+                    onLongPressStart: (details) => startTracking(
+                      _NavigationGesture.longPress,
+                      details.localPosition,
+                    ),
+                    onLongPressMoveUpdate: (details) {
+                      if (_gesture == _NavigationGesture.longPress) {
+                        track(details.localPosition);
+                      }
+                    },
+                    onLongPressEnd: (_) =>
+                        finishTracking(_NavigationGesture.longPress),
+                    onLongPressCancel: () =>
+                        cancelTracking(_NavigationGesture.longPress),
                     child: DecoratedBox(
                       decoration: BoxDecoration(
                         borderRadius: BorderRadius.circular(height),
                         boxShadow: [
                           BoxShadow(
-                            color: Colors.black.withValues(
-                              alpha: dark ? .25 : .09,
+                            color: shadowColor.withValues(
+                              alpha: dark ? .14 : .055,
                             ),
-                            blurRadius: 22,
-                            offset: const Offset(0, 7),
+                            blurRadius: 16,
+                            offset: const Offset(0, 4),
+                            blurStyle: BlurStyle.outer,
                           ),
                         ],
                       ),
@@ -310,29 +365,32 @@ class _LiquidBottomNavigationState extends State<LiquidBottomNavigation>
                                       borderRadius: BorderRadius.circular(
                                         height,
                                       ),
-                                      color: appearance.glassColor.withValues(
-                                        alpha: solid
-                                            ? 1
-                                            : appearance.glassOpacity,
-                                      ),
+                                      color: solid ? glassColor : null,
                                       border: Border.all(
-                                        color: Colors.white.withValues(
-                                          alpha: dark ? .20 : .78,
+                                        color: colors.outlineVariant.withValues(
+                                          alpha: highContrast
+                                              ? 1
+                                              : dark
+                                              ? .48
+                                              : .65,
                                         ),
                                         width: .8,
                                       ),
+                                      // Keep the tint in each gradient stop:
+                                      // a shader replaces BoxDecoration.color.
                                       gradient: solid
                                           ? null
                                           : LinearGradient(
                                               begin: Alignment.topLeft,
                                               end: Alignment.bottomRight,
                                               colors: [
-                                                Colors.white.withValues(
-                                                  alpha: dark ? .10 : .20,
+                                                Color.alphaBlend(
+                                                  Colors.white.withValues(
+                                                    alpha: dark ? .025 : .16,
+                                                  ),
+                                                  glassColor,
                                                 ),
-                                                Colors.white.withValues(
-                                                  alpha: .015,
-                                                ),
+                                                glassColor,
                                               ],
                                             ),
                                     ),
@@ -397,22 +455,21 @@ class _LiquidBottomNavigationState extends State<LiquidBottomNavigation>
                                           borderRadius: BorderRadius.circular(
                                             height,
                                           ),
-                                          color: appearance.lensColor,
+                                          color: solid
+                                              ? appearance.lensColor.withValues(
+                                                  alpha: 1,
+                                                )
+                                              : appearance.lensColor,
                                           border: Border.all(
-                                            color: Colors.white.withValues(
-                                              alpha: dark ? .26 : .82,
+                                            color: active.withValues(
+                                              alpha: highContrast
+                                                  ? .5
+                                                  : dark
+                                                  ? .18
+                                                  : .09,
                                             ),
                                             width: .8,
                                           ),
-                                          boxShadow: [
-                                            BoxShadow(
-                                              color: Colors.black.withValues(
-                                                alpha: dark ? .12 : .07,
-                                              ),
-                                              blurRadius: 8,
-                                              offset: const Offset(0, 2),
-                                            ),
-                                          ],
                                         ),
                                       ),
                                     ),
@@ -427,7 +484,9 @@ class _LiquidBottomNavigationState extends State<LiquidBottomNavigation>
                                   for (var i = 0; i < count; i++)
                                     Expanded(
                                       child: Semantics(
-                                        key: ValueKey('navigation-$i'),
+                                        key: ValueKey(
+                                          'navigation-${widget.destinationIds?[i] ?? i}',
+                                        ),
                                         label: widget.destinations[i].$1,
                                         selected: i == widget.selectedIndex,
                                         button: true,
@@ -461,10 +520,14 @@ class _LiquidBottomNavigationState extends State<LiquidBottomNavigation>
                                                   (_pressedIndex != null ||
                                                       _dragIndex != null) &&
                                                   preview == i,
-                                              transfers: i == 2
+                                              transfers:
+                                                  widget.destinations[i].$1 ==
+                                                      '传输'
                                                   ? widget.transfers
                                                   : null,
-                                              transfer: i == 2,
+                                              transfer:
+                                                  widget.destinations[i].$1 ==
+                                                  '传输',
                                             ),
                                           ),
                                         ),
@@ -604,7 +667,7 @@ class _NavigationHighlightPainter extends CustomPainter {
       Radius.circular(size.height / 2),
     );
     final highlight = Colors.white.withValues(
-      alpha: visibility.value * (dark ? .20 : .40),
+      alpha: visibility.value * (dark ? .09 : .26),
     );
     final paint = Paint()
       ..shader = ui.Gradient.radial(point, size.height * 1.45, [

@@ -39,6 +39,7 @@ class ControlConfigIssue {
         ],
       'help': ['enabled', 'url'],
       'about': ['description'],
+      'parserHub': ['url'],
     };
     return fields.containsKey(path) ||
         fields.entries.any(
@@ -48,7 +49,8 @@ class ControlConfigIssue {
 }
 
 /// A complete publication with independent validation for each known section.
-/// Invalid sections retain their previous values; absent sections reset them.
+/// Invalid sections retain their previous values; absent display sections reset
+/// them. The service address survives older publications that omit its field.
 class RemoteControlDocument {
   const RemoteControlDocument._(
     this.config,
@@ -67,6 +69,7 @@ class RemoteControlDocument {
     'updates.windows',
     'help',
     'about',
+    'parserHub',
   ]);
 
   RemoteControlConfig get validated {
@@ -265,6 +268,17 @@ class RemoteControlDocument {
       },
       (value) => value,
     );
+    final parserHubUrl = section<Uri?>(
+      'parserHub',
+      raw['parserHub'],
+      previous.parserHubUrl,
+      () {
+        if (!raw.containsKey('parserHub')) return previous.parserHubUrl;
+        final f = _ControlFields(raw['parserHub'], 'parserHub');
+        return f.read('url', () => parserHubUri(f.string('url', 2048)));
+      },
+      (value) => value?.toString(),
+    );
     final config = RemoteControlConfig(
       revision: revision,
       announcement: announcement,
@@ -272,6 +286,7 @@ class RemoteControlDocument {
       updates: Map.unmodifiable(updates),
       helpUrl: help,
       aboutDescription: about,
+      parserHubUrl: parserHubUrl,
     );
     return RemoteControlDocument._(
       config,

@@ -16,12 +16,21 @@ import '../platform/file_access.dart';
 import '../playback/playback_sources.dart';
 import '../playback/torrent_playback.dart';
 import '../playback/download_playback.dart';
+import 'announcements_page.dart';
 import 'common.dart';
+import 'app_context_menu.dart';
+import 'app_popup_menu.dart';
 import 'download_progress.dart';
 import 'transfer_widgets.dart';
 import 'player_page.dart';
 import 'download_protection_page.dart';
+import 'download_concurrency_dialog.dart';
+import 'download_completion_option.dart';
 import 'uc_tv_authorization_page.dart';
+import 'uc_video_download.dart';
+import 'text_preview.dart';
+
+enum _DownloadHelpAction { announcements, resources }
 
 class DownloadsPage extends StatefulWidget {
   const DownloadsPage(
@@ -161,6 +170,9 @@ class _DownloadsPageState extends State<DownloadsPage>
     ]),
     builder: (context, _) {
       final manager = widget.services.downloads, all = manager.tasks;
+      final concurrent = widget.services.settings.concurrent;
+      final concurrencyOptions = {1, 2, 3, 5, 8, 16, 32, concurrent}.toList()
+        ..sort();
       final tasks = all.where((t) => accepts(t, filter)).toList()
         ..sort((a, b) {
           int rank(DownloadTask t) => switch (t.status) {
@@ -218,37 +230,75 @@ class _DownloadsPageState extends State<DownloadsPage>
                 padding: const EdgeInsets.only(left: 16),
                 child: Row(
                   children: [
-                    Text(
-                      '同时下载数：',
-                      style: TextStyle(fontSize: 12, color: secondary(context)),
-                    ),
-                    DropdownButton<int>(
-                      value: widget.services.settings.concurrent,
-                      underline: const SizedBox.shrink(),
-                      isDense: true,
-                      padding: const EdgeInsets.symmetric(vertical: 7),
-                      iconSize: 16,
-                      iconEnabledColor: themeAccent(context),
-                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        fontSize: 13,
-                        color: themeAccent(context),
+                    Expanded(
+                      flex: 4,
+                      child: Wrap(
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        spacing: 4,
+                        children: [
+                          Text(
+                            '同时下载数：',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: secondary(context),
+                            ),
+                          ),
+                          DropdownButton<int>(
+                            key: const Key('download-concurrency'),
+                            value: concurrent,
+                            underline: const SizedBox.shrink(),
+                            isDense: true,
+                            padding: const EdgeInsets.symmetric(vertical: 7),
+                            iconSize: 16,
+                            iconEnabledColor: themeAccent(context),
+                            style: Theme.of(context).textTheme.bodyMedium
+                                ?.copyWith(
+                                  fontSize: 13,
+                                  color: themeAccent(context),
+                                ),
+                            items: [
+                              for (final i in concurrencyOptions)
+                                DropdownMenuItem(value: i, child: Text('$i')),
+                              const DropdownMenuItem(
+                                value: 0,
+                                child: Text('自定义…'),
+                              ),
+                            ],
+                            selectedItemBuilder: (context) => List.generate(
+                              concurrencyOptions.length + 1,
+                              (_) => Text('$concurrent'),
+                            ),
+                            onChanged: (value) {
+                              if (value == 0) {
+                                editDownloadConcurrency(
+                                  context,
+                                  widget.services,
+                                );
+                              } else if (value != null) {
+                                busy(
+                                  context,
+                                  () => widget.services.updateSettings({
+                                    'concurrent': value,
+                                  }),
+                                );
+                              }
+                            },
+                          ),
+                        ],
                       ),
-                      items: [
-                        for (var i = 1; i <= 3; i++)
-                          DropdownMenuItem(value: i, child: Text('$i')),
-                      ],
-                      onChanged: (value) {
-                        if (value != null) {
-                          busy(
-                            context,
-                            () => widget.services.updateSettings({
-                              'concurrent': value,
-                            }),
-                          );
-                        }
-                      },
                     ),
-                    const Spacer(),
+                    TextButton(
+                      key: const Key('download-failure-help'),
+                      onPressed: _showDownloadHelp,
+                      style: TextButton.styleFrom(
+                        foregroundColor: Colors.red,
+                        textStyle: Theme.of(
+                          context,
+                        ).textTheme.labelLarge?.copyWith(fontSize: 12),
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                      ),
+                      child: const Text('无法下载？'),
+                    ),
                     if (widget.services.platformFeatures &&
                         (Platform.isAndroid || Platform.isWindows))
                       IconButton(
@@ -283,7 +333,8 @@ class _DownloadsPageState extends State<DownloadsPage>
                   ],
                 ),
               ),
-            if (widget.services.downloadShutdown.supported) _shutdownOption(),
+            if (widget.services.downloadShutdown.supported)
+              DownloadCompletionOption(widget.services.downloadShutdown),
             Expanded(
               child: tasks.isEmpty
                   ? EmptyPanel(
@@ -321,41 +372,50 @@ class _DownloadsPageState extends State<DownloadsPage>
     },
   );
 
-  Widget _shutdownOption() {
-    final shutdown = widget.services.downloadShutdown;
-    return Container(
-      key: const Key('download-shutdown-option'),
-      decoration: BoxDecoration(
-        color: shutdown.enabled
-            ? themeAccent(context).withValues(alpha: .05)
-            : null,
-        border: Border(bottom: BorderSide(color: border(context), width: .5)),
-      ),
-      padding: const EdgeInsets.fromLTRB(16, 8, 12, 8),
-      child: Row(
-        children: [
-          Icon(CupertinoIcons.power, color: secondary(context), size: 19),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text('下载完成后关机', style: TextStyle(fontSize: 13)),
-                const SizedBox(height: 2),
-                Text(
-                  shutdown.detail,
-                  style: TextStyle(fontSize: 11, color: secondary(context)),
-                ),
-              ],
-            ),
+  Future<void> _showDownloadHelp() async {
+    final action = await showDialog<_DownloadHelpAction>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('无法下载？'),
+        scrollable: true,
+        content: const Text('下载失败时，可查看 App 公告寻找解决办法，或使用「查找资源」功能更换网盘资源。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('关闭'),
           ),
-          Switch.adaptive(
-            value: shutdown.enabled,
-            onChanged: shutdown.executing ? null : shutdown.setEnabled,
+          TextButton.icon(
+            key: const Key('download-help-announcements'),
+            onPressed: () => Navigator.of(
+              dialogContext,
+            ).pop(_DownloadHelpAction.announcements),
+            icon: const Icon(CupertinoIcons.bell, size: 18),
+            label: const Text('查看公告'),
+          ),
+          FilledButton.icon(
+            key: const Key('download-help-resources'),
+            onPressed: () =>
+                Navigator.of(dialogContext).pop(_DownloadHelpAction.resources),
+            icon: const Icon(CupertinoIcons.search, size: 18),
+            label: const Text('查找资源'),
           ),
         ],
       ),
     );
+    if (!mounted) return;
+    switch (action) {
+      case _DownloadHelpAction.announcements:
+        await Navigator.push<void>(
+          context,
+          MaterialPageRoute(
+            builder: (_) => AnnouncementsPage(widget.services.announcements),
+          ),
+        );
+      case _DownloadHelpAction.resources:
+        widget.services.requestResourceSearch();
+      case null:
+        break;
+    }
   }
 
   List<DownloadTask> get _selectedTasks => _selected
@@ -553,17 +613,21 @@ class _DownloadsPageState extends State<DownloadsPage>
                 Text(
                   completed
                       ? '从列表移除所选记录，已下载的文件默认保留。文件无法识别或已被外部删除，也能移除记录。'
-                      : '会先停止所选下载并清理未完成的缓存，已下载的文件默认保留。',
+                      : '会先停止所选下载。未完成缓存随任务自动清理，删除后无法续传；已保存到下载目录的文件默认保留。',
                 ),
                 if (missing > 0) Text('其中 $missing 个文件已不存在，将移除对应的下载记录。'),
                 if (selected.any(
                   (task) =>
+                      task.status != DownloadStatus.completed ||
                       task.savedPath != null &&
-                      files.state(task) != FileAvailability.missing,
+                          files.state(task) != FileAvailability.missing,
                 ))
                   CheckboxListTile(
                     contentPadding: EdgeInsets.zero,
-                    title: const Text('同时删除已下载的文件'),
+                    title: Text(completed ? '同时删除已下载的文件' : '同时删除本地文件'),
+                    subtitle: completed
+                        ? null
+                        : const Text('包括已保存的文件和保存中断后的残留文件'),
                     value: deleteFiles,
                     onChanged: (value) =>
                         setLocal(() => deleteFiles = value ?? false),
@@ -598,6 +662,149 @@ class _DownloadsPageState extends State<DownloadsPage>
   }
 
   Widget _row(BuildContext context, DownloadTask task) {
+    return AppContextMenu<String>(
+      key: ValueKey(task.id),
+      enabled: !_batching,
+      identity: (
+        task.id,
+        _selected.contains(task.id)
+            ? (_selected.toList()..sort()).join('\u0000')
+            : '',
+      ),
+      actions: () => _taskContextActions(task.id),
+      onSelected: (action) => _taskAction(task.id, action),
+      child: _rowContent(context, task),
+    );
+  }
+
+  List<AppMenuAction<String>> _taskContextActions(String id) {
+    final task = widget.services.downloads.task(id);
+    if (task == null || _batching) return [];
+    if (_selected.contains(id) && _selectedTasks.length > 1) {
+      return [
+        for (final action in DownloadBatchAction.values)
+          AppMenuAction(
+            value: 'batch-${action.name}',
+            label: '${action.label}（${_selectedTasks.length} 项）',
+            icon: switch (action) {
+              DownloadBatchAction.pause => CupertinoIcons.pause,
+              DownloadBatchAction.resume => CupertinoIcons.play,
+              DownloadBatchAction.delete => CupertinoIcons.trash,
+            },
+            enabled: _selectedTasks.any(action.accepts),
+            destructive: action == DownloadBatchAction.delete,
+          ),
+        const AppMenuAction(
+          value: 'select',
+          label: '取消选择此项',
+          icon: CupertinoIcons.checkmark_circle,
+        ),
+        const AppMenuAction(
+          value: 'clear-selection',
+          label: '退出多选',
+          icon: CupertinoIcons.xmark_circle,
+        ),
+      ];
+    }
+    final completed = task.status == DownloadStatus.completed;
+    final kind = fileKind(task.spec.fileName);
+    return [
+      const AppMenuAction(
+        value: 'details',
+        label: '任务详情',
+        icon: CupertinoIcons.info_circle,
+      ),
+      if (completed && files.state(task) == FileAvailability.present) ...[
+        if (kind == FileKind.video || kind == FileKind.text)
+          AppMenuAction(
+            value: 'open',
+            label: kind == FileKind.video ? '播放视频' : '预览文本 / 代码',
+            icon: CupertinoIcons.play_rectangle,
+          ),
+        if (kind == FileKind.audio)
+          const AppMenuAction(
+            value: 'play',
+            label: '播放音频',
+            icon: CupertinoIcons.play_rectangle,
+          ),
+        const AppMenuAction(
+          value: 'folder',
+          label: '打开所在文件夹',
+          icon: CupertinoIcons.folder_open,
+        ),
+        const AppMenuAction(
+          value: 'share',
+          label: '分享文件',
+          icon: CupertinoIcons.share,
+        ),
+      ],
+      if (!completed)
+        AppMenuAction(
+          value: task.active
+              ? 'pause'
+              : task.needsUcAuthorization
+              ? 'authorize'
+              : 'resume',
+          label: task.active
+              ? '暂停下载'
+              : task.needsUcAuthorization
+              ? '授权并继续下载'
+              : '继续下载',
+          icon: task.active ? CupertinoIcons.pause : CupertinoIcons.play,
+          enabled: _authorizingDownload != id,
+        ),
+      if (canRecoverUcPlayable(task))
+        const AppMenuAction(
+          value: 'uc-playable',
+          label: '下载可播放版本',
+          icon: CupertinoIcons.film,
+        ),
+      if (!completed &&
+          task.spec.isTorrent &&
+          {FileKind.video, FileKind.audio}.contains(kind))
+        const AppMenuAction(
+          value: 'torrent-play',
+          label: '在线播放',
+          icon: CupertinoIcons.play_rectangle,
+        ),
+      if (!completed && widget.services.downloads.canStream(task))
+        const AppMenuAction(
+          value: 'download-play',
+          label: '边下边播',
+          icon: CupertinoIcons.play_rectangle,
+        ),
+      AppMenuAction(
+        value: 'copy',
+        label: '复制下载链接',
+        icon: CupertinoIcons.link,
+        enabled: !task.spec.needsPreparation,
+      ),
+      const AppMenuAction(
+        value: 'copy-name',
+        label: '复制文件名',
+        icon: CupertinoIcons.doc_on_doc,
+      ),
+      if (completed)
+        const AppMenuAction(
+          value: 'check',
+          label: '重新检查文件',
+          icon: CupertinoIcons.refresh,
+        ),
+      AppMenuAction(
+        value: 'select',
+        label: _selected.contains(id) ? '取消选择此项' : '选择此项',
+        icon: CupertinoIcons.checkmark_circle,
+      ),
+      AppMenuAction(
+        value: 'delete',
+        label: completed ? '移除下载记录' : '删除任务',
+        icon: CupertinoIcons.trash,
+        destructive: true,
+      ),
+    ];
+  }
+
+  Widget _rowContent(BuildContext context, DownloadTask task) {
     final running = task.active, done = task.status == DownloadStatus.completed;
     final availability = files.state(task);
     final missing = done && availability == FileAvailability.missing;
@@ -794,6 +1001,8 @@ class _DownloadsPageState extends State<DownloadsPage>
                                     fileKind(task.spec.fileName) ==
                                         FileKind.video
                               ? '播放视频'
+                              : fileKind(task.spec.fileName) == FileKind.text
+                              ? '预览文本'
                               : '打开文件'
                         : running
                         ? '暂停下载'
@@ -805,6 +1014,8 @@ class _DownloadsPageState extends State<DownloadsPage>
                                     fileKind(task.spec.fileName) ==
                                         FileKind.video
                               ? CupertinoIcons.play_rectangle
+                              : fileKind(task.spec.fileName) == FileKind.text
+                              ? CupertinoIcons.doc_text
                               : CupertinoIcons.folder
                         : running
                         ? CupertinoIcons.pause
@@ -868,6 +1079,16 @@ class _DownloadsPageState extends State<DownloadsPage>
     final path = task.savedPath;
     if (path == null) return;
     final kind = fileKind(task.spec.fileName);
+    if (!reveal && kind == FileKind.text) {
+      await Navigator.push<void>(
+        context,
+        MaterialPageRoute(
+          builder: (_) =>
+              LocalTextPreviewPage(path: path, name: task.spec.fileName),
+        ),
+      );
+      return;
+    }
     if (isDesktopPlatform && (reveal || (!play && kind != FileKind.video))) {
       await busy(
         context,
@@ -1046,11 +1267,16 @@ class _DownloadsPageState extends State<DownloadsPage>
                                     fileKind(task.spec.fileName) ==
                                         FileKind.video
                                 ? '播放视频'
+                                : fileKind(task.spec.fileName) == FileKind.text
+                                ? '预览文本 / 代码'
                                 : '打开文件',
                           ),
                           subtitle:
                               isDesktopPlatform &&
-                                  fileKind(task.spec.fileName) != FileKind.video
+                                  !{
+                                    FileKind.video,
+                                    FileKind.text,
+                                  }.contains(fileKind(task.spec.fileName))
                               ? Text(
                                   Platform.isWindows
                                       ? '在资源管理器中定位'
@@ -1067,7 +1293,10 @@ class _DownloadsPageState extends State<DownloadsPage>
                             onTap: () => Navigator.pop(context, 'play'),
                           ),
                         if (isDesktopPlatform &&
-                            fileKind(task.spec.fileName) == FileKind.video)
+                            {
+                              FileKind.video,
+                              FileKind.text,
+                            }.contains(fileKind(task.spec.fileName)))
                           ListTile(
                             leading: const Icon(CupertinoIcons.folder_open),
                             title: const Text('打开所在文件夹'),
@@ -1101,6 +1330,13 @@ class _DownloadsPageState extends State<DownloadsPage>
                             context,
                             task.needsUcAuthorization ? 'authorize' : 'toggle',
                           ),
+                        ),
+                      if (canRecoverUcPlayable(task))
+                        ListTile(
+                          leading: const Icon(CupertinoIcons.film),
+                          title: const Text('下载可播放版本'),
+                          subtitle: const Text('先查看画质和大小，确认后新建任务'),
+                          onTap: () => Navigator.pop(context, 'uc-playable'),
                         ),
                       if (task.spec.isTorrent &&
                           task.status != DownloadStatus.completed &&
@@ -1163,11 +1399,51 @@ class _DownloadsPageState extends State<DownloadsPage>
       _detailsOpen = false;
     }
     if (!mounted || action == null) return;
+    await _taskAction(id, action);
+  }
+
+  Future<void> _taskAction(String id, String action) async {
+    if (!mounted || _batching) return;
     final task = widget.services.downloads.task(id);
     if (task == null) return;
     switch (action) {
+      case 'details':
+        await _details(context, id);
+      case 'select':
+        _toggleSelection(id);
+      case 'clear-selection':
+        _exitSelection();
+      case 'batch-pause':
+        await _runSelectedAction(DownloadBatchAction.pause);
+      case 'batch-resume':
+        await _runSelectedAction(DownloadBatchAction.resume);
+      case 'batch-delete':
+        await _deleteSelectedDialog();
+      case 'copy-name':
+        await widget.services.copyText(task.spec.fileName);
+        if (mounted) message(context, '文件名已复制');
+      case 'check':
+        await files.check(task);
+      case 'pause':
+        if (task.active) {
+          await busy(context, () => widget.services.downloads.pause(id));
+        }
+      case 'resume':
+        if (!task.active &&
+            task.status != DownloadStatus.completed &&
+            !task.needsUcAuthorization) {
+          await busy(context, () => widget.services.downloads.resume(id));
+        }
       case 'authorize':
         await _authorizeDownload(id);
+      case 'uc-playable':
+        if (canRecoverUcPlayable(task)) {
+          await downloadUcPlayable(
+            context,
+            widget.services,
+            origin: DownloadOrigin.fromJson(task.spec.source!),
+          );
+        }
       case 'torrent-play':
       case 'download-play':
         try {
@@ -1176,7 +1452,7 @@ class _DownloadsPageState extends State<DownloadsPage>
               : downloadPlayback(widget.services, task);
           try {
             await Navigator.push<void>(
-              this.context,
+              context,
               MaterialPageRoute(
                 builder: (_) => PlayerPage(
                   controller,
@@ -1191,7 +1467,7 @@ class _DownloadsPageState extends State<DownloadsPage>
           }
         } catch (e) {
           if (mounted) {
-            message(this.context, e is AppException ? e.message : '无法开始播放，请重试');
+            message(context, e is AppException ? e.message : '无法开始播放，请重试');
           }
         }
       case 'open':
@@ -1204,14 +1480,14 @@ class _DownloadsPageState extends State<DownloadsPage>
         await _share(task);
       case 'copy':
         if (task.spec.needsPreparation) {
-          message(this.context, '下载链接尚未准备好，请稍后重试');
+          message(context, '下载链接尚未准备好，请稍后重试');
           return;
         }
         await Clipboard.setData(ClipboardData(text: task.spec.url));
-        if (mounted) message(this.context, '下载链接已复制');
+        if (mounted) message(context, '下载链接已复制');
       case 'toggle':
         await busy(
-          this.context,
+          context,
           () => task.active
               ? widget.services.downloads.pause(id)
               : widget.services.downloads.resume(id),
@@ -1252,12 +1528,15 @@ class _DownloadsPageState extends State<DownloadsPage>
                           FileAvailability.unknown => '文件状态尚未确认，仍可直接移除这条下载记录。',
                           FileAvailability.present => '从下载列表移除这条记录，已下载的文件默认保留。',
                         }
-                      : '下载中的任务会先停止写入。未勾选下方选项时，只移除下载记录和未完成缓存。',
+                      : '会先停止下载并自动清理未完成缓存，删除后无法续传。未勾选下方选项时，已保存到下载目录的文件会保留。',
                 ),
-                if (task.savedPath != null && !missing)
+                if (!completed || task.savedPath != null && !missing)
                   CheckboxListTile(
                     contentPadding: EdgeInsets.zero,
-                    title: const Text('同时删除已下载的文件'),
+                    title: Text(completed ? '同时删除已下载的文件' : '同时删除本地文件'),
+                    subtitle: completed
+                        ? null
+                        : const Text('包括已保存的文件和保存中断后的残留文件'),
                     value: deleteFile,
                     onChanged: (v) => setLocal(() => deleteFile = v ?? false),
                   ),

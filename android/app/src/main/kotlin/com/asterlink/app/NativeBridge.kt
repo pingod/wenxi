@@ -7,10 +7,9 @@ import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
-import android.util.AtomicFile
-import android.util.Base64
 import com.asterlink.app.download.DownloadFileSaver
 import com.asterlink.app.download.DownloadStorage
+import com.asterlink.app.download.DownloadTargetStore
 import com.asterlink.app.security.SecureVault
 import com.asterlink.nativecore.gopeed.Gopeed
 import go.Seq
@@ -20,7 +19,6 @@ import io.flutter.plugin.common.MethodChannel
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
-import java.security.SecureRandom
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -40,10 +38,13 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
     val externalPlayer = ExternalPlayerOpening(context, { activity }, fileOpening)
     private val saver = DownloadFileSaver(context)
     private val storage = DownloadStorage(context)
+    private val downloadTargets = DownloadTargetStore(context)
     private val vault = SecureVault(context)
     private val exports = ConcurrentHashMap<String, AtomicBoolean>()
     private val cache = File(context.externalCacheDir ?: context.cacheDir, "asterlink_downloads")
     private var nativeStarted = false
+    private var parserNativeUsed = false
+    private var nativeDirectory: String? = null
     private var picker: MethodChannel.Result? = null
     private var documentBytes: ByteArray? = null
     private val diagnostics get() = (context.applicationContext as AsterLinkHost).diagnostics
@@ -76,7 +77,7 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
             emit("downloadOverlayAction", mapOf("action" to "openDownloads"))
             return
         }
-        if (intent == null || (intent.action != Intent.ACTION_SEND && intent.action != Intent.ACTION_VIEW)) return
+        if (intent == null || intent.action !in setOf(Intent.ACTION_SEND, Intent.ACTION_VIEW, Intent.ACTION_PROCESS_TEXT)) return
         val received = Intent(intent)
         externalWorker.execute {
             val request = externalParser.parse(received) ?: return@execute
@@ -129,6 +130,10 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
             result.success(ClientEnvironment.read(context))
             return
         }
+        if (call.method == "downloadNetwork") {
+            result.success(DownloadNetwork.read(context))
+            return
+        }
         if (call.method.startsWith("downloadOverlay")) {
             try {
                 when (call.method) {
@@ -163,6 +168,22 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
         }
         if (call.method == "takeExternalOpens") {
             result.success(externalOpens.take())
+            return
+        }
+        if (call.method in setOf("linkOpeningStatus", "linkOpeningSet", "linkOpeningSettings")) {
+            try {
+                val links = LinkOpening(context)
+                when (call.method) {
+                    "linkOpeningStatus" -> result.success(links.status())
+                    "linkOpeningSet" -> {
+                        links.setEnabled(call.argument<String>("id").orEmpty(), call.argument<Boolean>("enabled") == true)
+                        result.success(links.status())
+                    }
+                    else -> { links.openSettings(activity); result.success(null) }
+                }
+            } catch (_: Exception) {
+                result.error("link_opening", "无法更新链接打开方式，请在系统应用信息中检查默认打开设置", null)
+            }
             return
         }
         if (call.method == "downloadsReady") {
@@ -283,6 +304,23 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
                     "freeSpace" -> storage.freeBytes(call.argument<String>("path") ?: cache.absolutePath)
                     "storagePlan" -> storage.plan(cache, call.argument<String>("destination"))
                     "fileAvailability" -> saver.availability(call.argument<String>("path"))
+                    "inspectDownloadTarget" -> downloadTargets.inspect(requireNotNull(call.argument<String>("id")))
+                    "openDownloadTarget" -> {
+                        check(nativeCapabilities().optBoolean("directOutputFd")) { "下载组件版本过旧，无法直接写入所选目录，请安装完整新版应用" }
+                        downloadTargets.open(requireNotNull(call.argument<String>("id")),
+                            requireNotNull(call.argument<String>("name")), call.argument<String>("relativePath") ?: "",
+                            call.argument<String>("destination"))
+                    }
+                    "downloadTargetIo" -> downloadTargets.access(
+                        requireNotNull(call.argument<String>("id")), requireNotNull(call.argument<String>("lease")),
+                        requireNotNull(call.argument<String>("operation")), call.argument<Number>("offset")?.toLong() ?: 0,
+                        call.argument<Number>("length")?.toLong() ?: 0, call.argument<ByteArray>("data"),
+                    )
+                    "finishDownloadTarget" -> downloadTargets.finish(requireNotNull(call.argument<String>("id")),
+                        requireNotNull(call.argument<String>("lease")), requireNotNull(call.argument<String>("name")))
+                    "releaseDownloadTarget" -> { downloadTargets.release(requireNotNull(call.argument<String>("id")), requireNotNull(call.argument<String>("lease"))); null }
+                    "discardDownloadTarget" -> { downloadTargets.discard(requireNotNull(call.argument<String>("id"))); null }
+                    "forgetDownloadTarget" -> { downloadTargets.forget(requireNotNull(call.argument<String>("id"))); null }
                     "legacySnapshot" -> LegacyImport(context, vault).read().toString()
                     "gopeed" -> nativeCall(call.argument<String>("method") ?: "", JSONObject(call.argument<String>("args") ?: "{}"))
                     "saveFile" -> {
@@ -323,8 +361,11 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
                     "lanScan", "lanStat", "lanOpenRead", "lanRead", "lanCreateDirectories" -> error.message ?: "所选文件不可访问，请重新选择"
                     "prepareAppUpdate" -> error.message ?: "安装包校验失败，请重新下载或使用浏览器更新"
                     "legacySnapshot" -> "旧版数据读取失败，原文件已保留，可稍后重试导入"
+                    "gopeed" -> if (error is EngineKeyStore.Unavailable) error.message else "下载组件操作失败，请重试并检查下载目录"
                     "deleteFile" -> "文件未能删除，请检查目录权限后重试"
                     "saveFile" -> if (error.message == "保存已暂停") "保存已暂停" else "无法保存下载文件，请检查存储空间和目录权限"
+                    "inspectDownloadTarget", "openDownloadTarget", "downloadTargetIo", "finishDownloadTarget", "releaseDownloadTarget", "discardDownloadTarget", "forgetDownloadTarget" ->
+                        error.message ?: "无法访问下载目标，请检查存储空间和目录权限"
                     else -> "下载组件操作失败，请重试并检查下载目录"
                 }
                 main.post { result.error("operation", message, null) }
@@ -364,12 +405,28 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
         val id = args.optString("id")
         if (method in setOf("pause", "remove", "snapshot")) require(id.matches(Regex("[A-Za-z0-9_-]{1,100}")))
         when (method) {
-            "version" -> return "{\"version\":\"1.8.1\",\"protocol\":1}"
-            "open" -> openNative()
-            "begin" -> { check(nativeStarted); Gopeed.begin(args.toString()) }
+            "version" -> return nativeCapabilities().put("version", "1.8.1").put("protocol", 1).toString()
+            "open" -> return JSONObject().put("key", openNative(args)).toString()
+            "begin" -> {
+                check(nativeStarted)
+                val outputPath = args.optString("outputPath")
+                val outputKey = args.optString("outputKey")
+                if (outputPath.isNotEmpty() || outputKey.isNotEmpty()) {
+                    check(nativeCapabilities().optBoolean("directOutputFd")) { "下载组件不支持直接写入目标文件" }
+                    downloadTargets.validateBinding(id, outputPath, outputKey)
+                }
+                Gopeed.begin(args.toString())
+            }
             "httpProbeStart" -> { check(nativeStarted); Gopeed.startHttpProbe(args.toString()) }
             "httpProbeStatus" -> { check(nativeStarted); return Gopeed.httpProbeStatus(id) }
             "httpProbeStop" -> if (nativeStarted) Gopeed.stopHttpProbe(id)
+            "parserRequestStart" -> {
+                Seq.setContext(context.applicationContext)
+                parserNativeUsed = true
+                Gopeed::class.java.getMethod("startParserRequest", String::class.java).invoke(null, args.toString())
+            }
+            "parserRequestStatus" -> return Gopeed::class.java.getMethod("parserRequestStatus", String::class.java).invoke(null, id) as String
+            "parserRequestStop" -> Gopeed::class.java.getMethod("stopParserRequest", String::class.java).invoke(null, id)
             "torrentResolve" -> { check(nativeStarted); Gopeed.resolveTorrent(args.toString()) }
             "torrentMetadata" -> { check(nativeStarted); return Gopeed.torrentMetadata(id) }
             "torrentCancel" -> if (nativeStarted) Gopeed.cancelTorrent(id)
@@ -380,37 +437,35 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
             "snapshot" -> { check(nativeStarted); return Gopeed.snapshot(id) }
             "pause" -> if (nativeStarted) Gopeed.pause(id)
             "remove" -> if (nativeStarted) Gopeed.remove(id)
-            "close" -> if (nativeStarted) { Gopeed.close(); nativeStarted = false }
+            "close" -> { if (nativeStarted || parserNativeUsed) { Gopeed.close(); nativeStarted = false; parserNativeUsed = false; nativeDirectory = null }; downloadTargets.close() }
             else -> error("Unknown native method")
         }
         return "null"
     }
-    private fun openNative() {
-        val directory = File(context.noBackupFilesDir, "gopeed")
+    private fun nativeCapabilities(): JSONObject = runCatching {
+        // The method is absent from older AARs. Never advertise direct output merely
+        // because the Kotlin bridge knows the new protocol.
+        val method = Gopeed::class.java.getMethod("capabilities")
+        Seq.setContext(context.applicationContext)
+        JSONObject(method.invoke(null) as String)
+    }.getOrElse { JSONObject().put("directOutput", false) }
+    private fun openNative(args: JSONObject): String {
+        val directory = EngineKeyStore.directory(context.noBackupFilesDir, args.optString("storageGeneration"))
+        check(!nativeStarted || nativeDirectory == directory.absolutePath) { "请重启应用以切换恢复后的下载记录" }
         check(directory.mkdirs() || directory.isDirectory)
         check(cache.mkdirs() || cache.isDirectory)
+        val key = EngineKeyStore(directory, vault::open).load(args.optString("key"))
         if (!nativeStarted) {
-        val keyFile = AtomicFile(File(directory, "engine.key"))
-        val key = if (keyFile.baseFile.exists()) {
-            vault.open(keyFile.readFully().toString(Charsets.UTF_8)) ?: error("Native state key unavailable")
-        } else {
-            check(!File(directory, "gopeed.db").exists())
-            val bytes = ByteArray(32).also(SecureRandom()::nextBytes)
-            val value = Base64.encodeToString(bytes, Base64.NO_WRAP)
-            bytes.fill(0)
-            val stream = keyFile.startWrite()
-            try { stream.write(vault.seal(value).toByteArray(Charsets.UTF_8)); keyFile.finishWrite(stream) }
-            catch (error: Throwable) { keyFile.failWrite(stream); throw error }
-            value
-        }
-        Seq.setContext(context.applicationContext)
-        Gopeed.open(directory.absolutePath, cache.absolutePath, key)
-        nativeStarted = true
+            Seq.setContext(context.applicationContext)
+            Gopeed.open(directory.absolutePath, cache.absolutePath, key)
+            nativeStarted = true
+            nativeDirectory = directory.absolutePath
         }
         File(directory, "pending-removals").listFiles()?.forEach { marker ->
             require(marker.name.matches(Regex("[A-Za-z0-9_-]{1,100}")))
             Gopeed.remove(marker.name)
             check(marker.delete() || !marker.exists())
         }
+        return key
     }
 }

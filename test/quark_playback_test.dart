@@ -653,6 +653,14 @@ void main() {
   }
 
   test('Quark and UC original downloads keep their request bodies', () async {
+    // UC verifies the original file with a one-byte CDN probe.
+    f.intercept = (r) => r.uri.host == 'media.example'
+        ? HttpResult(206, 'x', {
+            'content-range': ['bytes 0-0/${_file.size}'],
+            'content-length': ['1'],
+            'content-type': ['video/mp4'],
+          })
+        : null;
     await f.repository.prepare(_personal, _file);
     await f.repository.prepare(
       const BrowseSession(
@@ -753,7 +761,7 @@ void main() {
           isTrue,
         );
         expect(
-          backends.every((b) => b.connections == 8 && b.segmentSizeMiB == 3),
+          backends.every((b) => b.connections == 128 && b.segmentSizeMiB == 4),
           isTrue,
         );
         await recent.close();

@@ -6,6 +6,8 @@ import '../domain/uploads.dart';
 import '../upload/upload_task.dart';
 import 'browser_page.dart';
 import 'common.dart';
+import 'app_context_menu.dart';
+import 'app_popup_menu.dart';
 import 'download_progress.dart';
 import 'transfer_widgets.dart';
 
@@ -212,6 +214,58 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
   }
 
   Widget _task(UploadTask t) {
+    return AppContextMenu<String>(
+      key: ValueKey(t.id),
+      enabled: !busyIds.contains(t.id),
+      identity: t.id,
+      actions: () {
+        final task = widget.services.uploads.task(t.id);
+        if (task == null || busyIds.contains(t.id)) return [];
+        return [
+          const AppMenuAction(
+            value: 'details',
+            label: '任务详情',
+            icon: CupertinoIcons.info_circle,
+          ),
+          const AppMenuAction(
+            value: 'folder',
+            label: '打开目标目录',
+            icon: CupertinoIcons.folder_open,
+          ),
+          const AppMenuAction(
+            value: 'copy-name',
+            label: '复制文件名',
+            icon: CupertinoIcons.doc_on_doc,
+          ),
+          if (task.active)
+            const AppMenuAction(
+              value: 'cancel',
+              label: '取消上传',
+              icon: CupertinoIcons.stop_circle,
+              destructive: true,
+            )
+          else ...[
+            if (task.canRetry)
+              const AppMenuAction(
+                value: 'retry',
+                label: '重新上传',
+                icon: CupertinoIcons.arrow_clockwise,
+              ),
+            const AppMenuAction(
+              value: 'remove',
+              label: '删除记录',
+              icon: CupertinoIcons.trash,
+              destructive: true,
+            ),
+          ],
+        ];
+      },
+      onSelected: (selected) => _taskAction(t.id, selected),
+      child: _taskContent(t),
+    );
+  }
+
+  Widget _taskContent(UploadTask t) {
     final manager = widget.services.uploads;
     final locked = busyIds.contains(t.id);
     final tint = _tint(t);
@@ -459,9 +513,19 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
       detailsOpen = false;
     }
     if (!mounted || selected == null) return;
+    await _taskAction(id, selected);
+  }
+
+  Future<void> _taskAction(String id, String selected) async {
+    if (!mounted || busyIds.contains(id)) return;
     final task = widget.services.uploads.task(id);
     if (task == null) return;
     switch (selected) {
+      case 'details':
+        await _details(id);
+      case 'copy-name':
+        await widget.services.copyText(task.name);
+        if (mounted) message(context, '文件名已复制');
       case 'folder':
         await action(task, () => openFolder(task));
       case 'cancel':

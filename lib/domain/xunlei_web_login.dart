@@ -1,6 +1,15 @@
 class XunleiWebLogin {
   static const clientId = 'Xqp0kJBXWhwaTpB6';
   static const storageKey = 'credentials_$clientId';
+  static const storageOrigin = 'https://pan.xunlei.com';
+  static const accountOrigin = 'https://i.xunlei.com';
+  static const accountClientId = 'XW5SkOhLDjnOZP7J';
+
+  // The cloud's embedded auth page omits Xiaomi. The account center exposes
+  // all official providers and returns to the cloud to issue its own token.
+  static const loginUrl =
+      '$accountOrigin/center/account/personal/login/'
+      '?redirect_url=https%3A%2F%2Fpan.xunlei.com%2F';
 
   static const readScript = r'''(() => {
     try {
@@ -26,11 +35,16 @@ class XunleiWebLogin {
     } catch (_) { return ''; }
   })()''';
 
-  static const clearScript = r'''(() => {
-    const prefix = 'credentials_Xqp0kJBXWhwaTpB6';
-    for (const key of Object.keys(localStorage)) {
-      if (key === prefix || key.startsWith(prefix + '@') ||
-          key === 'current_sub' || key === 'captcha_Xqp0kJBXWhwaTpB6') localStorage.removeItem(key);
+  static const clearScript =
+      '''(() => {
+    const client = location.origin === '$accountOrigin' ? '$accountClientId' : '$clientId';
+    const prefix = 'credentials_' + client;
+    for (const storage of [localStorage, sessionStorage]) {
+      for (const key of Object.keys(storage)) {
+        if (key === prefix || key.startsWith(prefix + '@') ||
+            key === 'current_sub' || key === 'captcha_' + client ||
+            key === 'oauth_sign_in_' + client) storage.removeItem(key);
+      }
     }
   })()''';
 }

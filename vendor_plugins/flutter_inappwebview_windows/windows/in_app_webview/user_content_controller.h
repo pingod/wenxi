@@ -4,6 +4,9 @@
 #include <functional>
 #include <map>
 #include <vector>
+#include <memory>
+#include <WebView2.h>
+#include <wil/com.h>
 
 #include "../plugin_scripts_js/javascript_bridge_js.h"
 #include "../plugin_scripts_js/plugin_scripts_util.h"
@@ -53,6 +56,9 @@ namespace flutter_inappwebview_plugin
     void createContentWorld(const std::shared_ptr<ContentWorld> contentWorld, const std::function<void(int)> completionHandler);
   private:
     InAppWebView* webView_;
+    std::shared_ptr<int> lifetime_ = std::make_shared<int>(0);
+    wil::com_ptr<ICoreWebView2DevToolsProtocolEventReceiver> executionContextReceiver_;
+    EventRegistrationToken executionContextToken_ = {};
 
     // used to track Content World names -> Execution Context ID
     std::map<std::string, int> contentWorlds_;

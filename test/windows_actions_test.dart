@@ -57,4 +57,41 @@ void main() {
       await expectLater(unavailable.shutdown(), throwsA(isA<AppException>()));
     },
   );
+
+  test('Hibernation requests only /h on supported Windows systems', () async {
+    final calls = <(String, List<String>)>[];
+    final windows = WindowsActions(
+      supported: true,
+      start: (_, _) async => fail('No detached process start expected'),
+      run: (command, arguments) async => calls.add((command, arguments)),
+    );
+    await windows.hibernate();
+    expect(calls, hasLength(1));
+    expect(calls.single.$1, 'shutdown.exe');
+    expect(calls.single.$2, ['/h']);
+    final unavailable = WindowsActions(
+      supported: false,
+      run: (_, _) async => fail('Unsupported platform must not run commands'),
+    );
+    await expectLater(unavailable.hibernate(), throwsA(isA<AppException>()));
+  });
+
+  test(
+    'Hibernation refusal propagates without another power command',
+    () async {
+      final calls = <(String, List<String>)>[];
+      const error = AppException('fixture hibernation disabled');
+      final windows = WindowsActions(
+        supported: true,
+        run: (command, arguments) async {
+          calls.add((command, arguments));
+          throw error;
+        },
+      );
+      await expectLater(windows.hibernate(), throwsA(same(error)));
+      expect(calls, hasLength(1));
+      expect(calls.single.$1, 'shutdown.exe');
+      expect(calls.single.$2, ['/h']);
+    },
+  );
 }

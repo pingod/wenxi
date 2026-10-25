@@ -1,9 +1,11 @@
 import 'dart:async';
 import '../../core/json.dart';
+import '../../core/operation_progress.dart';
 import '../../diagnostics/app_log.dart';
 import '../../domain/auth.dart';
 import '../../domain/models.dart';
 import '../../domain/uploads.dart';
+import '../../domain/file_types.dart';
 import '../../download/download_request.dart';
 import '../http.dart';
 import '../state_store.dart';
@@ -98,14 +100,15 @@ class CookieCloudConnector extends QuarkUcConnector {
     final json = result.json;
     final status = int.tryParse(json.str('status'));
     final code = int.tryParse(json.str('code'));
-    require(
-      result.successful &&
-          (status == 200 || status == null && code == 0) &&
-          (!json.containsKey('code') || code == 0),
-      json
-          .str('message')
-          .ifEmpty('${platform.shortName} 请求失败（HTTP ${result.status}）'),
-    );
+    if (!result.successful ||
+        !(status == 200 || status == null && code == 0) ||
+        json.containsKey('code') && code != 0) {
+      throw providerError(
+        json.str('message'),
+        '${platform.shortName} 请求失败（HTTP ${result.status}）',
+        code: code,
+      );
+    }
     require(
       json['data'] is Map || json['data'] is List,
       '${platform.shortName} 响应缺少有效数据，请重试',
@@ -253,10 +256,26 @@ class CookieCloudConnector extends QuarkUcConnector {
     // With no selected account, guest access is always attempted. With an
     // account, the guest and authenticated routes have independent settings.
     final directEnabled = directShareDownloadEnabled;
-    final guestEnabled =
-        credential == null || (directEnabled?.call(false) ?? true);
-    final accountEnabled =
-        credential != null && (directEnabled?.call(true) ?? true);
+    return _tryShareDownload(
+      session,
+      file,
+      credential,
+      guestEnabled: credential == null || (directEnabled?.call(false) ?? true),
+      accountEnabled: credential != null && (directEnabled?.call(true) ?? true),
+      onRefreshed: onRefreshed,
+    );
+  }
+
+  Future<DownloadSpec?> _tryShareDownload(
+    BrowseSession session,
+    CloudFile file,
+    Credential? credential, {
+    required bool guestEnabled,
+    required bool accountEnabled,
+    String? reason,
+    void Function(BrowseSession, CloudFile)? onRefreshed,
+  }) async {
+    if (session.mode != BrowseMode.share) return null;
     if (!guestEnabled && !accountEnabled) return null;
     require(!file.isDirectory, '文件夹不能直接下载');
     var refreshed = false;
@@ -345,7 +364,11 @@ class CookieCloudConnector extends QuarkUcConnector {
           '请登录后重试（$guestFailure）',
         );
       }
-      throw AccountLoginRequired('${platform.shortName}此文件不支持游客下载，请登录后重试');
+      throw AccountLoginRequired(
+        quark
+            ? '夸克游客不正常超过50MB文件下载，请登录夸克网盘再试'
+            : '${platform.shortName}此文件不支持游客下载，请登录后重试',
+      );
     }
     if (!accountEnabled) {
       DiagnosticLog.event(
@@ -364,6 +387,7 @@ class CookieCloudConnector extends QuarkUcConnector {
         'platform': platform.key,
         'stage': 'authenticated_direct',
         'reason':
+            reason ??
             guestFailure ??
             (guestEnabled ? 'guest_access_restricted' : 'guest_disabled'),
       },
@@ -534,6 +558,8 @@ class CookieCloudConnector extends QuarkUcConnector {
         session.meta('stoken').isNotEmpty && file.token.isNotEmpty,
         '${platform.shortName} 分享凭证已缺失，请重新打开分享列表',
       );
+    }
+    if (session.mode == BrowseMode.share || !forPlayback) {
       await _sessions.ensureFresh();
     }
     final result = await super.prepareFile(
@@ -546,6 +572,24 @@ class CookieCloudConnector extends QuarkUcConnector {
     _sessions.checkpoint();
     return result;
   });
+
+  /// Read only a bounded prefix without buffering the complete media object.
+  Future<HttpResult> probeDownload(
+    String address,
+    Map<String, String> requestHeaders, {
+    bool followRedirects = true,
+  }) async {
+    _sessions.checkpoint();
+    final result = await _sessions.transport.peek(
+      address,
+      requestHeaders,
+      maxBytes: 1,
+      followRedirects: followRedirects,
+    );
+    _sessions.checkpoint();
+    RequestScope.checkpoint();
+    return result;
+  }
 
   Future<DownloadSpec> _prepare(
     BrowseSession session,
@@ -564,12 +608,48 @@ class CookieCloudConnector extends QuarkUcConnector {
       );
     }
     await _sessions.ensureFresh();
-    final spec = await super.prepareFile(
-      session,
-      file,
-      credential,
-      forPlayback: forPlayback,
-    );
+    late DownloadSpec spec;
+    try {
+      spec = await super.prepareFile(
+        session,
+        file,
+        credential,
+        forPlayback: forPlayback,
+      );
+    } on QuarkUcCapacityExceeded {
+      if (!quark ||
+          forPlayback ||
+          session.mode != BrowseMode.share ||
+          credential == null) {
+        rethrow;
+      }
+      _sessions.checkpoint();
+      // Transfer may have renewed the account cookies. Keep the same account
+      // revision and use its current session for this download only.
+      final current = _sessions.current!;
+      final account = (current.owner ?? credential).withFields({
+        'primary': current.cookie,
+        _sessions.refreshField: '${current.refreshedAt}',
+      }, preserveRevision: true);
+      final direct = await OperationProgress.step(
+        OperationStage.downloadLink,
+        () => _tryShareDownload(
+          session,
+          file,
+          account,
+          guestEnabled: false,
+          accountEnabled: true,
+          reason: 'cloud_capacity_limit',
+        ),
+      );
+      _sessions.checkpoint();
+      if (direct == null) {
+        throw const QuarkUcCapacityExceeded(
+          '夸克网盘空间不足，已自动尝试免转存下载但未成功，请清理网盘空间后重试',
+        );
+      }
+      return direct;
+    }
     _sessions.checkpoint();
     final uri = Uri.tryParse(spec.url);
     require(
@@ -591,12 +671,13 @@ class CookieCloudConnector extends QuarkUcConnector {
     // alone cannot establish that this is the selected media. Check length
     // before either playback or download; never accept a replacement object.
     if (!quark &&
-        spec.checksumType == 'md5' &&
-        RegExp(r'^[0-9a-f]{32}$').hasMatch(spec.checksumValue ?? '')) {
-      final probe = await _sessions.transport.peek(spec.url, {
+        (fileKind(file.name) == FileKind.video ||
+            spec.checksumType == 'md5' &&
+                RegExp(r'^[0-9a-f]{32}$').hasMatch(spec.checksumValue ?? ''))) {
+      final probe = await probeDownload(spec.url, {
         ...headers(''),
         'Accept-Encoding': 'identity',
-      }, maxBytes: 1);
+      });
       _sessions.checkpoint();
       require(probe.successful, 'UC 文件长度检查失败（HTTP ${probe.status}），请重试');
       final encoding = probe.header('content-encoding').toLowerCase();

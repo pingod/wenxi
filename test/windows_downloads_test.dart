@@ -6,16 +6,18 @@ import 'package:asterlink/app_services.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/downloads.dart';
 import 'package:asterlink/domain/models.dart';
+import 'package:asterlink/download/download_shutdown.dart';
 import 'package:asterlink/main.dart';
 import 'package:asterlink/platform/windows_actions.dart';
 import 'package:asterlink/ui/downloads_page.dart';
 import 'package:asterlink/ui/player_page.dart';
+import 'package:asterlink/ui/text_preview.dart';
 import 'support.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   testWidgets(
-    'Windows videos play directly and other files open Explorer',
+    'Windows previews text, plays videos and preserves explicit Explorer actions',
     (tester) async {
       final calls = <(String, List<String>)>[];
       final played = <String>[];
@@ -96,12 +98,71 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        expect(find.text('下载完成后关机'), findsOneWidget);
+        expect(find.text('下载完成后'), findsOneWidget);
+        expect(find.text('关机'), findsOneWidget);
         expect(services.downloadShutdown.enabled, isFalse);
-        await tester.runAsync(() async {
-          await tester.tap(find.byTooltip('打开文件'));
-          await until(() => calls.isNotEmpty);
-        });
+        await tester.tap(
+          find.byKey(const Key('download-completion-hibernate')),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          services.downloadShutdown.action,
+          DownloadCompletionAction.hibernate,
+        );
+        expect(find.text('休眠'), findsOneWidget);
+        expect(services.downloadShutdown.enabled, isFalse);
+        final powerSwitch = find.descendant(
+          of: find.byKey(const Key('download-shutdown-option')),
+          matching: find.byType(Switch),
+        );
+        await tester.tap(powerSwitch);
+        await tester.pumpAndSettle();
+        expect(services.downloadShutdown.enabled, isTrue);
+        await tester.tap(powerSwitch);
+        await tester.pumpAndSettle();
+        expect(services.downloadShutdown.enabled, isFalse);
+        addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+        for (final (size, scale) in [
+          (const Size(320, 700), 1.8),
+          (const Size(1100, 780), 1.0),
+        ]) {
+          tester.view.physicalSize = size;
+          tester.platformDispatcher.textScaleFactorTestValue = scale;
+          await tester.pumpAndSettle();
+          expect(
+            find
+                .byKey(const Key('download-completion-hibernate'))
+                .hitTestable(),
+            findsOneWidget,
+          );
+          expect(powerSwitch.hitTestable(), findsOneWidget);
+          expect(tester.takeException(), isNull);
+        }
+        await tester.tap(find.byTooltip('预览文本'));
+        for (
+          var i = 0;
+          i < 100 && find.byType(TextPreview).evaluate().isEmpty;
+          i++
+        ) {
+          await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 20)),
+          );
+          await tester.pump();
+        }
+        expect(find.byType(TextPreview), findsOneWidget);
+        expect(find.text('fixture'), findsOneWidget);
+        expect(calls, isEmpty);
+        Navigator.of(tester.element(find.byType(LocalTextPreviewPage))).pop();
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('说明.txt'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('打开所在文件夹'));
+        for (var i = 0; i < 100 && calls.isEmpty; i++) {
+          await tester.pump(const Duration(milliseconds: 20));
+          await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 10)),
+          );
+        }
         await tester.pumpAndSettle();
         expect(calls.single.$1, 'explorer.exe');
         expect(calls.single.$2, ['/select,', document]);

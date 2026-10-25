@@ -1,6 +1,9 @@
 {
   "schema": 1,
   "revision": 1,
+  "parserHub": {
+    "url": "https://your-parser-hub.example"
+  },
   "announcement": {
     "enabled": false,
     "id": "notice-auto-1",

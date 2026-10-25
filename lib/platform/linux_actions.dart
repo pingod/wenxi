@@ -69,6 +69,15 @@ class LinuxActions implements DesktopActions {
     require(result.exitCode == 0, '系统未接受关机请求，请检查权限后重试');
   }
 
+  @override
+  Future<void> hibernate() async {
+    require(supported, '当前平台不支持下载完成后休眠');
+    // logind refuses hibernate when the machine has no swap to resume from, so
+    // the failure reaches the caller instead of a silent no-op.
+    final result = await _run('systemctl', const ['hibernate']);
+    require(result.exitCode == 0, '系统未接受休眠请求，请检查是否已启用休眠及当前权限后重试');
+  }
+
   static Future<ProcessResult> _runProcess(
     String executable,
     List<String> arguments,

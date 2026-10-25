@@ -3,9 +3,12 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:dio/dio.dart';
+import 'package:dio/io.dart';
 import '../core/json.dart';
 import '../data/http.dart';
 import '../domain/downloads.dart';
+import '../domain/download_network_policy.dart';
+import '../domain/models.dart';
 
 class DownloadHttpException extends AppException {
   DownloadHttpException(this.status, {this.retryAfter, this.exhausted = false})
@@ -120,18 +123,45 @@ class Probe {
 }
 
 class TransferHttp {
-  TransferHttp({Dio? client})
-    : dio =
-          client ??
-          Dio(
-            BaseOptions(
-              connectTimeout: const Duration(seconds: 20),
-              receiveTimeout: const Duration(seconds: 45),
-              sendTimeout: const Duration(seconds: 30),
-              validateStatus: (_) => true,
-            ),
-          );
+  TransferHttp({
+    Dio? client,
+    Dio Function(DownloadNetworkPolicy)? restrictedClientFactory,
+  }) : dio = client ?? _createClient(),
+       _restrictedClientFactory =
+           restrictedClientFactory ??
+           ((policy) => _createClient(policy: policy));
   final Dio dio;
+  final Dio Function(DownloadNetworkPolicy) _restrictedClientFactory;
+  static final _policyKey = Object();
+
+  Future<Probe> probeDownload(DownloadSpec spec) => runZoned(
+    () => probe(spec.url, spec.headers),
+    zoneValues: {_policyKey: spec.networkPolicy},
+  );
+
+  static Dio _createClient({DownloadNetworkPolicy? policy}) =>
+      Dio(
+          BaseOptions(
+            connectTimeout: const Duration(seconds: 20),
+            receiveTimeout: const Duration(seconds: 45),
+            sendTimeout: const Duration(seconds: 30),
+            validateStatus: (_) => true,
+            headers: {
+              HttpHeaders.userAgentHeader:
+                  'Dart/${Platform.version.split('.').take(2).join('.')} (dart:io)',
+            },
+          ),
+        )
+        ..httpClientAdapter = IOHttpClientAdapter(
+          // Dart prepopulates redirected requests with HttpClient.userAgent,
+          // overriding the download URL's required UA. Keep the default at the
+          // request level so each redirect copies that request's effective UA.
+          createHttpClient:
+              policy?.client ??
+              () => HttpClient()
+                ..idleTimeout = const Duration(seconds: 3)
+                ..userAgent = null,
+        );
 
   Uri _responseUri(Response<dynamic> response) {
     var uri = response.requestOptions.uri;
@@ -166,6 +196,15 @@ class TransferHttp {
       '下载地址无效',
     );
     try {
+      final policy = Zone.current[_policyKey] as DownloadNetworkPolicy?;
+      if (policy != null) {
+        return await _restrictedStream(
+          url,
+          h,
+          policy,
+          cancel ?? RequestScope.current,
+        );
+      }
       return await dio.get<ResponseBody>(
         url,
         cancelToken: cancel ?? RequestScope.current,
@@ -177,10 +216,74 @@ class TransferHttp {
       );
     } on DioException catch (e) {
       if (CancelToken.isCancel(e)) rethrow;
+      if (e.error is DownloadNetworkPolicyException) throw e.error!;
       throw DownloadNetworkException(
         e.type.name,
         retryable: retryableDownloadError(e),
       );
+    }
+  }
+
+  Future<Response<ResponseBody>> _restrictedStream(
+    String url,
+    Map<String, String> headers,
+    DownloadNetworkPolicy policy,
+    CancelToken? cancel,
+  ) async {
+    var uri = policy.checkedUrl(url),
+        currentHeaders = Map<String, String>.of(headers);
+    final client = _restrictedClientFactory(policy);
+    final subscription = cancel?.whenCancel.asStream().listen(
+      (_) => client.close(force: true),
+    );
+    var handedOff = false;
+    void close() {
+      client.close(force: true);
+      unawaited(subscription?.cancel());
+    }
+
+    try {
+      for (var hops = 0; ; hops++) {
+        final response = await client.get<ResponseBody>(
+          uri.toString(),
+          cancelToken: cancel,
+          options: Options(
+            headers: currentHeaders,
+            responseType: ResponseType.stream,
+            followRedirects: false,
+          ),
+        );
+        final location = response.headers.value('location');
+        if ({301, 302, 303, 307, 308}.contains(response.statusCode) &&
+            location != null) {
+          await response.data!.stream.listen(null).cancel();
+          if (hops >= 5) throw const DownloadNetworkPolicyException();
+          final next = policy.checkedUrl(uri.resolve(location).toString());
+          currentHeaders = DownloadNetworkPolicy.redirectedHeaders(
+            uri,
+            next,
+            currentHeaders,
+          );
+          uri = next;
+          continue;
+        }
+        response.data!.stream = _closingStream(response.data!.stream, close);
+        handedOff = true;
+        return response;
+      }
+    } finally {
+      if (!handedOff) close();
+    }
+  }
+
+  static Stream<Uint8List> _closingStream(
+    Stream<Uint8List> stream,
+    void Function() close,
+  ) async* {
+    try {
+      yield* stream;
+    } finally {
+      close();
     }
   }
 

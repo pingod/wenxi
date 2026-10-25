@@ -1,6 +1,6 @@
 import '../core/json.dart';
 
-/// Helpers for the Chinese Xunlei share command format.
+/// Request and response helpers for Xunlei share commands.
 class XunleiKouling {
   static const jumpApi =
       'https://api-shoulei-ssl.xunlei.com/xlppc.searcher.api/jump';
@@ -30,21 +30,6 @@ class XunleiKouling {
       normalized = normalized.substring(0, normalized.length - 1).trimRight();
     }
     return normalized;
-  }
-
-  static bool looksLike(String value) {
-    final normalized = normalize(value);
-    return normalized.isNotEmpty &&
-        normalized.length <= 64 &&
-        normalized.runes.every(
-          (rune) =>
-              (rune >= 0x4e00 && rune <= 0x9fff) ||
-              (rune >= 0x3400 && rune <= 0x4dbf) ||
-              (rune >= 0x30 && rune <= 0x39) ||
-              (rune >= 0x41 && rune <= 0x5a) ||
-              (rune >= 0x61 && rune <= 0x7a),
-        ) &&
-        normalized.runes.any((rune) => rune >= 0x3400 && rune <= 0x9fff);
   }
 
   static String jumpUrl(String keyword) {

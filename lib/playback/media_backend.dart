@@ -112,7 +112,7 @@ class MediaKitBackend extends PlaybackBackend {
            Player(
              configuration: PlayerConfiguration(
                title: '文析助手',
-               bufferSize: 8 * 1024 * 1024,
+               bufferSize: 16 * 1024 * 1024,
                libass: video,
              ),
            ) {
@@ -257,14 +257,32 @@ class MediaKitBackend extends PlaybackBackend {
   void _onPlayerState() {
     if (_closing) return;
     final state = player.state;
+    // mpv briefly reports buffering while draining the final decoded packets,
+    // before its completed event arrives. This is not a network underrun.
+    const eofMargin = Duration(milliseconds: 250);
+    final atEnd =
+        state.completed ||
+        state.duration > Duration.zero &&
+            state.position + eofMargin >= state.duration &&
+            state.buffer + eofMargin >= state.duration;
     final elapsed = _openWatch?.elapsed;
     if (elapsed != null) {
       _metrics.observe(
         elapsed: elapsed,
-        playing: _wantsPlay && state.playing,
+        playing: _wantsPlay && state.playing && !atEnd,
         buffering: state.buffering,
         position: state.position,
       );
+      if (_enhancedPrefetch &&
+          !atEnd &&
+          _performanceTimer?.isActive == true &&
+          _bufferPolicy.resumeSeconds(
+                rebufferCount: _metrics.bufferingCount,
+                rate: state.rate,
+              ) !=
+              _resumeBufferSeconds) {
+        unawaited(_samplePerformance());
+      }
       if (_metrics.firstFrame == null &&
           _surfaceReady &&
           (state.width ?? 0) > 1 &&
@@ -427,8 +445,9 @@ class MediaKitBackend extends PlaybackBackend {
   Stopwatch? _openWatch;
   String _transport = 'pending';
   int? _networkTimeoutSeconds;
+  double _resumeBufferSeconds = 1;
   final _transportChecks = <Timer>[];
-  int _connections = 8, _segmentSizeMiB = 3;
+  int _connections = 12, _segmentSizeMiB = 4;
   String _streamingDescription = '';
   @override
   String get streamingDescription => _streamingDescription;
@@ -445,6 +464,10 @@ class MediaKitBackend extends PlaybackBackend {
     'effectiveConnections': _proxy?.connections ?? 1,
     'packetCacheBytes': _bufferPolicy.forwardBytes,
     'proxyCacheLimit': ?_proxy?.maxCacheBytes,
+    'preloadSeconds': _enhancedPrefetch
+        ? PlaybackBufferPolicy.readaheadSeconds
+        : 30,
+    'resumeBufferSeconds': _resumeBufferSeconds,
     'receiveBytesPerSecond': _bufferPolicy.bytesPerSecond.round(),
     'mediaInfoReady': _mediaInfoReady,
     'playing': player.state.playing,
@@ -464,6 +487,8 @@ class MediaKitBackend extends PlaybackBackend {
       player.state.duration > Duration.zero ||
       player.state.tracks.video.any((t) => !{'auto', 'no'}.contains(t.id)) ||
       player.state.tracks.audio.any((t) => !{'auto', 'no'}.contains(t.id));
+
+  bool get _enhancedPrefetch => _networkFile && downloadCache == null;
 
   void _cancelTransportChecks() {
     for (final timer in _transportChecks) {
@@ -523,7 +548,10 @@ class MediaKitBackend extends PlaybackBackend {
 
   @override
   Future<void> setConnections(int value) async {
-    _connections = value.clamp(1, 32);
+    _connections = value.clamp(
+      PlaybackPreferences.minConnections,
+      PlaybackPreferences.maxConnections,
+    );
     _bufferPolicy.setLimit(_connections);
     _proxy?.connections = downloadCache == null ? _bufferPolicy.connections : 2;
     if (_proxy?.supported == true) {
@@ -582,11 +610,6 @@ class MediaKitBackend extends PlaybackBackend {
       final properties = <String, String>{
         'cache': 'yes',
         'cache-on-disk': 'no',
-        'cache-secs': '30',
-        'demuxer-readahead-secs': '30',
-        'demuxer-max-bytes': '8388608',
-        'demuxer-max-back-bytes': '2097152',
-        'cache-pause-wait': '1',
         'sub-ass-override': 'no',
       };
       for (final entry in properties.entries) {
@@ -654,6 +677,24 @@ class MediaKitBackend extends PlaybackBackend {
             ).hasMatch(Uri.tryParse(source.url)?.path ?? ''));
     if (_closing) return;
     if (native is NativePlayer) {
+      _resumeBufferSeconds = _enhancedPrefetch
+          ? _bufferPolicy.resumeSeconds(rebufferCount: 0, rate: 1)
+          : 1;
+      final readahead = _enhancedPrefetch
+          ? PlaybackBufferPolicy.readaheadSeconds
+          : 30;
+      for (final entry in {
+        'cache-secs': '$readahead',
+        'demuxer-readahead-secs': '$readahead',
+        'demuxer-max-bytes': '${_bufferPolicy.forwardBytes}',
+        'demuxer-max-back-bytes': '${PlaybackBufferPolicy.backBytes}',
+        'cache-pause': 'yes',
+        'cache-pause-initial': _enhancedPrefetch ? 'yes' : 'no',
+        'cache-pause-wait': '$_resumeBufferSeconds',
+      }.entries) {
+        if (_closing) return;
+        await native.setProperty(entry.key, entry.value);
+      }
       // Upstream headers are validated before streaming packets to mpv. Keep
       // enough time for a bounded upstream retry or paused transport; the proxy
       // still enforces its own shorter response and inactivity deadlines.
@@ -672,7 +713,10 @@ class MediaKitBackend extends PlaybackBackend {
       Media(
         url,
         httpHeaders: headers,
-        start: start,
+        // Let a fresh source read its first packets naturally. An explicit
+        // zero makes mpv seek during HLS initialization; for Aliyun's TS
+        // timestamps that seek can fail and discard the first video segment.
+        start: start > Duration.zero ? start : null,
         extras: {'title': source.fileName},
       ),
       play: false,
@@ -693,12 +737,24 @@ class MediaKitBackend extends PlaybackBackend {
       final native = player.platform;
       if (native is! NativePlayer) return;
       final state = player.state, proxy = _proxy;
+      if (_enhancedPrefetch) {
+        final resume = _bufferPolicy.resumeSeconds(
+          rebufferCount: _metrics.bufferingCount,
+          rate: state.rate,
+        );
+        if (resume != _resumeBufferSeconds) {
+          await native.setProperty('cache-pause-wait', '$resume');
+          _resumeBufferSeconds = resume;
+        }
+      }
+      if (_closing) return;
       if (downloadCache == null &&
           {'segmented', 'direct', 'torrent'}.contains(_transport)) {
         final target = _bufferPolicy.forwardTarget(
           size: _sourceBytes,
           duration: state.duration,
           rate: state.rate,
+          seconds: _enhancedPrefetch ? PlaybackBufferPolicy.forwardSeconds : 8,
         );
         if (target > _bufferPolicy.forwardBytes &&
             (proxy == null ||

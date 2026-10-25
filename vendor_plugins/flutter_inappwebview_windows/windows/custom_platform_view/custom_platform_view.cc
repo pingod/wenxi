@@ -1,4 +1,5 @@
 #include "../utils/log.h"
+#include "../utils/texture_release.h"
 #include "custom_platform_view.h"
 
 #include <flutter/event_stream_handler_functions.h>
@@ -134,7 +135,7 @@ namespace flutter_inappwebview_plugin
         }));
 #else
     texture_bridge_ = std::make_unique<TextureBridgeFallback>(
-      graphics_context, webview_->surface());
+      graphics_context, view->surface());
 
     flutter_texture_ =
       std::make_unique<flutter::TextureVariant>(flutter::PixelBufferTexture(
@@ -147,7 +148,9 @@ namespace flutter_inappwebview_plugin
 
     texture_id_ = texture_registrar->RegisterTexture(flutter_texture_.get());
     texture_bridge_->SetOnFrameAvailable(
-      [this]() { texture_registrar_->MarkTextureFrameAvailable(texture_id_); });
+      [registrar = texture_registrar_, id = texture_id_]() {
+        registrar->MarkTextureFrameAvailable(id);
+      });
     // texture_bridge_->SetOnSurfaceSizeChanged([this](Size size) {
     //  view->SetSurfaceSize(size.width, size.height);
     //});
@@ -199,8 +202,15 @@ namespace flutter_inappwebview_plugin
   CustomPlatformView::~CustomPlatformView()
   {
     debugLog("dealloc CustomPlatformView");
+    UnregisterMethodCallHandler();
+    if (event_channel_) event_channel_->SetStreamHandler(nullptr);
+    if (view) {
+      view->onSurfaceSizeChanged(nullptr);
+      view->onCursorChanged(nullptr);
+    }
     event_sink_ = nullptr;
-    texture_registrar_->UnregisterTexture(texture_id_, nullptr);
+    releaseWebViewTexture(texture_registrar_, texture_id_,
+      std::move(flutter_texture_), std::move(texture_bridge_));
   }
 
   void CustomPlatformView::RegisterEventHandlers()
