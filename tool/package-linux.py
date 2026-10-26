@@ -41,6 +41,11 @@ REQUIRED_BUNDLE_FILES = (
 PRIVATE_PARTS = {'.local', '.git', 'logs', 'diagnostics'}
 PRIVATE_SUFFIXES = {'.jks', '.keystore', '.p12', '.pfx', '.log', '.pdb'}
 DEFAULT_EPOCH = 1704067200  # 2024-01-01T00:00:00Z keeps builds reproducible.
+# The state key lives in the Secret Service, so a desktop session needs a
+# provider (gnome-keyring, KWallet, ...) or the first launch waits out the
+# D-Bus activation timeout. Recommended, not required: without any session bus
+# the app falls back to a local key, and other providers exist.
+SECRET_SERVICE = 'gnome-keyring'
 DEB_ARCH = {'x86_64': 'amd64', 'aarch64': 'arm64'}
 ARCH_ARCH = {'x86_64': 'x86_64', 'aarch64': 'aarch64'}
 # Debian renamed several libraries during the t64 transition, so the affected
@@ -244,6 +249,10 @@ def deb_control_text(version, stage, maintainer, homepage, description):
         'Maintainer: ' + maintainer,
         'Installed-Size: ' + str(max(1, _installed_size(stage) // 1024 + 1)),
         'Depends: ' + ', '.join(DEB_DEPENDS),
+        # Not a hard dependency: a session bus without any provider hangs the
+        # first launch, but other implementations exist and a bare busless
+        # environment works, so installing one is only suggested.
+        'Recommends: ' + SECRET_SERVICE,
         'Section: net',
         'Priority: optional',
         'Homepage: ' + homepage,
@@ -320,6 +329,9 @@ def pkg_info(version, pkgrel, stage, packager, homepage, description):
         'arch = ' + ARCH_ARCH[machine_arch()],
         'license = AGPL-3.0-only',
         *('depend = ' + name for name in ARCH_DEPENDS),
+        # Arch has no "recommends"; an optional dependency with a reason is the
+        # equivalent way to point at a Secret Service provider.
+        'optdepend = ' + SECRET_SERVICE + ': 提供 org.freedesktop.secrets，首次启动保存状态密钥需要（KWallet 等亦可）',
         '',
     ))
 

@@ -130,14 +130,15 @@ python tool/package-linux.py --format arch --compression gzip
 - 桌面文件 `/usr/share/applications/com.asterlink.asterlink.desktop` 与 512×512 图标 `/usr/share/icons/hicolor/512x512/apps/asterlink.png`。
 - `/usr/share/doc/asterlink/copyright` 包含 AGPL-3.0 正文（`LICENSE`），满足分发义务。
 
-deb 的 `Depends` 由 `tool/package-linux.py` 的 `DEB_DEPENDS` 固定声明（GTK3、libsecret、ayatana-appindicator、mpv、epoxy、pango、cairo、gdk-pixbuf、harfbuzz、fontconfig、dbusmenu-glib、libstdc++6、`libc6 (>= 2.38)`）；Arch 的 `depend` 由 `ARCH_DEPENDS` 声明。**`libc6 (>= 2.38)` 来自 `libflutter_secure_storage_linux_plugin.so`**，所以 Debian 12（glibc 2.36）不满足，Ubuntu 24.04 及以上可以。
+deb 的 `Depends` 由 `tool/package-linux.py` 的 `DEB_DEPENDS` 固定声明（GTK3、libsecret、ayatana-appindicator、mpv、epoxy、pango、cairo、gdk-pixbuf、harfbuzz、fontconfig、dbusmenu-glib、libstdc++6、`libc6 (>= 2.38)`）；Arch 的 `depend` 由 `ARCH_DEPENDS` 声明。**`libc6 (>= 2.38)` 来自 `libflutter_secure_storage_linux_plugin.so`**，所以 Debian 12（glibc 2.36）不满足，Ubuntu 24.04 及以上可以。两种包都另外**推荐**（不是依赖）`gnome-keyring`：deb 写 `Recommends:`，Arch 写 `optdepend`，原因见「已知限制」首条。
 
 重新构建同一版本会报错而不是静默覆盖；先删掉旧包再出。设置 `SOURCE_DATE_EPOCH` 可以得到可复现的字节一致的包。
 
-`.github/workflows/packages.yml` 会在 push 与 PR 时构建两种包，装上 deb 后跑 `ldd` 检查缺库、再用 xvfb 冒烟启动一次，最后把包与 `SHA256SUMS.txt` 作为 artifact 上传。
+`.github/workflows/packages.yml` 会在 push 与 PR 时构建两种包，装上 deb 后跑 `ldd` 检查缺库、再在 `dbus-run-session` + `gnome-keyring` + xvfb 里冒烟启动一次（见「已知限制」），最后把包与 `SHA256SUMS.txt` 作为 artifact 上传。Windows 侧同一条 workflow 用 Inno Setup 产出安装包。
 
 ## 已知限制
 
+- 已有会话总线但没有 Secret Service 密钥环（`org.freedesktop.secrets`，由 GNOME Keyring 或 KDE Wallet 提供）时，首次启动会卡在读取本地状态密钥：`libsecret` 的 D-Bus 激活调用每次都等满 25 秒超时，重试后应用停在启动失败页。桌面发行版通常自带密钥环；完全没有任何总线的环境（例如裸 tty）不受影响，会直接退化为本地密钥。CI 的冒烟测试就是在 `dbus-run-session` 里用空密码启动 `gnome-keyring-daemon --unlock` 才跑通的。精简安装建议装上 `gnome-keyring`。
 - 未提供 AppImage / Flatpak 打包脚本；发布物是压缩后的完整运行目录，以及上面的 deb / Arch 包。
 - Linux 构建没有独立的 `APPLICATION_ID` 构建参数，桌面文件与 GApplication ID 固定为 `linux/CMakeLists.txt` 中的值。
 - 百度取链服务同样是可选配置：复制 `config/baidu-api.example.json` 到 `.local/baidu-api.defines.json`，`tool/build-linux.sh` 会自动加载。

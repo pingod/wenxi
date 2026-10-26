@@ -24,7 +24,7 @@
 - 合并上游 z7786/wenxi：引入解析规则中心、新的播放缓冲策略与安卓下载网络模块，并修正上游遗留的陈旧测试断言。
 - 新增城通网盘：邮箱密码 / Session Token 登录、文件管理、上传下载及分享链接解析。
 - 优化 UC、夸克分享直链的凭证刷新与登录保底流程。
-- 新增 `tool/package-linux.py`：把 Linux 运行目录打成 deb 与 Arch 包，安装到 `/opt/asterlink` 并附 `/usr/bin/asterlink` 软链接、桌面文件与图标。
+- 新增 `tool/package-linux.py`：把 Linux 运行目录打成 deb 与 Arch 包，安装到 `/opt/asterlink` 并附 `/usr/bin/asterlink` 软链接、桌面文件与图标；包里推荐安装 `gnome-keyring`（首次启动保存状态密钥所需的密钥环）。
 - 新增 `.github/workflows/packages.yml`：推送或 PR 时构建 Linux 的 deb / Arch 包与 Windows 安装包，装上 deb 后检查动态库并冒烟启动，产物作为 artifact 上传。
 
 ## 1.0.7+107

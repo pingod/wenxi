@@ -105,6 +105,11 @@ class LinuxPackageTest(unittest.TestCase):
         self.assertIn('libmpv2 | libmpv1', text)
         self.assertIn('libc6 (>= 2.38)', text)
         self.assertNotIn('filesystem', text)
+        # A Secret Service provider is recommended, never required: the app only
+        # stalls without one when a session bus exists but has no provider.
+        self.assertIn('Recommends: gnome-keyring\n', text)
+        depends = [line for line in text.splitlines() if line.startswith('Depends: ')][0]
+        self.assertNotIn('gnome-keyring', depends)
         with tarfile.open(fileobj=io.BytesIO(members['control.tar.xz'])) as archive:
             sums = archive.extractfile('./md5sums').read().decode('utf-8')
         # dpkg's md5sums covers regular files; the /usr/bin symlink is not listed.
@@ -132,6 +137,9 @@ class LinuxPackageTest(unittest.TestCase):
         self.assertIn('license = AGPL-3.0-only\n', info)
         self.assertIn('depend = gtk3\n', info)
         self.assertNotIn('framework', info)
+        # Arch has no "recommends"; the optional dependency is how the package
+        # points at a Secret Service provider.
+        self.assertIn('optdepend = gnome-keyring:', info)
 
     def test_arch_compression_choice_is_visible_in_the_name(self):
         path = packages.build_arch(self.bundle, self.output, **self.arch_options())
