@@ -305,7 +305,7 @@ void main() {
   });
 
   testWidgets(
-    'QR polling pauses in the background and confirmed scan saves the reserved account',
+    'QR polling keeps running while the window is unfocused and a confirmed scan saves the reserved account',
     (tester) async {
       await render(tester);
       final owner = tester
@@ -318,11 +318,16 @@ void main() {
           .where((r) => r.uri.path.endsWith('/getServiceTicketByQrcodeToken'))
           .length;
       expect(polls(), 1);
+      // Scanning the code happens on the phone, so this window loses focus.
+      // Polling must survive that: pausing it here is what used to turn a
+      // successful scan into "二维码已过期".
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
       await tester.pump(const Duration(seconds: 6));
-      expect(polls(), 1);
+      expect(polls(), greaterThan(1));
       f.scanned = true;
       await tester.runAsync(() async {
+        // Timers created by the widget use the fake clock, which does not
+        // advance inside runAsync, so nudge one real poll here.
         tester.binding.handleAppLifecycleStateChanged(
           AppLifecycleState.resumed,
         );

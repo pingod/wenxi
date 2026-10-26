@@ -57,23 +57,42 @@ class QuarkSmsChallenge {
   void close() => _attempt.close();
 }
 
+/// Where a scanned-login QR currently stands. Quark reports this itself through
+/// the `status` field, so the client never has to guess from a local clock.
+enum QuarkQrStage { waitingScan, scannedWaitConfirm, expired, ticket }
+
+/// One answer of `getServiceTicketByQrcodeToken`.
+class QuarkQrPoll {
+  const QuarkQrPoll(this.stage, {this.status = 0, this.ticket = ''});
+  final QuarkQrStage stage;
+  final int status;
+  final String ticket;
+}
+
 class QuarkQrChallenge {
-  QuarkQrChallenge._(this.token, this.expiresAt, this._attempt);
+  QuarkQrChallenge._(this.token, this.deadline, this._attempt);
   final String token;
-  final int expiresAt;
+
+  /// Backstop for the polling loop only. Expiration itself is decided by the
+  /// server ([QuarkLoginService.qrTokenNotFound] / [QuarkLoginService.qrTokenExpired]),
+  /// so a slow scan is never cut short by a local countdown.
+  final int deadline;
   final _QuarkLoginAttempt _attempt;
 
-  String get url => Uri.https('su.quark.cn', '/4_eMHBJ', {
-    'token': token,
-    'client_id': QuarkLoginService.clientId,
-    'ssb': 'weblogin',
-    'uc_param_str': '',
-    'uc_biz_str': 'S:custom|OPT:SAREA@0|OPT:IMMERSIVE@1|OPT:BACK_BTN_STYLE@0',
-  }).toString();
+  /// Built by plain concatenation, exactly like the official PC client renders
+  /// it: `uc_biz_str` carries raw `|` and `@` characters that a URI encoder
+  /// would escape, and the scan app rejects the encoded form.
+  String get url =>
+      'https://su.quark.cn/4_eMHBJ'
+      '?token=${Uri.encodeComponent(token)}'
+      '&client_id=${QuarkLoginService.clientId}'
+      '&ssb=weblogin&uc_param_str='
+      '&uc_biz_str=S:custom|OPT:SAREA@0|OPT:IMMERSIVE@1|OPT:BACK_BTN_STYLE@0';
 
   void close() => _attempt.close();
 }
 
+/// Raised when a QR can no longer lead to a login and a fresh code is needed.
 class QuarkQrExpired extends AppException {
   const QuarkQrExpired() : super('二维码已过期，请重新获取');
 }
@@ -89,12 +108,20 @@ class QuarkLoginService {
   static const clientId = '532';
   static const accountOrigin = 'https://uop.quark.cn';
 
-  /// How long the server keeps a scanned-login token alive.
+  /// `status` values of `getServiceTicketByQrcodeToken`.
   ///
-  /// `getServiceTicketByQrcodeToken` answers `50004001` (still waiting) for the
-  /// first ~180 s and only switches to `50004002` (token not found) after that,
-  /// so the countdown has to follow the server instead of expiring early.
-  static const qrLifetimeSeconds = 175;
+  /// Quark reports the scan state here instead of relying on the ticket being
+  /// empty, so these three codes are the whole truth about expiry:
+  /// `50004001` still waiting for a scan, `50004002` token unknown (already
+  /// consumed or never issued), `50004003` token expired.
+  static const qrWaitingScan = 50004001;
+  static const qrTokenNotFound = 50004002;
+  static const qrTokenExpired = 50004003;
+
+  /// Only a backstop for the polling loop: the server decides when a QR dies
+  /// ([qrTokenNotFound] / [qrTokenExpired]), and 300 s matches the official PC
+  /// client's scan window. Nothing expires locally before that.
+  static const qrPollWindowSeconds = 300;
   static const mobilePage =
       '$accountOrigin/cas/custom/login?custom_login_type=mobile&client_id=$clientId&display=pc';
   static const serviceAgreement =
@@ -195,7 +222,7 @@ class QuarkLoginService {
       );
       return QuarkQrChallenge._(
         token,
-        now() + qrLifetimeSeconds * 1000,
+        now() + qrPollWindowSeconds * 1000,
         attempt,
       );
     } catch (_) {
@@ -204,21 +231,35 @@ class QuarkLoginService {
     }
   }
 
-  Future<String?> pollQr(QuarkQrChallenge challenge) async {
-    if (now() >= challenge.expiresAt) throw const QuarkQrExpired();
+  /// One polling round. The answer is classified the same way the official PC
+  /// client does it: by `status`, never by a local clock.
+  ///
+  /// Quark keeps answering [qrWaitingScan] while nobody has scanned, switches to
+  /// an unrecognised status (with a non-empty `data` but no ticket) once the
+  /// phone has scanned, and only then returns the `service_ticket`. Treating
+  /// every non-ticket answer as a failure — or expiring the QR locally —
+  /// is what made a successful scan look like "已过期".
+  Future<QuarkQrPoll> pollQr(QuarkQrChallenge challenge) async {
     final data = await challenge._attempt.qr('getServiceTicketByQrcodeToken', {
       'token': challenge.token,
     });
     final status = data.integer('status');
-    if (status == 50004001) return null;
-    if (status == 50004002) throw const QuarkQrExpired();
     final ticket = data.obj('data').obj('members').str('service_ticket');
-    require(
-      status == 2000000 && _validTicket(ticket),
-      '夸克扫码确认失败，请重新获取二维码或切换网页登录',
-    );
-    return ticket;
+    if (_validTicket(ticket)) {
+      return QuarkQrPoll(QuarkQrStage.ticket, status: status, ticket: ticket);
+    }
+    if (status == qrTokenNotFound || status == qrTokenExpired) {
+      return QuarkQrPoll(QuarkQrStage.expired, status: status);
+    }
+    if (status == qrWaitingScan) {
+      return QuarkQrPoll(QuarkQrStage.waitingScan, status: status);
+    }
+    //任何其它状态都只可能是「手机已扫、尚未确认」这类中间态；即使以后多出新
+    // 状态码，也只当作进度展示，绝不自行判定过期。
+    return QuarkQrPoll(QuarkQrStage.scannedWaitConfirm, status: status);
   }
+
+  bool qrTimedOut(QuarkQrChallenge challenge) => now() >= challenge.deadline;
 
   Future<Credential> finishQr(QuarkQrChallenge challenge, String ticket) {
     require(_validTicket(ticket), '夸克登录票据无效，请重新扫码');
@@ -237,7 +278,6 @@ class _QuarkLoginAttempt {
   final JsonHttp http;
   final int Function() now;
   final LoginCookieJar cookies;
-  final requestId = newId();
   bool _closed = false;
 
   void close() {
@@ -296,7 +336,9 @@ class _QuarkLoginAttempt {
       queryParameters: {
         'client_id': QuarkLoginService.clientId,
         'v': '1.2',
-        'request_id': requestId,
+        // The official client sends a fresh request id per call; reusing one
+        // makes the second and later polls look like a duplicate request.
+        'request_id': newId().replaceAll('-', ''),
         ...extra,
       },
     ),

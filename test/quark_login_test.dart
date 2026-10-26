@@ -94,11 +94,20 @@ void main() {
       expect(uri.path, '/4_eMHBJ');
       expect(uri.queryParameters['token'], 'fixture-qr-token');
       expect(uri.queryParameters['client_id'], '532');
-      expect(await login.pollQr(qr), isNull);
+      // The PC client signs the QR with raw `|` and `@`; an escaped copy is
+      // rejected by the phone app.
+      expect(
+        qr.url,
+        endsWith(
+          '&uc_biz_str=S:custom|OPT:SAREA@0|OPT:IMMERSIVE@1|OPT:BACK_BTN_STYLE@0',
+        ),
+      );
+      expect((await login.pollQr(qr)).stage, QuarkQrStage.waitingScan);
       expect(f.http.calls.where((r) => r.uri.path == '/account/info'), isEmpty);
       f.scanned = true;
-      final ticket = await login.pollQr(qr);
-      final credential = await login.finishQr(qr, ticket!);
+      final poll = await login.pollQr(qr);
+      expect(poll.stage, QuarkQrStage.ticket);
+      final credential = await login.finishQr(qr, poll.ticket);
       expect(credential.field('authType'), 'qrCookie');
       expect(credential.field('username'), isEmpty);
       expect(
@@ -109,9 +118,10 @@ void main() {
       final requests = f.http.calls
           .where((r) => r.uri.path.startsWith('/cas/ajax/'))
           .toList();
+      // The official client sends a fresh request id per call.
       expect(
         requests.map((r) => r.uri.queryParameters['request_id']).toSet(),
-        hasLength(1),
+        hasLength(requests.length),
       );
       expect(
         requests.map((r) => r.uri.queryParameters['v']),
@@ -207,19 +217,56 @@ void main() {
     },
   );
 
-  test('local and server QR expiration require a new QR', () async {
+  test('the server decides QR expiry, not a local countdown', () async {
     var now = quarkClock;
     final f = QuarkLoginFixture();
     final login = QuarkLoginService(f.http, now: () => now);
     final qr = await login.createQr();
     f.expired = true;
-    await expectLater(login.pollQr(qr), throwsA(isA<QuarkQrExpired>()));
-    now = qr.expiresAt;
-    final before = f.http.calls.length;
-    await expectLater(login.pollQr(qr), throwsA(isA<QuarkQrExpired>()));
-    expect(f.http.calls, hasLength(before));
+    expect((await login.pollQr(qr)).stage, QuarkQrStage.expired);
+    // Every explicit expiry code from the server counts as expired.
+    for (final status in [50004002, 50004003]) {
+      final probe = QuarkLoginFixture();
+      final probeLogin = QuarkLoginService(probe.http, now: () => now);
+      final code = await probeLogin.createQr();
+      probe.override = (r) =>
+          r.uri.path.endsWith('/getServiceTicketByQrcodeToken')
+          ? jsonResponse({'status': status})
+          : null;
+      expect((await probeLogin.pollQr(code)).stage, QuarkQrStage.expired);
+      code.close();
+    }
+    // A scan that takes minutes must not expire while the server still accepts
+    // the token: only the polling backstop ends it, and that is far away.
+    f.expired = false;
+    now = quarkClock + 240000;
+    expect(login.qrTimedOut(qr), isFalse);
+    expect((await login.pollQr(qr)).stage, QuarkQrStage.waitingScan);
+    now = quarkClock + QuarkLoginService.qrPollWindowSeconds * 1000;
+    expect(login.qrTimedOut(qr), isTrue);
     qr.close();
   });
+
+  test(
+    'a scanned but unconfirmed QR reports progress instead of failing',
+    () async {
+      final f = QuarkLoginFixture();
+      final login = QuarkLoginService(f.http, now: () => quarkClock);
+      final qr = await login.createQr();
+      // Once the phone scans, Quark answers with a non-empty body but no ticket
+      // yet; that intermediate answer must never be reported as expiry.
+      f.override = (r) => r.uri.path.endsWith('/getServiceTicketByQrcodeToken')
+          ? jsonResponse({
+              'status': 0,
+              'data': {
+                'members': {'service_ticket': ''},
+              },
+            })
+          : null;
+      expect((await login.pollQr(qr)).stage, QuarkQrStage.scannedWaitConfirm);
+      qr.close();
+    },
+  );
 
   test(
     'SMS and ticket exchanges cannot be automatically retried, including GETs',

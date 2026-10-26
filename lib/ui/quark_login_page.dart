@@ -41,7 +41,8 @@ class _QuarkLoginPageState extends State<QuarkLoginPage>
   static const _platform = CloudPlatform.quark;
 
   /// The QR is renewed in place a few times before the login is given up, so a
-  /// slow scan never lands on a dead page. 12 rounds cover roughly 35 minutes.
+  /// slow scan never lands on a dead page. 12 rounds cover roughly an hour,
+  /// and every round is only renewed when *the server* says the code is gone.
   static const _maxQrRounds = 12;
   final _mobile = TextEditingController(), _code = TextEditingController();
   late final _login = QuarkLoginService(
@@ -54,9 +55,10 @@ class _QuarkLoginPageState extends State<QuarkLoginPage>
   RequestScope? _request;
   Timer? _ticker, _pollTimer;
   DateTime? _resendAt;
-  bool _qrMode = false, _busy = false, _agreed = false, _visible = true;
+  bool _qrMode = false, _busy = false, _agreed = false;
   bool _leaving = false, _completed = false, _polling = false;
   int _generation = 0, _qrRounds = 0;
+  QuarkQrStage _qrStage = QuarkQrStage.waitingScan;
   String _error = '', _status = '';
 
   bool get _active => mounted && !_leaving && !_completed;
@@ -72,11 +74,14 @@ class _QuarkLoginPageState extends State<QuarkLoginPage>
       ? 0
       : ((_resendAt!.difference(DateTime.now()).inMilliseconds + 999) ~/ 1000)
             .clamp(0, 60);
+
+  /// Display only — it counts down the polling window, and reaching zero is a
+  /// backstop rather than a verdict: only the server may declare the QR dead.
   int get _qrSeconds => _qr == null
       ? 0
-      : ((_qr!.expiresAt - _nowMillis + 999) ~/ 1000).clamp(
+      : ((_qr!.deadline - _nowMillis + 999) ~/ 1000).clamp(
           0,
-          QuarkLoginService.qrLifetimeSeconds,
+          QuarkLoginService.qrPollWindowSeconds,
         );
 
   @override
@@ -103,9 +108,17 @@ class _QuarkLoginPageState extends State<QuarkLoginPage>
     _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!_active) return;
       final resendExpired = _resendAt != null && _seconds == 0;
-      if (_qr != null && _qrSeconds == 0 && _error.isEmpty && !_busy) {
+      final qr = _qr;
+      if (qr != null &&
+          _qrSeconds == 0 &&
+          _login.qrTimedOut(qr) &&
+          _error.isEmpty &&
+          !_busy) {
+        // The polling window ran out without the server ever answering with a
+        // ticket or an explicit expiry, so fetch a fresh code instead of
+        // showing a QR that can no longer complete.
         _qrExpired();
-      } else if (_seconds > 0 || resendExpired || _qr != null) {
+      } else if (_seconds > 0 || resendExpired || qr != null) {
         setState(() {
           if (resendExpired) _resendAt = null;
         });
@@ -113,9 +126,8 @@ class _QuarkLoginPageState extends State<QuarkLoginPage>
     });
   }
 
-  /// The server forgets a login token after roughly three minutes, so a slow
-  /// scan would otherwise end on a dead QR image. Renew it in place while the
-  /// user is still looking at the page.
+  /// Renew in place while the user is still looking at the page; give up after
+  /// [_maxQrRounds] so a stuck network cannot loop forever.
   void _qrExpired() {
     if (_qrRounds < _maxQrRounds) {
       unawaited(_startQr(renew: true));
@@ -198,8 +210,12 @@ class _QuarkLoginPageState extends State<QuarkLoginPage>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    _visible = state == AppLifecycleState.resumed;
-    if (_visible && _qrMode) unawaited(_pollQr());
+    // Scanning the code means the window loses focus (the phone gets the
+    // attention), so polling must keep running in the background — pausing it
+    // here is exactly what made a successful scan time out.
+    if (state == AppLifecycleState.resumed && _qrMode) {
+      unawaited(_pollQr());
+    }
   }
 
   @override
@@ -350,6 +366,7 @@ class _QuarkLoginPageState extends State<QuarkLoginPage>
     setState(() {
       _busy = true;
       _error = '';
+      _qrStage = QuarkQrStage.waitingScan;
       _status = renew ? '二维码已刷新，请重新扫码' : '正在获取登录二维码…';
     });
     try {
@@ -389,41 +406,71 @@ class _QuarkLoginPageState extends State<QuarkLoginPage>
 
   Future<void> _pollQr() async {
     final qr = _qr;
-    if (!_active || !_qrMode || !_visible || _busy || _polling || qr == null) {
-      return;
-    }
+    // Deliberately no window-focus check: the user has to look at the phone to
+    // scan, which takes focus away from this window.
+    if (!_active || !_qrMode || _busy || _polling || qr == null) return;
     final generation = _generation, request = RequestScope();
     _request = request;
     _polling = true;
+    final QuarkQrPoll poll;
     try {
-      await _run(request, generation, () async {
-        final ticket = await _login.pollQr(qr);
-        RequestScope.checkpoint();
-        if (ticket == null) return;
-        _pollTimer?.cancel();
-        setState(() {
-          _busy = true;
-          _status = '扫码已确认，正在登录…';
-        });
-        await widget.services.login.submit(_platform, (_) async {
+      poll = await _run(request, generation, () => _login.pollQr(qr));
+    } catch (error) {
+      if (_active && generation == _generation) _qrFailed(error);
+      return;
+    } finally {
+      if (identical(_request, request)) _request = null;
+      if (generation == _generation) _polling = false;
+    }
+    // Everything below runs outside the guarded scope above, so renewing the
+    // code is free to bump the generation.
+    if (!_active || generation != _generation || !identical(qr, _qr)) return;
+    if (poll.stage != _qrStage) {
+      setState(() {
+        _qrStage = poll.stage;
+        _status = switch (poll.stage) {
+          QuarkQrStage.waitingScan => '请使用夸克或夸克网盘 App 扫码，并在手机上确认登录',
+          QuarkQrStage.scannedWaitConfirm => '已扫码，请在手机上确认登录',
+          _ => _status,
+        };
+      });
+    }
+    if (poll.stage == QuarkQrStage.expired) {
+      // The server rejected the token, so renew right away instead of showing
+      // a code nobody can scan.
+      _qrExpired();
+      return;
+    }
+    if (poll.ticket.isEmpty) return;
+    await _confirmedQr(qr, poll.ticket);
+  }
+
+  /// Exchanges a confirmed scan for saved credentials.
+  Future<void> _confirmedQr(QuarkQrChallenge qr, String ticket) async {
+    final generation = _generation, request = RequestScope();
+    _request = request;
+    _pollTimer?.cancel();
+    setState(() {
+      _busy = true;
+      _qrStage = QuarkQrStage.ticket;
+      _status = '扫码已确认，正在登录…';
+    });
+    try {
+      await _run(
+        request,
+        generation,
+        () => widget.services.login.submit(_platform, (_) async {
           final credential = await _login.finishQr(qr, ticket);
           RequestScope.checkpoint();
           return (widget.services.cloud.connector(_platform) as QuarkConnector)
               .authenticate(credential);
-        }, accountId: widget.accountId);
-        if (_active && generation == _generation) _finish();
-      });
+        }, accountId: widget.accountId),
+      );
+      if (_active && generation == _generation) _finish();
     } catch (error) {
-      if (_active && generation == _generation) {
-        if (error is QuarkQrExpired) {
-          _qrExpired();
-        } else {
-          _qrFailed(error);
-        }
-      }
+      if (_active && generation == _generation) _qrFailed(error);
     } finally {
       if (identical(_request, request)) _request = null;
-      if (generation == _generation) _polling = false;
     }
   }
 
