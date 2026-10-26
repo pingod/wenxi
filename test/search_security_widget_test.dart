@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' as ui;
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -126,18 +127,25 @@ void main() {
         expect(redeemed, 0);
         expect(continued, isFalse);
         if (name == 'android' || name == 'windows') {
-          final render =
-              boundary.currentContext!.findRenderObject()!
-                  as RenderRepaintBoundary;
-          await tester.runAsync(() async {
-            final image = await render.toImage(pixelRatio: 1);
-            final data = await image.toByteData(format: ui.ImageByteFormat.png);
-            final path = File(
-              'D:/.ls/pan-relay-main/reports/search-security-2026-10-23/app-verification-$name.png',
-            );
-            await path.writeAsBytes(data!.buffer.asUint8List());
-            image.dispose();
-          });
+          // The screenshots are a report artefact of the machine that ran the
+          // Windows fidelity pass. Writing them is best effort so the test also
+          // passes on machines without that drive.
+          final path = File(
+            'D:/.ls/pan-relay-main/reports/search-security-2026-10-23/app-verification-$name.png',
+          );
+          if (path.parent.existsSync()) {
+            final render =
+                boundary.currentContext!.findRenderObject()!
+                    as RenderRepaintBoundary;
+            await tester.runAsync(() async {
+              final image = await render.toImage(pixelRatio: 1);
+              final data = await image.toByteData(
+                format: ui.ImageByteFormat.png,
+              );
+              await path.writeAsBytes(data!.buffer.asUint8List());
+              image.dispose();
+            });
+          }
         }
         for (var i = 0; i < 3; i++) {
           final cell = find.byKey(ValueKey('search-captcha-cell-$i'));
@@ -159,4 +167,76 @@ void main() {
       },
     );
   }
+
+  testWidgets('platforms without a web view explain the Tencent challenge', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+    try {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(430, 932);
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final directory = Directory.systemTemp.createTempSync(
+        'asterlink-tencent-',
+      );
+      final http = FakeHttp(
+        (call) => jsonResponse({
+          'success': true,
+          'challenge_id': 'test-only-tencent',
+          'provider': 'tencent',
+        }),
+      );
+      final store = StateStore.memory();
+      final services = AppServices(
+        store: store,
+        dataDirectory: directory,
+        cacheDirectory: Directory('${directory.path}/cache'),
+        transport: FakeNative(),
+        files: FakeFiles(Directory('${directory.path}/files')),
+        http: http,
+        platformFeatures: false,
+        controlEnabled: false,
+      );
+      final client = SearchSecurityClient(http, 'http://search.test');
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: Center(
+                child: FilledButton(
+                  onPressed: () => showDialog<bool>(
+                    context: context,
+                    barrierDismissible: false,
+                    builder: (_) =>
+                        SearchSecurityDialog(services, client, CancelToken()),
+                  ),
+                  child: const Text('搜索资源'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('搜索资源'));
+      await tester.pumpAndSettle();
+      expect(find.text('打开腾讯云验证'), findsNothing);
+      expect(
+        find.byKey(const ValueKey('search-verify-unavailable')),
+        findsOneWidget,
+      );
+      expect(find.textContaining('没有内嵌浏览器'), findsOneWidget);
+      // Nothing that could only fail should be left on screen.
+      expect(find.text('换一张'), findsNothing);
+      expect(find.textContaining('已点选'), findsNothing);
+      expect(find.textContaining('有效期内无需重复验证'), findsNothing);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+      services.dispose();
+      store.dispose();
+      await tester.runAsync(() => directory.delete(recursive: true));
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
 }

@@ -8,8 +8,16 @@ import '../app_services.dart';
 import '../core/json.dart';
 import '../data/resource_search_api.dart';
 import '../data/search_security.dart';
+import '../platform/desktop_platform.dart';
 import 'common.dart';
 import 'login_webview.dart';
+
+/// Tencent's challenge runs inside the platform web view, which the Linux
+/// desktop build does not ship. Explain that instead of offering a button that
+/// can only fail.
+const _noBrowser =
+    '当前系统没有内嵌浏览器，腾讯云验证页无法打开，因此资源搜索在此平台无法完成安全验证。'
+    '请在 Windows 或 Android 版完成验证，或稍后再试。';
 
 /// Lives above the tab shell so preview requests can verify on any route.
 class SearchSecurityHost extends StatefulWidget {
@@ -155,6 +163,10 @@ class _SearchSecurityDialogState extends State<SearchSecurityDialog> {
   }
 
   Future<void> _tencent() async {
+    if (!supportsWebLoginUi) {
+      if (mounted) setState(() => _message = _noBrowser);
+      return;
+    }
     final answer = await Navigator.of(context).push<Json>(
       MaterialPageRoute(
         builder: (_) =>
@@ -185,7 +197,8 @@ class _SearchSecurityDialogState extends State<SearchSecurityDialog> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context), colors = theme.colorScheme;
     final challenge = _challenge,
-        tencent = challenge?.str('provider') == 'tencent';
+        tencent = challenge?.str('provider') == 'tencent',
+        unavailable = tencent && !supportsWebLoginUi;
     return Dialog(
       insetPadding: const EdgeInsets.all(20),
       child: ConstrainedBox(
@@ -211,13 +224,14 @@ class _SearchSecurityDialogState extends State<SearchSecurityDialog> {
                 ],
               ),
               const SizedBox(height: 8),
-              Text(
-                tencent ? '请完成验证，随后自动继续本次操作。' : '按从左到右的顺序，点选下图中的三个字符。',
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  color: colors.onSurfaceVariant,
-                  height: 1.6,
+              if (!unavailable)
+                Text(
+                  tencent ? '请完成验证，随后自动继续本次操作。' : '按从左到右的顺序，点选下图中的三个字符。',
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: colors.onSurfaceVariant,
+                    height: 1.6,
+                  ),
                 ),
-              ),
               const SizedBox(height: 16),
               if (_loading)
                 const SizedBox(
@@ -317,56 +331,68 @@ class _SearchSecurityDialogState extends State<SearchSecurityDialog> {
               ] else if (tencent)
                 Padding(
                   padding: const EdgeInsets.symmetric(vertical: 30),
-                  child: FilledButton.icon(
-                    onPressed: _sending || _consumed ? null : _tencent,
-                    icon: const Icon(Icons.shield_outlined),
-                    label: const Text('打开腾讯云验证'),
-                  ),
+                  child: supportsWebLoginUi
+                      ? FilledButton.icon(
+                          onPressed: _sending || _consumed ? null : _tencent,
+                          icon: const Icon(Icons.shield_outlined),
+                          label: const Text('打开腾讯云验证'),
+                        )
+                      : Text(
+                          _noBrowser,
+                          key: const ValueKey('search-verify-unavailable'),
+                          style: theme.textTheme.bodyMedium?.copyWith(
+                            color: colors.onSurfaceVariant,
+                            height: 1.6,
+                          ),
+                        ),
                 ),
               const SizedBox(height: 12),
-              Text(
-                _message.isNotEmpty
-                    ? _message
-                    : _sending
-                    ? '正在验证…'
-                    : '有效期 2 分钟 · 已点选 ${_selected.length}/3',
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: _message.isNotEmpty
-                      ? colors.error
-                      : colors.onSurfaceVariant,
-                ),
-                semanticsLabel: _message,
-              ),
-              const SizedBox(height: 16),
-              Row(
-                children: [
-                  OutlinedButton(
-                    onPressed: _loading || _sending ? null : _load,
-                    child: const Text('换一张'),
+              if (!unavailable)
+                Text(
+                  _message.isNotEmpty
+                      ? _message
+                      : _sending
+                      ? '正在验证…'
+                      : '有效期 2 分钟 · 已点选 ${_selected.length}/3',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: _message.isNotEmpty
+                        ? colors.error
+                        : colors.onSurfaceVariant,
                   ),
-                  const SizedBox(width: 12),
-                  if (!tencent)
-                    Expanded(
-                      child: FilledButton(
-                        onPressed:
-                            !_loading &&
-                                !_sending &&
-                                !_consumed &&
-                                _selected.length == 3
-                            ? _submit
-                            : null,
-                        child: Text(_sending ? '正在验证' : '确认验证'),
-                      ),
-                    ),
-                ],
-              ),
-              const SizedBox(height: 14),
-              Text(
-                '验证通过后自动继续，有效期内无需重复验证。',
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: colors.onSurfaceVariant,
+                  semanticsLabel: _message,
                 ),
-              ),
+              if (!unavailable) ...[
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    OutlinedButton(
+                      onPressed: _loading || _sending ? null : _load,
+                      child: const Text('换一张'),
+                    ),
+                    const SizedBox(width: 12),
+                    if (!tencent)
+                      Expanded(
+                        child: FilledButton(
+                          onPressed:
+                              !_loading &&
+                                  !_sending &&
+                                  !_consumed &&
+                                  _selected.length == 3
+                              ? _submit
+                              : null,
+                          child: Text(_sending ? '正在验证' : '确认验证'),
+                        ),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                Text(
+                  '验证通过后自动继续，有效期内无需重复验证。',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: colors.onSurfaceVariant,
+                  ),
+                ),
+              ],
             ],
           ),
         ),
@@ -395,6 +421,10 @@ class _TencentVerificationPageState extends State<_TencentVerificationPage> {
   }
 
   Future<void> _initialize() async {
+    if (!supportsWebLoginUi) {
+      if (mounted) setState(() => _error = _noBrowser);
+      return;
+    }
     try {
       _environment = await widget.services.webEnvironment();
       if (mounted) setState(() => _ready = true);
