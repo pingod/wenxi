@@ -150,7 +150,14 @@ class LinuxPackageTest(unittest.TestCase):
             packages.build_arch(self.bundle, self.output, **self.arch_options())
 
     def test_bundle_with_a_symlink_is_rejected(self):
-        (self.bundle / 'lib/alias.so').symlink_to('/usr/lib/libgtk-3.so.0')
+        # Cover both shapes: a link to a file that exists on this machine and a
+        # dangling one. The second is the interesting case, because a link whose
+        # target is missing does not report as a file at all.
+        (self.bundle / 'lib/alias.so').symlink_to(self.bundle / 'lib/libapp.so')
+        with self.assertRaises(ValueError):
+            packages.build_arch(self.bundle, self.output, **self.arch_options())
+        (self.bundle / 'lib/alias.so').unlink()
+        (self.bundle / 'lib/alias.so').symlink_to('/nonexistent/asterlink-fixture.so')
         with self.assertRaises(ValueError):
             packages.build_arch(self.bundle, self.output, **self.arch_options())
 

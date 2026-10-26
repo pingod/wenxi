@@ -116,9 +116,15 @@ def bundle_files(bundle):
         if not (bundle / name).is_file():
             raise ValueError('Linux bundle is incomplete: missing ' + name)
     files = []
-    for path in sorted(p for p in bundle.rglob('*') if p.is_file()):
+    # Reject links before filtering on is_file(): a link that points outside the
+    # bundle does not report as a file when its target is missing, so testing
+    # is_file() first would silently skip exactly the entries a package must
+    # never carry.
+    for path in sorted(bundle.rglob('*')):
         if path.is_symlink() or bundle not in path.resolve().parents:
             raise ValueError('Linux bundle contains a link: ' + path.name)
+        if not path.is_file():
+            continue
         relative = path.relative_to(bundle)
         if any(part in PRIVATE_PARTS for part in relative.parts) or path.suffix in PRIVATE_SUFFIXES:
             raise ValueError('Linux bundle contains private or development files: '
