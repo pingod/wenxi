@@ -115,8 +115,29 @@ python tool/package-release.py --checksums
 
 生成 `.local/release-assets/asterlink-<版本>-linux-x64.tar.gz` 与 `SHA256SUMS.txt`。使用 tar.gz 而不是 zip，因为 zip 不保存 Unix 权限，解压后会丢失 `asterlink` 与 `asterlink_gopeed` 的可执行位。
 
+### deb 与 Arch 包
+
+```bash
+python tool/package-linux.py                    # deb + Arch
+python tool/package-linux.py --format deb       # 只出 deb
+python tool/package-linux.py --format arch --compression gzip
+```
+
+生成 `.local/release-assets/asterlink_<版本>_amd64.deb` 与 `asterlink-<版本>-<pkgrel>-x86_64.pkg.tar.zst`。两种格式安装同一套目录布局：
+
+- `/opt/asterlink/` 放完整运行目录（`asterlink`、`asterlink_gopeed`、`data/`、`lib/`），必须整体保留——runner 通过 `/proc/self/exe` 找 `data/` 与 `lib/`，不依赖当前工作目录。
+- `/usr/bin/asterlink` 是指向 `/opt/asterlink/asterlink` 的符号链接。
+- 桌面文件 `/usr/share/applications/com.asterlink.asterlink.desktop` 与 512×512 图标 `/usr/share/icons/hicolor/512x512/apps/asterlink.png`。
+- `/usr/share/doc/asterlink/copyright` 包含 AGPL-3.0 正文（`LICENSE`），满足分发义务。
+
+deb 的 `Depends` 由 `tool/package-linux.py` 的 `DEB_DEPENDS` 固定声明（GTK3、libsecret、ayatana-appindicator、mpv、epoxy、pango、cairo、gdk-pixbuf、harfbuzz、fontconfig、dbusmenu-glib、libstdc++6、`libc6 (>= 2.38)`）；Arch 的 `depend` 由 `ARCH_DEPENDS` 声明。**`libc6 (>= 2.38)` 来自 `libflutter_secure_storage_linux_plugin.so`**，所以 Debian 12（glibc 2.36）不满足，Ubuntu 24.04 及以上可以。
+
+重新构建同一版本会报错而不是静默覆盖；先删掉旧包再出。设置 `SOURCE_DATE_EPOCH` 可以得到可复现的字节一致的包。
+
+`.github/workflows/packages.yml` 会在 push 与 PR 时构建两种包，装上 deb 后跑 `ldd` 检查缺库、再用 xvfb 冒烟启动一次，最后把包与 `SHA256SUMS.txt` 作为 artifact 上传。
+
 ## 已知限制
 
-- 未提供 AppImage / Flatpak / deb 打包脚本；发布物是压缩后的完整运行目录。
+- 未提供 AppImage / Flatpak 打包脚本；发布物是压缩后的完整运行目录，以及上面的 deb / Arch 包。
 - Linux 构建没有独立的 `APPLICATION_ID` 构建参数，桌面文件与 GApplication ID 固定为 `linux/CMakeLists.txt` 中的值。
 - 百度取链服务同样是可选配置：复制 `config/baidu-api.example.json` 到 `.local/baidu-api.defines.json`，`tool/build-linux.sh` 会自动加载。

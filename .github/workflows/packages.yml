@@ -1,0 +1,152 @@
+name: Build packages
+on:
+  push:
+    branches: ['feat/**', main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: packages-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  # pubspec.lock is resolved against the mirror, so every job has to agree with
+  # it; `flutter pub get --enforce-lockfile` rewrites the lock otherwise.
+  PUB_HOSTED_URL: https://pub.flutter-io.cn
+  FLUTTER_STORAGE_BASE_URL: https://storage.flutter-io.cn
+  GOPROXY: https://goproxy.cn,https://goproxy.io,direct
+  GOTOOLCHAIN: go1.24.7
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      # libmpv-dev is what media_kit_video links against; the bundle expects the
+      # matching runtime library, which the packages declare as a dependency.
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang cmake ninja-build pkg-config libgtk-3-dev \
+            libayatana-appindicator3-dev libsecret-1-dev libmpv-dev \
+            zstd xvfb
+      - uses: ./.github/actions/setup
+      - name: Test packaging tools
+        run: python3 -m unittest discover -s tool/tests -p 'test_*.py'
+      - name: Build release bundle
+        run: ./tool/build-linux.sh --build-config config/build.community.json
+      - name: Build deb and Arch packages
+        run: |
+          python3 tool/package-linux.py \
+            --format deb --format arch \
+            --output-dir .local/release-assets
+          ls -l .local/release-assets
+      - name: Install the deb and check the runtime resolution
+        run: |
+          deb="$(ls .local/release-assets/*.deb)"
+          dpkg-deb --info "$deb"
+          dpkg-deb --contents "$deb" | grep -q './usr/bin/asterlink'
+          sudo apt-get install -y --no-install-recommends "$PWD/$deb"
+          dpkg -s asterlink | grep -q '^Status: install ok installed'
+          test -x /opt/asterlink/asterlink
+          test -L /usr/bin/asterlink
+          test -f /usr/share/applications/com.asterlink.asterlink.desktop
+          test -f /usr/share/icons/hicolor/512x512/apps/asterlink.png
+          # A missing shared object means the dependency list is incomplete.
+          # Every plugin links against a subset of the same libraries.
+          missing="$(ldd /opt/asterlink/asterlink /opt/asterlink/lib/*.so | grep 'not found' || true)"
+          if [[ -n "$missing" ]]; then
+            echo "$missing"
+            exit 1
+          fi
+      - name: Smoke-test the installed application
+        run: |
+          set +e
+          # No display on the runner: xvfb keeps GTK happy, and a still-running
+          # process after the timeout is the success signal, like ci.yml.
+          xvfb-run --auto-servernum --server-args='-screen 0 1280x800x24' timeout 25 /usr/bin/asterlink
+          status=$?
+          set -e
+          if [[ "$status" -ne 124 ]]; then
+            echo "unexpected exit status $status"
+            exit 1
+          fi
+          log="$(find "$HOME/.local/share/com.asterlink.asterlink" -name 'app-*.jsonl' | head -1)"
+          test -n "$log"
+          grep -q '"event":"app.services_ready"' "$log"
+          grep -q '"os":"linux"' "$log"
+          cat "$log"
+      - name: Inspect the Arch package
+        run: |
+          package="$(ls .local/release-assets/*.pkg.tar.zst)"
+          version="$(sed -n 's/^version:[[:space:]]*\([0-9.]*\(+[0-9]*\)\?\).*/\1/p' pubspec.yaml)"
+          zstd -dc "$package" | tar -xOf - .PKGINFO > /tmp/pkg-info.txt
+          cat /tmp/pkg-info.txt
+          grep -qx 'pkgname = asterlink' /tmp/pkg-info.txt
+          grep -qx "pkgver = ${version}-1" /tmp/pkg-info.txt
+          zstd -dc "$package" | tar -tv > /tmp/arch-files.txt
+          grep -q ' opt/asterlink/asterlink_gopeed$' /tmp/arch-files.txt
+          grep -q ' usr/bin/asterlink -> /opt/asterlink/asterlink$' /tmp/arch-files.txt
+          grep -q ' usr/share/applications/com.asterlink.asterlink.desktop$' /tmp/arch-files.txt
+          grep -q ' usr/share/icons/hicolor/512x512/apps/asterlink.png$' /tmp/arch-files.txt
+      - name: Summarise the packages
+        run: |
+          cd .local/release-assets
+          sha256sum ./*.deb ./*.pkg.tar.zst | tee SHA256SUMS.txt
+      - name: Save Linux packages
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: package-linux
+          path: |
+            .local/release-assets/*.deb
+            .local/release-assets/*.pkg.tar.*
+            .local/release-assets/SHA256SUMS.txt
+          include-hidden-files: true
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Build the portable bundle
+        run: ./tool/build-windows.ps1
+      - name: Build the installer
+        run: |
+          $setup = Join-Path $env:RUNNER_TEMP 'innosetup-6.7.3.exe'
+          Invoke-WebRequest -Uri 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe' -OutFile $setup
+          if ((Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash -ne '9C73C3BAE7ED48D44112A0F48E66742C00090BDB5BEF71D9D3C056C66E97B732') { throw 'Inno Setup checksum mismatch.' }
+          $inno = Join-Path $env:RUNNER_TEMP 'inno-6.7.3'
+          $install = Start-Process -FilePath $setup -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', ('/DIR="' + $inno + '"')) -Wait -PassThru -WindowStyle Hidden
+          if ($install.ExitCode -ne 0) { throw 'Inno Setup installation failed.' }
+          ./tool/build-windows-installer.ps1 -Iscc (Join-Path $inno 'ISCC.exe') -OutputDir .local/release-installer
+          $installers = @(Get-ChildItem -LiteralPath .local/release-installer -Filter '*.exe' -File)
+          if ($installers.Count -ne 1) { throw 'Expected one installer.' }
+          python tool/package-release.py --platform windows --installer $installers[0].FullName
+      - name: Summarise the installer
+        run: |
+          Get-ChildItem -LiteralPath .local/release-assets -File | Select-Object Name, Length
+          Get-ChildItem -LiteralPath .local/release-assets -Filter '*.exe' -File |
+            ForEach-Object { (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash + '  ' + $_.Name }
+      - name: Save Windows installer
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: package-windows
+          path: |
+            .local/release-assets/*.exe
+            .local/release-assets/*.zip
+          include-hidden-files: true
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
