@@ -5,7 +5,6 @@ import 'package:path/path.dart' as p;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:tray_manager/tray_manager.dart';
@@ -524,7 +523,7 @@ class _MainShellState extends State<MainShell>
         if (!mounted || _exiting) return;
         await windowManager.setPreventClose(true);
         // AppIndicator reads PNG/SVG icons; .ico is a Windows-only container.
-        final trayIcon = await _trayIconPath();
+        final trayIcon = _trayIconPath();
         if (trayIcon != null) await trayManager.setIcon(trayIcon);
         // The Linux implementation only handles icon, title and context menu;
         // a tooltip call raises MissingPluginException and would abort the
@@ -551,13 +550,14 @@ class _MainShellState extends State<MainShell>
     }
   }
 
-  /// Resolves a tray icon path the current platform's tray manager can load.
+  /// Resolves the tray icon argument the current platform's tray manager wants.
   ///
-  /// Windows reads the .ico straight from the asset bundle. Linux keeps the
-  /// plain `data/flutter_assets` layout beside the executable. macOS bundles
-  /// assets under App.framework, which tray_manager cannot open from that
-  /// virtual path, so the PNG is copied to a temp file first.
-  Future<String?> _trayIconPath() async {
+  /// tray_manager resolves the path differently per platform: Linux reads a
+  /// real file under `data/flutter_assets` beside the executable, macOS loads
+  /// the value through `rootBundle` and ships it to the plugin as base64, and
+  /// Windows opens a file next to the executable (the .ico is a Windows-only
+  /// container, so it is used there alone).
+  String? _trayIconPath() {
     if (Platform.isWindows) return 'assets/icons/app.ico';
     if (Platform.isLinux) {
       return p.join(
@@ -569,18 +569,8 @@ class _MainShellState extends State<MainShell>
         'app.png',
       );
     }
-    if (Platform.isMacOS) {
-      try {
-        final data = await rootBundle.load('assets/icons/app.png');
-        final dir = await getTemporaryDirectory();
-        final file = File(p.join(dir.path, 'asterlink_tray.png'));
-        await file.writeAsBytes(data.buffer.asUint8List(), flush: true);
-        return file.path;
-      } catch (error, stack) {
-        DiagnosticLog.error('app.tray_icon_failed', error, stack);
-        return null;
-      }
-    }
+    // macOS: an asset key, because the plugin loads it from the bundle itself.
+    if (Platform.isMacOS) return 'assets/icons/app.png';
     return null;
   }
 
