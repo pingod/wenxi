@@ -38,12 +38,28 @@ class StateKeyFallback {
 
 /// Android keeps two key records in the app's private, non-backed-up directory.
 /// Old Keystore backends are read only to migrate authenticated existing data.
+///
+/// macOS uses the same private directory instead of the login keychain: the
+/// keychain binds an item to the code signature that created it, so every
+/// ad-hoc build (what CI produces) is a stranger to the previous one. A rebuilt
+/// app then waits ~25s for an access prompt nobody can answer and may no longer
+/// open the snapshots it already wrote.
 class LocalStateKey {
-  LocalStateKey(this.directory, this.storage, {bool? nativeAndroid})
-    : nativeAndroid = nativeAndroid ?? Platform.isAndroid;
+  LocalStateKey(
+    this.directory,
+    this.storage, {
+    bool? nativeAndroid,
+    bool? privateBackend,
+  }) : nativeAndroid = nativeAndroid ?? Platform.isAndroid,
+       usePrivateFiles =
+           privateBackend ??
+           ((nativeAndroid ?? Platform.isAndroid) || Platform.isMacOS);
   final Directory directory;
   final FlutterSecureStorage storage;
   final bool nativeAndroid;
+
+  /// Whether key records live in [privateDirectoryName] instead of OS storage.
+  final bool usePrivateFiles;
   static const nativeBackend = 'android-keystore-aes-v2';
   static const privateBackend = 'android-private-files-v1';
   static const privateDirectoryName = 'state-keys-private-v1';
@@ -163,7 +179,7 @@ class LocalStateKey {
 
   Future<StateKeyRead> _readLocation(_KeyLocation location) async {
     final result = StateKeyRead(
-      needsMigration: nativeAndroid && !location.privateFiles,
+      needsMigration: usePrivateFiles && !location.privateFiles,
     );
     final namespace = location.namespace;
     // A pointer to an existing namespace is not a fresh installation, even if
@@ -226,7 +242,7 @@ class LocalStateKey {
 
   /// Only call after this exact key decrypts the newest local snapshot.
   Future<void> useFallback(StateKeyFallback fallback) async {
-    if (nativeAndroid || fallback._location.privateFiles) {
+    if (usePrivateFiles || fallback._location.privateFiles) {
       await _savePrivate(fallback.key);
     } else {
       final previous = (await _pointer()).active;
@@ -351,7 +367,7 @@ class LocalStateKey {
 
   Future<void> save(Uint8List key) async {
     final location = (await _pointer()).active;
-    if (nativeAndroid || location.privateFiles) {
+    if (usePrivateFiles || location.privateFiles) {
       await _savePrivate(key);
       if (!location.privateFiles) {
         DiagnosticLog.active?.record(
@@ -369,7 +385,7 @@ class LocalStateKey {
   }
 
   Future<void> saveForImport(Uint8List key) async {
-    if (nativeAndroid) {
+    if (usePrivateFiles) {
       final saved = await read();
       if (!saved.needsMigration &&
           !saved.needsRepair(key) &&
@@ -384,7 +400,7 @@ class LocalStateKey {
   /// Old storage is left intact; the pointer switches only after durable writes.
   Future<void> saveFresh(Uint8List key) async {
     require(key.length == 32, '本地密钥格式错误');
-    if (nativeAndroid) {
+    if (usePrivateFiles) {
       await _savePrivate(key);
       return;
     }

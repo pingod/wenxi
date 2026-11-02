@@ -37,11 +37,11 @@ class StateStore extends ChangeNotifier {
   static const keyName = LocalStateKey.name;
   static const secureStorage = FlutterSecureStorage(
     aOptions: LocalStateKey.options,
-    // The plugin's data-protection keychain default needs the
-    // `keychain-access-groups` entitlement, which macOS only grants to builds
-    // signed with a provisioning profile. Ad-hoc and Developer ID builds get
-    // errSecMissingEntitlement (-34018) on write, so always use the login
-    // keychain, which works for every signing mode.
+    // macOS keeps new keys in the app's private directory (see LocalStateKey),
+    // but a keychain record written by an earlier build is still read to
+    // migrate it. The plugin's data-protection keychain default needs the
+    // `keychain-access-groups` entitlement that only provisioning-profile
+    // builds have, so reads must stay on the login keychain.
     mOptions: MacOsOptions(usesDataProtectionKeychain: false),
   );
   StateStore._(this.file, this._key, this._data, [this._localKey]);

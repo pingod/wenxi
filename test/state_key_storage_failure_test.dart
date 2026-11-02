@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/services.dart';
@@ -58,7 +59,7 @@ void main() {
 
   Future<String> saveFailure(PlatformException failure) async {
     final storage = _DenyingStorage(failure);
-    final key = LocalStateKey(directory, storage);
+    final key = LocalStateKey(directory, storage, privateBackend: false);
     try {
       await key.save(Uint8List.fromList(CryptoBox.random(32)));
       fail('keychain writes should not silently succeed');
@@ -111,6 +112,7 @@ void main() {
       LocalStateKey(
         directory,
         storage,
+        privateBackend: false,
       ).save(Uint8List.fromList(CryptoBox.random(32))),
       throwsA(isA<AppException>()),
     );
@@ -129,5 +131,76 @@ void main() {
     final options = StateStore.secureStorage.mOptions;
     expect(options, isA<MacOsOptions>());
     expect((options as MacOsOptions).usesDataProtectionKeychain, isFalse);
+  });
+
+  group('private file backend (Android and macOS default)', () {
+    // The login keychain binds an item to the creating code signature, so a
+    // rebuilt ad-hoc app cannot read what the previous build wrote and stalls
+    // on an unanswerable prompt. Both platforms therefore keep the key in the
+    // app's private directory instead.
+    test('a fresh key is stored in the private directory, never in OS storage',
+        () async {
+      final storage = _DenyingStorage(
+        PlatformException(
+          code: 'Unexpected security result code',
+          details: -34018,
+        ),
+      );
+      final localKey = LocalStateKey(directory, storage, privateBackend: true);
+      final key = Uint8List.fromList(CryptoBox.random(32));
+      await localKey.saveFresh(key);
+
+      expect(storage.writes, 0, reason: 'no keychain write may be attempted');
+
+      final location = asJson(
+        jsonDecode(
+          await File(
+            '${directory.path}/${LocalStateKey.locationName}',
+          ).readAsString(),
+        ),
+      );
+      expect(location['backend'], LocalStateKey.privateBackend);
+      final namespace = location['namespace'] as String;
+      for (final copy in ['primary.bin', 'copy.bin']) {
+        final file = File(
+          '${directory.path}/${LocalStateKey.privateDirectoryName}/'
+          '$namespace/$copy',
+        );
+        expect(file.existsSync(), isTrue);
+        expect(file.readAsBytesSync(), key);
+      }
+
+      final read = await localKey.read();
+      expect(read.keys.single, key);
+      expect(read.needsMigration, isFalse);
+    });
+
+    test('an existing keychain record is migrated to private files', () async {
+      final storage = _DenyingStorage(
+        PlatformException(code: 'unused', details: 0),
+      );
+      final key = Uint8List.fromList(CryptoBox.random(32));
+      final namespace = 'state_${'0' * 32}';
+      storage.records['${LocalStateKey.name}.$namespace'] = base64Encode(key);
+      storage.records['${LocalStateKey.name}.$namespace.copy'] =
+          base64Encode(key);
+      await File('${directory.path}/${LocalStateKey.locationName}')
+          .writeAsString(jsonEncode({'namespace': namespace}));
+
+      final localKey = LocalStateKey(directory, storage, privateBackend: true);
+      final read = await localKey.read();
+      expect(read.keys.single, key);
+      expect(
+        read.needsMigration,
+        isTrue,
+        reason: 'StateStore.open saves the key to the private backend',
+      );
+
+      await localKey.save(key);
+      final migrated = await localKey.read();
+      expect(migrated.needsMigration, isFalse);
+      expect(migrated.keys.single, key);
+      expect(storage.writes, 0);
+    });
   });
 }

@@ -82,7 +82,12 @@ void main() {
     localKey: keys(),
   );
   Future<Uint8List> seedLegacy({bool namespaced = false}) async {
-    final localKey = LocalStateKey(directory, legacy, nativeAndroid: false);
+    final localKey = LocalStateKey(
+      directory,
+      legacy,
+      nativeAndroid: false,
+      privateBackend: false,
+    );
     final old = await StateStore.open(directory, localKey: localKey);
     try {
       await old.put('favorite', 'old');

@@ -81,6 +81,10 @@ void main() {
   late StateStore store;
   const primary = 'legacy|${StateStore.keyName}';
   const copy = '$primary.copy';
+  // These cases exercise the OS-storage pointer, so the private-file backend
+  // Android and macOS use by default is opted out of explicitly.
+  LocalStateKey legacyKey(Directory dir, _DeviceStorage records) =>
+      LocalStateKey(dir, records, privateBackend: false);
 
   setUpAll(() async {
     final sourceDirectory = await Directory.systemTemp.createTemp(
@@ -89,7 +93,7 @@ void main() {
     final sourceStorage = _DeviceStorage({});
     final source = await StateStore.open(
       sourceDirectory,
-      storage: sourceStorage,
+      localKey: legacyKey(sourceDirectory, sourceStorage),
     );
     try {
       sourceKey = sourceStorage.records[primary]!;
@@ -107,7 +111,10 @@ void main() {
   setUp(() async {
     directory = await Directory.systemTemp.createTemp('state-device-b-');
     storage = _DeviceStorage({});
-    store = await StateStore.open(directory, storage: storage);
+    store = await StateStore.open(
+      directory,
+      localKey: legacyKey(directory, storage),
+    );
     await store.put('engineStorageGeneration', 'existing-engine');
     await store.put('tasks', [
       {'id': 'before-import'},
@@ -118,13 +125,20 @@ void main() {
     await directory.delete(recursive: true);
   });
   File local(String name) => File('${directory.path}/$name');
-  LocalStateKey keys() => LocalStateKey(directory, storage);
+  // These cases exercise the OS-storage pointer, so the private-file backend
+  // Android and macOS use by default is opted out of explicitly.
+  LocalStateKey keys() => LocalStateKey(directory, storage, privateBackend: false);
   StartupRecovery recovery() => StartupRecovery(
     StateRecoveryRequired(directory, StateRecoveryCause.missingKey),
     storage: storage,
+    localKey: keys(),
   );
   Future<void> reopen() async {
-    final next = await StateStore.open(directory, storage: storage.restart());
+    final restarted = storage.restart();
+    final next = await StateStore.open(
+      directory,
+      localKey: legacyKey(directory, restarted),
+    );
     store.dispose();
     store = next;
   }
@@ -188,7 +202,10 @@ void main() {
       final freshStorage = _DeviceStorage({})..dropWrites = true;
       try {
         await expectLater(
-          StateStore.open(freshDirectory, storage: freshStorage),
+          StateStore.open(
+            freshDirectory,
+            localKey: legacyKey(freshDirectory, freshStorage),
+          ),
           throwsA(isA<AppException>()),
         );
         expect(await freshDirectory.list().toList(), isEmpty);
@@ -466,7 +483,10 @@ void main() {
     'brief system storage failure retries without data replacement',
     () async {
       storage.temporaryReadFailures = 2;
-      final next = await StateStore.open(directory, storage: storage);
+      final next = await StateStore.open(
+        directory,
+        localKey: legacyKey(directory, storage),
+      );
       expect(next.data.str('engineStorageGeneration'), 'existing-engine');
       next.dispose();
       expect(storage.temporaryReadFailures, 0);

@@ -8,6 +8,7 @@ import 'package:asterlink/core/crypto_box.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/backup.dart';
 import 'package:asterlink/data/startup_recovery.dart';
+import 'package:asterlink/data/state_key.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/models.dart';
 import 'support.dart';
@@ -232,8 +233,26 @@ void main() {
     'write failure after saving key rolls back every snapshot and previous key',
     () async {
       await expectLater(
-        StartupRecovery(failure, storage: _FailFirstKeyWrite()).reinitialize(),
-        throwsA(isA<PlatformException>()),
+        StartupRecovery(
+          failure,
+          storage: _FailFirstKeyWrite(),
+          // macOS and Android keep keys in private files; this case asserts the
+          // OS-storage write failure path, so it is opted out of explicitly.
+          localKey: LocalStateKey(
+            directory,
+            _FailFirstKeyWrite(),
+            privateBackend: false,
+          ),
+        ).reinitialize(),
+        // The failure is surfaced as an actionable AppException instead of a
+        // bare PlatformException, so the startup page can explain it.
+        throwsA(
+          isA<AppException>().having(
+            (error) => error.message,
+            'message',
+            contains('fixture-write-failed'),
+          ),
+        ),
       );
       await expectOriginals();
       expect(

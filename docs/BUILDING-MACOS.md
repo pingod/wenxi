@@ -112,13 +112,27 @@ CI 产物只是**未公证**的 ad-hoc 签名包，用于验证「能编译、�
 
 **公证仍需手动一次**（CI 的公证凭据差异较大，未固化到脚本）：`xcrun notarytool submit <zip> --apple-id ... --team-id ... --password <app 专用密码> --wait`，成功后 `xcrun stapler staple <zip 或 .app>`。凭据可放 Apple Developer Program 的 app-specific password 或 App Store Connect API Key。
 
-## 钥匙串与签名
+## 本地密钥与签名
 
-本地状态密钥经 `flutter_secure_storage` 存入系统钥匙串。该插件在 macOS 上默认使用 *data protection keychain*（`kSecUseDataProtectionKeychain`），而该钥匙串要求应用带有 `keychain-access-groups` 授权，这种授权只有通过 provisioning profile 签名的构建才能获得。ad-hoc 与 Developer ID 构建写入时会返回 `errSecMissingEntitlement (-34018)`，表现为启动即停在「启动恢复 / 应用暂时无法启动」（日志中为 `app.services_failed` + `PlatformException ... -34018`）。
+本地状态密钥（用于解密 `state-v1.enc`）在 macOS 上与 Android 一样存放在应用私有目录
+`AsterLink/state-keys-private-v1/<namespace>/{primary,copy}.bin`，指针写入
+`state-key-location.json`（`backend: "android-private-files-v1"`），**不再使用系统钥匙串**。
 
-因此 `lib/data/state_store.dart` 显式设置 `MacOsOptions(usesDataProtectionKeychain: false)`，改用旧版登录钥匙串，对所有签名方式都可用。
+这样做是因为登录钥匙串的 ACL 只信任创建该条目的那份代码签名：ad-hoc 签名每次构建的
+cdhash 都会变化，于是新构建读取上一版写入的条目时 macOS 会弹出「允许访问钥匙串」对话框。
+无人应答时每次读取约 9 s 超时、`LocalStateKey._read` 会重试 3 次，启动因此卡顿 20–28 s；
+若最终被拒绝，新版本就无法再打开旧数据。
 
-**不要**给 `macos/Runner/*.entitlements` 添加 `keychain-access-groups`：缺少匹配的 provisioning profile 时，内核会因该授权不合法直接以 SIGKILL 终止进程（实测 `Killed: 9`，同时 `codesign -v` 仍然通过）。
+历史背景（仍适用于迁移路径）：插件默认使用 *data protection keychain*
+（`kSecUseDataProtectionKeychain`），该钥匙串要求应用带有 `keychain-access-groups` 授权，
+只有通过 provisioning profile 签名的构建才有。ad-hoc 与 Developer ID 构建写入时返回
+`errSecMissingEntitlement (-34018)`，表现为启动即停在「启动恢复 / 应用暂时无法启动」。
+`lib/data/state_store.dart` 因此显式设置 `MacOsOptions(usesDataProtectionKeychain: false)`，
+旧版安装遗留的钥匙串条目仍能被读出来并迁移到私有目录（`state_key.storage_migrated` 事件）。
+
+**不要**给 `macos/Runner/*.entitlements` 添加 `keychain-access-groups`：缺少匹配的
+provisioning profile 时，内核会因该授权不合法直接以 SIGKILL 终止进程（实测 `Killed: 9`，
+同时 `codesign -v` 仍然通过）。
 
 ## 已知限制
 
