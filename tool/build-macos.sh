@@ -53,7 +53,12 @@ fi
 
 # Keep the JSON as the single source of truth (same fields as the Linux/Windows
 # entry points). Only the fields the Dart build actually reads are emitted.
-readarray -t settings < <(python3 - "$build_config" "$config_url" "$offline" <<'PY'
+# The Python snippet is written to a temp file and run directly: a here-doc
+# combined with process substitution does not survive `bash -e {0}` on CI.
+settings_py="$(mktemp "${TMPDIR:-/tmp}/asterlink-settings.XXXXXX.py")"
+settings_env="$(mktemp "${TMPDIR:-/tmp}/asterlink-settings.XXXXXX.env")"
+trap 'rm -f "$settings_py" "$settings_env"' EXIT
+cat > "$settings_py" <<'PY'
 import json, sys
 path, config_url, offline = sys.argv[1], sys.argv[2], sys.argv[3] == '1'
 with open(path, encoding='utf-8') as handle:
@@ -87,12 +92,18 @@ print(data['controlUrl'])
 print(data['announcementsUrl'])
 print(data['githubRepository'])
 PY
-)
+python3 "$settings_py" "$build_config" "$config_url" "$offline" > "$settings_env"
+# Read up to four lines (blank trailing fields included) without readarray,
+# which older macOS bash 3.2 does not provide.
+settings=()
+while IFS= read -r line || [[ -n "$line" ]]; do
+  settings+=("$line")
+done < "$settings_env"
 
-control_enabled="${settings[0]}"
-control_url="${settings[1]}"
-announcements_url="${settings[2]}"
-github_repository="${settings[3]}"
+control_enabled="${settings[0]:-false}"
+control_url="${settings[1]:-}"
+announcements_url="${settings[2]:-}"
+github_repository="${settings[3]:-}"
 
 dart_defines=(
   "--dart-define=ASTERLINK_CONTROL_ENABLED=$control_enabled"
