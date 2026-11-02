@@ -82,10 +82,14 @@ class TokenSessions {
       checkpoint(session);
       final previous = session.credential;
       final userId = fields['userId'] ?? '';
+      final previousId = previous.field('userId');
+      // Reject a refresh response that names a different account than the one
+      // this credential is bound to. When the stored identity is still empty
+      // (first login where drive-info was not fetched yet) there is nothing to
+      // compare, so adopt the incoming id as the anchor rather than silently
+      // accepting an arbitrary one — but never *overwrite* a known id.
       require(
-        userId.isEmpty ||
-            previous.field('userId').isEmpty ||
-            userId == previous.field('userId'),
+        userId.isEmpty || previousId.isEmpty || userId == previousId,
         '${platform.shortName}返回的账号不一致，请重新登录',
       );
       final updated = previous.withFields(fields, preserveRevision: true);

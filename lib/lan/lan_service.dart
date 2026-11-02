@@ -82,6 +82,10 @@ class LanService extends ChangeNotifier {
   final _peerSessions =
       <String, ({String token, Uri base, DateTime expires})>{};
   final _attempts = <String, List<DateTime>>{};
+  // Global (not per-IP) consecutive failed-pair counter; rotates the code to
+  // defend against distributed/rotating-source LAN brute force of the 6-digit
+  // code.
+  int _failedPairs = 0;
   final _inbox = <LanInboxItem>[];
   HttpServer? _server;
   HttpClient? _client;
@@ -113,6 +117,20 @@ class LanService extends ChangeNotifier {
         session.expires.isAfter(clock());
   }
 
+  /// Cheap fingerprint of the state the device-link UI actually renders. Used to
+  /// skip the 3-second heartbeat's `notifyListeners()` when nothing visible
+  /// changed, so a page listening to [LanService] doesn't rebuild every tick.
+  String get _visibleSignature {
+    final peerSig = (peers)
+        .map((p) => '${p.id}:${p.name}:${p.address}:${connected(p)}')
+        .join(',');
+    final shareSig = shares
+        .map((s) => '${s.manifest.token}:${s.stopped}:${s.responses.length}')
+        .join(',');
+    final inboxSig = _inbox.map((m) => '${m.id}:${m.read}').join(',');
+    return '$running|$connectionCode|$networkHint|$addresses|$peerSig|$shareSig|$inboxSig';
+  }
+
   Future<void> refreshDevices() => _refreshDevices();
   DownloadActivity get activity => !running
       ? const DownloadActivity.idle()
@@ -138,10 +156,7 @@ class LanService extends ChangeNotifier {
     name = store.data
         .str('lanDeviceName')
         .ifEmpty(Platform.isAndroid ? '我的手机' : '我的电脑');
-    connectionCode = Random.secure()
-        .nextInt(1000000)
-        .toString()
-        .padLeft(6, '0');
+    connectionCode = _newConnectionCode();
     try {
       try {
         _server = await HttpServer.bind(bindAddress, requestedPort);
@@ -199,6 +214,20 @@ class LanService extends ChangeNotifier {
     deviceId: id,
     code: connectionCode,
   ).encode();
+
+  String _newConnectionCode() =>
+      Random.secure().nextInt(1000000).toString().padLeft(6, '0');
+
+  /// Rotates the pairing code after too many global failures, invalidating any
+  /// in-flight brute-force attempts (the user just re-scans the QR).
+  void _onPairFailed() {
+    if (++_failedPairs >= 20) {
+      _failedPairs = 0;
+      connectionCode = _newConnectionCode();
+      _announce();
+      _changed();
+    }
+  }
 
   Future<void> rename(String value) async {
     final next = value.trim();
@@ -563,8 +592,17 @@ class LanService extends ChangeNotifier {
       if (share.expired(now)) stopShare(share);
     }
     _announce();
-    _changed();
+    // Heartbeat cleanup (expired peers/sessions/shares) mostly leaves the
+    // visible state unchanged; only notify listeners when something the UI
+    // shows actually differs, avoiding a full-page rebuild every 3 seconds.
+    final signature = _visibleSignature;
+    if (signature != _lastSignature) {
+      _lastSignature = signature;
+      _changed();
+    }
   }
+
+  String? _lastSignature;
 
   Future<void> stop() => _lifecycle.run(_stop);
   Future<void> _stop() async {

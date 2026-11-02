@@ -50,7 +50,7 @@ class OperationProgress extends ValueNotifier<List<OperationStep>> {
       Zone.current[_stageKey] as OperationStage?;
   final _notificationZone = Zone.current;
   int _generation = 0, _nextId = 0;
-  bool _closed = false;
+  bool _closed = false, _disposed = false;
 
   Future<T> run<T>(Future<T> Function() action) {
     _closed = false;
@@ -169,6 +169,7 @@ class OperationProgress extends ValueNotifier<List<OperationStep>> {
   }
 
   void _publish(List<OperationStep> steps) {
+    if (_disposed) return;
     if (steps.isEmpty && value.isEmpty) return;
     _notificationZone.run(() => value = List.unmodifiable(steps));
   }
@@ -202,6 +203,7 @@ class OperationProgress extends ValueNotifier<List<OperationStep>> {
   @override
   void dispose() {
     close();
+    _disposed = true;
     super.dispose();
   }
 }

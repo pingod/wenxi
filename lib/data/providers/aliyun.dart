@@ -713,13 +713,9 @@ class AliyunConnector extends CloudConnector {
               (data['items'] as List).every((item) => item is Map),
           '阿里云盘未返回有效文件列表，请重试',
         );
-        var added = 0;
         for (final raw in data.list('items')) {
           final item = file(raw, parent);
-          if (ids.add(item.id)) {
-            result.add(item);
-            added++;
-          }
+          if (ids.add(item.id)) result.add(item);
         }
         RequestScope.checkpoint();
         read.pages++;
@@ -739,7 +735,11 @@ class AliyunConnector extends CloudConnector {
           }
           return result;
         }
-        require(added > 0 && markers.add(marker), '阿里云盘分页重复，请刷新列表重试');
+        // Terminate only on marker advance, never on item growth: an active
+        // directory can legitimately return a page whose items were all seen
+        // already (moved between pages) with a fresh `next_marker`. Requiring
+        // `added > 0` there would wrongly abort the whole listing.
+        require(markers.add(marker), '阿里云盘分页重复，请刷新列表重试');
       }
       throw const AppException('阿里目录项目过多，请分目录打开');
     } catch (error, stack) {
@@ -1423,8 +1423,14 @@ class AliyunConnector extends CloudConnector {
             'drive_id': drive,
             'file_id': folder.id,
           }, session: token);
-        } catch (_) {
+        } catch (error, stack) {
           /* The caller may retry cleanup with its saved action. */
+          DiagnosticLog.error(
+            'aliyun.share.cleanup_failed',
+            error,
+            stack,
+            fields: {'folder': DiagnosticLog.reference(folder.id)},
+          );
         }
       }
       rethrow;

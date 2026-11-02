@@ -17,7 +17,7 @@ class UploadManager extends ChangeNotifier {
   final StateStore store;
   final CloudRepository cloud;
   final Future<void> Function()? foreground;
-  final _zone = Zone.current, _writes = AsyncGate(), _commands = AsyncGate();
+  final _writes = AsyncGate(), _commands = AsyncGate();
   final _tasks = <UploadTask>[], _sources = <String, XFile>{};
   final _fresh = <String>{};
   final completions = StreamController<UploadTask>.broadcast(sync: true);
@@ -180,7 +180,9 @@ class UploadManager extends ChangeNotifier {
         !_tasks.any((t) => t.status == UploadStatus.pending)) {
       return;
     }
-    _runner = _zone.run(_drain);
+    // Run the drain in the caller's current zone (not the one captured at
+    // construction) so RequestScope/cancellation/DI zone-values are fresh.
+    _runner = Zone.current.run(_drain);
     _background(
       _runner!.whenComplete(() {
         _runner = null;

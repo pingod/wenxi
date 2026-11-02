@@ -22,7 +22,7 @@ class _CheckingFiles extends FakeFiles {
     try {
       if (blocked != null) return await blocked!.future;
       await Future<void>.delayed(const Duration(milliseconds: 1));
-      return super.inspect(path);
+      return await super.inspect(path);
     } finally {
       active--;
     }

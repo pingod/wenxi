@@ -182,7 +182,7 @@ class MinePage extends StatelessWidget {
     final password = await askText(
       context,
       '设置备份密码',
-      hint: '至少 6 位，请妥善保管',
+      hint: '至少 8 位，请妥善保管',
       secret: true,
     );
     if (password == null || !context.mounted) return;

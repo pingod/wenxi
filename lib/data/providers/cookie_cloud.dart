@@ -106,6 +106,11 @@ class CookieCloudConnector extends QuarkUcConnector {
           .str('message')
           .ifEmpty('${platform.shortName} 请求失败（HTTP ${result.status}）'),
     );
+    // Mutation endpoints (file/delete, rename, move …) legitimately return
+    // `{code:0, status:200}` with no `data`. Only endpoints that actually carry
+    // data need it; absence must not be treated as failure, or a successful
+    // delete/rename would throw and any cleanup retry would double-execute.
+    if (!json.containsKey('data')) return <String, dynamic>{};
     require(
       json['data'] is Map || json['data'] is List,
       '${platform.shortName} 响应缺少有效数据，请重试',

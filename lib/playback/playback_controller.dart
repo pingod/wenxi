@@ -1136,6 +1136,9 @@ class PlaybackController extends ChangeNotifier {
       await session.backend.close();
       session.nativeClosed = true;
     } catch (_) {
+      // The native player failed to close, so the source and its temp files may
+      // still be in use by it. Preserve the lease/source on purpose; releasing
+      // them here could delete files the backend is still reading.
       notice = '播放器关闭未完成，临时文件已保留';
       _changed();
       return;

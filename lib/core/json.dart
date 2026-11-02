@@ -13,6 +13,9 @@ Map<String, String> strings(Object? value) =>
 extension JsonRead on Json {
   String str(String key, [String fallback = '']) =>
       this[key]?.toString() ?? fallback;
+  /// Null-preserving, cast-safe optional string: null only when the key is
+  /// absent or null, otherwise `toString()` (never throws on a wrong type).
+  String? optStr(String key) => this[key]?.toString();
   int integer(String key, [int fallback = 0]) => this[key] is num
       ? (this[key] as num).toInt()
       : int.tryParse(str(key)) ?? fallback;
@@ -57,6 +60,11 @@ void require(bool condition, String message) {
 }
 
 /// Serializes mutations while allowing the next operation after a failure.
+///
+/// Not re-entrant: a `run()` whose [action] awaits another `run()` on the same
+/// gate will deadlock (the inner run waits for the tail that the outer run is
+/// itself holding). Keep nested `run()` off the same instance; use a separate
+/// gate for nested work.
 class AsyncGate {
   Future<void> _tail = Future.value();
   Future<T> run<T>(Future<T> Function() action) {

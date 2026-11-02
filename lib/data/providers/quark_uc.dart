@@ -9,6 +9,7 @@ import '../../domain/uploads.dart';
 import '../http.dart';
 import '../uploads/upload_io.dart';
 import '../../core/operation_progress.dart';
+import '../../diagnostics/app_log.dart';
 
 part 'uploads/quark_upload.dart';
 
@@ -398,8 +399,9 @@ class QuarkUcConnector extends CloudConnector {
               await http.postJson(pending.url, pending.body, pending.headers),
             );
           });
-        } catch (_) {
+        } catch (error, stack) {
           /* Persisted cleanup is retried at the next safe opportunity. */
+          DiagnosticLog.error('quark_uc.cleanup_failed', error, stack);
         }
       }
       rethrow;

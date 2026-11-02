@@ -124,6 +124,7 @@ class _DownloadsPageState extends State<DownloadsPage>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!mounted) return;
     setState(() => _foreground = state == AppLifecycleState.resumed);
     if (_foreground) _checkFiles(force: true);
   }

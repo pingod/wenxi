@@ -30,6 +30,7 @@ class _UploadsPageState extends State<UploadsPage> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!mounted) return;
     setState(() => foreground = state == AppLifecycleState.resumed);
   }
 

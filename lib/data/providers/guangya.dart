@@ -1,6 +1,7 @@
 import 'package:crypto/crypto.dart';
 import '../../core/json.dart';
 import '../../core/operation_progress.dart';
+import '../../diagnostics/app_log.dart';
 import '../../domain/auth.dart';
 import '../../domain/models.dart';
 import '../../domain/uploads.dart';
@@ -645,7 +646,14 @@ class GuangyaConnector extends CloudConnector {
             name,
             token.credential,
           );
-        } catch (_) {}
+        } catch (error, stack) {
+          DiagnosticLog.error(
+            'guangya.share.cleanup_failed',
+            error,
+            stack,
+            fields: {'folder': DiagnosticLog.reference(folder.id)},
+          );
+        }
       }
       rethrow;
     }

@@ -523,7 +523,9 @@ class BaiduConnector extends CloudConnector {
               await http.postForm(pending.url, pending.body!, pending.headers),
             );
           });
-        } catch (_) {}
+        } catch (error, stack) {
+          DiagnosticLog.error('baidu.cleanup_failed', error, stack);
+        }
         rethrow;
       }
     } else {

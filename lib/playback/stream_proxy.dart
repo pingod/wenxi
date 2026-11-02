@@ -749,9 +749,16 @@ class PlaybackStreamProxy {
     return true;
   }
 
+  bool _pumping = false;
   void _pump() {
+    // Re-entrancy guard: `_fetch`'s `finally` calls `_pump()` again, and a
+    // synchronous readCache hit can re-enter before the outer loop unwinds,
+    // which would overshoot the connection/memory budget.
+    if (_pumping) return;
     if (_closed || _fetchClient == null) return;
-    while (!_paused || _pausedAllowance > 0) {
+    _pumping = true;
+    try {
+      while (!_paused || _pausedAllowance > 0) {
       final waiting = _segments.values
           .where((s) => !s.started && !s.cancelled && s.owners.isNotEmpty)
           .toList();
@@ -802,6 +809,9 @@ class PlaybackStreamProxy {
       final task = _fetch(segment);
       _fetches.add(task);
       unawaited(task.whenComplete(() => _fetches.remove(task)));
+    }
+    } finally {
+      _pumping = false;
     }
   }
 

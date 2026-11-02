@@ -33,8 +33,8 @@ class LegacyImporter {
         relativePath: old.str('relativePath'),
         headers: strings(old['headers']),
         expectedSize: old.integer('totalBytes'),
-        checksumType: old['checksumType'] as String?,
-        checksumValue: old['checksumValue'] as String?,
+        checksumType: old.optStr('checksumType'),
+        checksumValue: old.optStr('checksumValue'),
         cleanup: cleanupByTask[old.str('id')],
         source: old['source'] == null
             ? null
@@ -53,12 +53,12 @@ class LegacyImporter {
           connections: old.integer('threadCount', 64).clamp(1, 512),
           retries: old.integer('retryLimit', 3).clamp(0, 3),
           speedLimit: old.integer('speedLimitBytes'),
-          destination: old['destinationTreeUri'] as String?,
-          savedPath: old['savedUri'] as String?,
+          destination: old.optStr('destinationTreeUri'),
+          savedPath: old.optStr('savedUri'),
           identity: RemoteIdentity(
             old.integer('totalBytes'),
-            old['remoteEtag'] as String?,
-            old['remoteLastModified'] as String?,
+            old.optStr('remoteEtag'),
+            old.optStr('remoteLastModified'),
           ),
         ).toJson(),
       );

@@ -1,6 +1,5 @@
 import '../../core/json.dart';
 import '../http.dart';
-import '../state_store.dart';
 import '../../domain/models.dart';
 import 'cookie_cloud.dart';
 import 'quark_playback.dart';
@@ -8,21 +7,16 @@ import 'quark_playback.dart';
 class QuarkConnector extends CookieCloudConnector {
   QuarkConnector(
     JsonHttp http, {
-    CredentialStore? store,
-    Future<void> Function(DownloadCleanup)? stageCleanup,
-    Duration taskDelay = const Duration(milliseconds: 750),
-    int Function()? now,
-    bool Function(bool authenticated)? directShareDownloadEnabled,
+    super.store,
+    super.stageCleanup,
+    super.taskDelay,
+    super.now,
+    super.directShareDownloadEnabled,
   }) : super(
          CloudPlatform.quark,
          http,
-         store: store,
-         stageCleanup: stageCleanup,
-         taskDelay: taskDelay,
-         now: now,
          webUserAgent: webUa,
          apiUserAgent: cloudUa,
-         directShareDownloadEnabled: directShareDownloadEnabled,
        );
 
   static const webUa =
