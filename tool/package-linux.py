@@ -175,7 +175,7 @@ def stage_tree(bundle, stage, version, root):
         'Keywords=网盘;下载;cloud;download;torrent;',
         'X-GNOME-UsesNotifications=true',
         '',
-    )), encoding='utf-8')
+    )), encoding='utf-8', newline='\n')
     desktop.chmod(0o644)
     icon = stage / ICON_FILE
     icon.parent.mkdir(parents=True, exist_ok=True)
@@ -190,7 +190,7 @@ def stage_tree(bundle, stage, version, root):
         'Built from the sources at ' + HOMEPAGE + '\n'
         'The download core is Gopeed (GPL-3.0-or-later); the complete\n'
         'third-party notices are installed in data/flutter_assets/assets/licenses/.\n\n'
-        + body, encoding='utf-8')
+        + body, encoding='utf-8', newline='\n')
     return stage
 
 
@@ -276,10 +276,13 @@ def build_deb(bundle, output_dir, version, maintainer, homepage, description, ro
         stage_tree(bundle, stage, version, root)
         control = Path(temporary) / 'control'
         control.mkdir()
+        # newline='\n' keeps the generated control files byte-identical on a
+        # Windows host, where the default text mode would emit CRLF and dpkg
+        # rejects the package.
         (control / 'control').write_text(
             deb_control_text(version, stage, maintainer, homepage, description),
-            encoding='utf-8')
-        (control / 'md5sums').write_text(_md5sums(stage), encoding='utf-8')
+            encoding='utf-8', newline='\n')
+        (control / 'md5sums').write_text(_md5sums(stage), encoding='utf-8', newline='\n')
         members = [
             ('debian-binary', b'2.0\n'),
             ('control.tar.xz', _tar_bytes(control, './', epoch, 'xz')),
@@ -347,7 +350,7 @@ def build_arch(bundle, output_dir, version, pkgrel, packager, homepage, descript
         stage_tree(bundle, stage, version, root)
         (stage / '.PKGINFO').write_text(
             pkg_info(version, pkgrel, stage, packager, homepage, description),
-            encoding='utf-8')
+            encoding='utf-8', newline='\n')
         payload = _tar_bytes(stage, '', epoch_of(), compression)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

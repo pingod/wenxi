@@ -43,6 +43,12 @@ def ar_members(payload):
     return members
 
 
+# The Linux packaging tool only ever runs on Linux. Its tests assert POSIX
+# semantics the host cannot fake elsewhere: file modes survive into the tar
+# payloads and the generated control files must use LF newlines. The ubuntu
+# runner in .github/workflows/packages.yml covers them on the real platform, so
+# a Windows/macOS checkout skips instead of reporting false failures.
+@unittest.skipIf(os.name == 'nt', 'Linux packaging keeps POSIX modes and LF newlines')
 class LinuxPackageTest(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
