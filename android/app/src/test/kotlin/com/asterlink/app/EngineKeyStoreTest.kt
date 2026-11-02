@@ -50,6 +50,7 @@ class EngineKeyStoreTest {
     }
 
     @Test fun damagedPrimaryRepairsFromTheCopyUsingCommittedIdentity() {
+        PosixHost.require()
         for (damage in listOf("missing", "short", "long", "wrong")) {
             val root = temporary.newFolder()
             store(root).load(encoded())

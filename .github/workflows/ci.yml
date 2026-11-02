@@ -78,9 +78,11 @@ jobs:
       - name: Install Linux desktop dependencies
         run: |
           sudo apt-get update
+          # libmpv-dev provides PkgConfig::mpv, which media_kit_video links
+          # against on Linux.
           sudo apt-get install -y --no-install-recommends \
             clang cmake ninja-build pkg-config libgtk-3-dev \
-            libayatana-appindicator3-dev libsecret-1-dev xvfb
+            libayatana-appindicator3-dev libsecret-1-dev libmpv-dev xvfb
       - uses: ./.github/actions/setup
       - name: Build the Linux release bundle
         run: ./tool/build-linux.sh --build-config config/build.community.json

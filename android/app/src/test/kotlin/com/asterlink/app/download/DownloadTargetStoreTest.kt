@@ -19,6 +19,7 @@ import android.system.Os
 import android.system.OsConstants
 import android.system.StructStat
 import android.util.AtomicFile
+import com.asterlink.app.PosixHost
 import java.io.File
 import java.io.FileDescriptor
 import java.io.FileNotFoundException
@@ -89,6 +90,7 @@ class DownloadTargetStoreTest {
     @Test
     @Config(shadows = [GrantedDescriptorOs::class])
     fun grantedDescriptorWorksWithoutReopeningItsLocator() {
+        PosixHost.require()
         provider.onDescriptorOpened = GrantedDescriptorOs::attach
         val store = DownloadTargetStore(context, journals).also(stores::add)
         val target = open(store)
@@ -139,6 +141,7 @@ class DownloadTargetStoreTest {
     }
 
     @Test fun targetBytesAreWrittenInPlaceAndOnlyFinishPublishes() {
+        PosixHost.require()
         val store = store()
         assertNull(store.inspect("task"))
         val target = open(store)
@@ -181,6 +184,7 @@ class DownloadTargetStoreTest {
     }
 
     @Test fun publishedJournalRecoversWithoutOpeningOrWritingTheFileAgain() {
+        PosixHost.require()
         val first = store()
         val target = open(first)
         val bytes = byteArrayOf(11, 22, 33)
@@ -235,6 +239,7 @@ class DownloadTargetStoreTest {
     }
 
     @Test fun cancellationDeletesOnlyItsOwnedUnfinishedTarget() {
+        PosixHost.require()
         val store = store()
         val first = open(store)
         val second = open(store, id = "other")
@@ -333,6 +338,7 @@ class DownloadTargetStoreTest {
     }
 
     @Test fun interruptedPublicationCannotBeDiscardedAndCanFinishAgain() {
+        PosixHost.require()
         var writes = 0
         val store = store(writer = { file, bytes ->
             writes++
@@ -359,6 +365,7 @@ class DownloadTargetStoreTest {
     }
 
     @Test fun providerPublishFailureRetainsTargetForRetry() {
+        PosixHost.require()
         val store = store()
         val target = open(store)
         provider.failPublish = true
@@ -401,6 +408,7 @@ class DownloadTargetStoreTest {
     }
 
     @Test fun safCreatesTheFinalFileInsideSelectedSubdirectoriesAndReopensIt() {
+        PosixHost.require()
         val directory = File(root, "saf").apply { mkdirs() }
         val (documents, destination) = documents(directory)
         val store = store(probe = { documents.lastOpened!!.absolutePath })
@@ -419,6 +427,7 @@ class DownloadTargetStoreTest {
     }
 
     @Test fun safFinalJournalFailureRecoversPublicationWithoutDownloadingOrDeletingBytes() {
+        PosixHost.require()
         val directory = File(root, "saf").apply { mkdirs() }
         val (documents, destination) = documents(directory)
         var writes = 0
