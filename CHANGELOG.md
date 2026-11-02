@@ -1,5 +1,16 @@
 # 更新记录
 
+## 未发布
+
+【新增】macOS 桌面版支持（源码编译，见 docs/BUILDING-MACOS.md）
+
+### 其他改进
+
+- 新增 macOS 桌面版：放行 macOS 平台分支，桌面动作（访达定位 / 关机 / 休眠）、下载内核（Darwin 独立进程）、托盘、自动更新（DMG / ZIP）与 GitHub 更新架构均适配。
+- 新增 `macos/` Runner 工程与 `tool/build-macos.sh`、`tool/build-native-darwin.sh`；Xcode 工程会在构建时把下载内核复制进 `.app`。
+- macOS 暂无内嵌浏览器，需要网页登录的平台走「系统浏览器登录 + 手动粘贴凭据」，与 Linux 一致。
+- 说明：最终 App 需在装有完整 Xcode 的 Mac 上构建、签名与公证。
+
 ## 2.1.0+210
 
 【新增】百度 1G 不限速解析、百度视频免转存播放、播放器片头片尾跳过 + 时间轴捕获、电视投屏
