@@ -34,7 +34,7 @@ class _VolumeFiles extends PlatformFileAccess {
   int systemFree = 0, targetFree = 1 << 40;
 
   StorageVolume volume(String path) => StorageVolume(
-    p.equals(path, selected.path) || p.isWithin(selected.path, path)
+    p.equals(path, selected.path) || isWithinPath(selected.path, path)
         ? 'target'
         : 'system',
     path,
@@ -143,7 +143,10 @@ void main() {
           files.checked.every((path) => files.volume(path).id == 'target'),
           isTrue,
         );
-        expect(p.isWithin(selected.path, manager.task(id)!.savedPath!), isTrue);
+        expect(
+          isWithinPath(selected.path, manager.task(id)!.savedPath!),
+          isTrue,
+        );
       },
     );
 

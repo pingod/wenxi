@@ -181,3 +181,28 @@ Future<void> until(
     await Future<void>.delayed(const Duration(milliseconds: 20));
   }
 }
+
+/// Resolves a path before comparing it with another one.
+///
+/// Windows runners report the temporary directory in its 8.3 short form
+/// (`RUNNER~1`), while paths that came back from the engine use the long form,
+/// so a raw string comparison reports a false negative.
+String resolvedPath(String path) {
+  try {
+    final file = File(path);
+    if (file.existsSync()) return file.resolveSymbolicLinksSync();
+    final directory = Directory(path);
+    if (directory.existsSync()) return directory.resolveSymbolicLinksSync();
+  } on FileSystemException {
+    // Fall through to a lexical absolute path.
+  }
+  return p.absolute(path);
+}
+
+/// True when [child] is inside [parent] on the current host.
+bool isWithinPath(String parent, String child) {
+  final outer = resolvedPath(parent), inner = resolvedPath(child);
+  return Platform.isWindows
+      ? p.isWithin(outer.toLowerCase(), inner.toLowerCase())
+      : p.isWithin(outer, inner);
+}

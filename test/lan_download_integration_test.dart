@@ -148,7 +148,7 @@ void main() {
                   .then((hash) => hash.toString()),
               task.spec.checksumValue,
             );
-            expect(p.isWithin(destination, saved.path), isTrue);
+            expect(isWithinPath(destination, saved.path), isTrue);
           }
           expect(
             await File(

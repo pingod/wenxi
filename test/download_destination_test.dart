@@ -154,7 +154,7 @@ void main() {
       native.finish = true;
       await completed(id);
       final saved = File(manager.task(id)!.savedPath!);
-      expect(p.isWithin(target.path, saved.path), isTrue);
+      expect(isWithinPath(target.path, saved.path), isTrue);
       expect(await saved.readAsBytes(), native.content);
       expect(await cached.exists(), isFalse);
       expect(await defaults.exists(), isFalse);
@@ -174,7 +174,10 @@ void main() {
       expect(manager.engine.taskCacheRoot(id).path, originalRoot);
       native.finish = true;
       await completed(id);
-      expect(p.isWithin(defaults.path, manager.task(id)!.savedPath!), isTrue);
+      expect(
+        isWithinPath(defaults.path, manager.task(id)!.savedPath!),
+        isTrue,
+      );
     },
   );
 
@@ -201,7 +204,10 @@ void main() {
       await manager.resume(id);
       await completed(id);
       expect(native.begins.length, begins);
-      expect(p.isWithin(target.path, manager.task(id)!.savedPath!), isTrue);
+      expect(
+        isWithinPath(target.path, manager.task(id)!.savedPath!),
+        isTrue,
+      );
       expect(await cached.exists(), isFalse);
     },
   );
@@ -232,7 +238,10 @@ void main() {
     await manager.resume('legacy');
     await completed('legacy');
     expect(native.begins, isEmpty);
-    expect(p.isWithin(target.path, manager.task('legacy')!.savedPath!), isTrue);
+    expect(
+        isWithinPath(target.path, manager.task('legacy')!.savedPath!),
+        isTrue,
+      );
   });
 
   test(
@@ -242,10 +251,16 @@ void main() {
       await manager.changeDestination(null);
       var id = await manager.enqueue(_spec);
       await completed(id);
-      expect(p.isWithin(defaults.path, manager.task(id)!.savedPath!), isTrue);
+      expect(
+        isWithinPath(defaults.path, manager.task(id)!.savedPath!),
+        isTrue,
+      );
       id = (await manager.enqueueAll([_spec], destination: target.path)).single;
       await completed(id);
-      expect(p.isWithin(target.path, manager.task(id)!.savedPath!), isTrue);
+      expect(
+        isWithinPath(target.path, manager.task(id)!.savedPath!),
+        isTrue,
+      );
       expect(
         native.begins.last.str('cacheRoot'),
         p.join(target.path, '.asterlink-cache'),

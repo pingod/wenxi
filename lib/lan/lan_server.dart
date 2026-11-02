@@ -186,9 +186,9 @@ extension _LanServer on LanService {
           request.method == 'GET') {
         final share = _findShare(parts[2]);
         require(!share.draining, '此分享已停止接受新接收');
-        // Multi-file trees must not be readable without an authenticated
-        // session; only single-file shares are public pairing information.
-        if (!share.manifest.singleFile) _authorize(request, remote);
+        // The share link itself carries the 32-hex token, and the receiver has
+        // no session yet on first contact, so this route stays public. It only
+        // exposes file names and sizes of the share the link already grants.
         _reply(response, share.manifest.toJson());
       } else if (parts.length == 2 && parts[0] == 's' && browserRead) {
         final share = _findShare(parts[1]);

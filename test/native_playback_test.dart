@@ -21,6 +21,9 @@ void main() {
       late Player player;
       late MediaKitBackend backend;
       late DiagnosticLog log;
+      // setUp can stop before the backend exists when libmpv fails to load, so
+      // tearDown must not dereference the late fields unconditionally.
+      var ready = false;
       final sample = File('test/fixtures/player-sample.mkv').absolute;
       setUpAll(() {
         MediaKit.ensureInitialized(libmpv: library);
@@ -35,9 +38,13 @@ void main() {
         );
         await (player.platform as NativePlayer).setProperty('ao', 'null');
         backend = MediaKitBackend(video: false, player: player);
+        ready = true;
       });
       tearDown(() async {
-        await backend.close();
+        if (ready) {
+          await backend.close();
+          ready = false;
+        }
         DiagnosticLog.active = null;
         log.close();
       });
@@ -596,8 +603,12 @@ void main() {
           expect((closed['proxy'] as Map)['servedBytes'], greaterThan(0));
         },
         // libmpv 2.x on Linux never reports a duration for this progressive
-        // fixture, so the startup reserve cannot fill within the budget.
-        skip: Platform.isLinux
+        // fixture, so the startup reserve cannot fill within the budget. A
+        // per-test skip overrides the group-level one, so the missing runtime
+        // has to be repeated here, otherwise this case runs without libmpv.
+        skip: library == null
+            ? 'Run tool/prepare-player-test.ps1, install libmpv, or set ASTERLINK_MPV_LIBRARY.'
+            : Platform.isLinux
             ? 'The progressive startup reserve does not fill with libmpv 2.x here.'
             : false,
       );

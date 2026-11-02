@@ -217,8 +217,11 @@ void main() {
           }
         },
         // libmpv 2.x on Linux does not surface the underrun here, so the reserve
-        // never grows and the wait times out.
-        skip: Platform.isLinux
+        // never grows and the wait times out. A per-test skip overrides the
+        // group-level one, so the missing runtime has to be repeated here.
+        skip: library == null
+            ? 'A local libmpv test runtime is required.'
+            : Platform.isLinux
             ? 'The underrun reserve does not grow with libmpv 2.x here.'
             : false,
       );

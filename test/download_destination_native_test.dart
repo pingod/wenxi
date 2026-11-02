@@ -200,7 +200,7 @@ void main() {
         );
         final task = manager.task(id)!;
         expect(task.status, DownloadStatus.completed, reason: task.error);
-        expect(p.isWithin(selectedRoot.path, task.savedPath!), isTrue);
+        expect(isWithinPath(selectedRoot.path, task.savedPath!), isTrue);
         expect(
           sha256.convert(await File(task.savedPath!).readAsBytes()),
           sha256.convert(content),
@@ -281,7 +281,7 @@ void main() {
           final payload = File(
             p.join(manager.engine.taskDirectory(id).path, 'payload.gopeed'),
           );
-          expect(p.isWithin(selectedRoot.path, payload.path), isTrue);
+          expect(isWithinPath(selectedRoot.path, payload.path), isTrue);
           expect(await Directory(p.join(cache.path, id)).exists(), isFalse);
           await close();
           await open();
@@ -433,7 +433,7 @@ void main() {
         final payload = File(
           p.join(manager.engine.taskDirectory(id).path, 'payload.hls'),
         );
-        expect(p.isWithin(selectedRoot.path, payload.path), isTrue);
+        expect(isWithinPath(selectedRoot.path, payload.path), isTrue);
         expect(await payload.length(), content.length ~/ 2);
         await close();
         await open();
