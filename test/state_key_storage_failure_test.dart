@@ -18,6 +18,7 @@ class _DenyingStorage extends FlutterSecureStorage {
   final PlatformException failure;
   final records = <String, String>{};
   int writes = 0;
+  int reads = 0;
 
   @override
   Future<String?> read({
@@ -28,7 +29,10 @@ class _DenyingStorage extends FlutterSecureStorage {
     WebOptions? webOptions,
     AppleOptions? mOptions,
     WindowsOptions? wOptions,
-  }) async => records[key];
+  }) async {
+    reads++;
+    return records[key];
+  }
 
   @override
   Future<void> write({
@@ -175,7 +179,11 @@ void main() {
       expect(read.needsMigration, isFalse);
     });
 
-    test('an existing keychain record is migrated to private files', () async {
+    test('a keychain-only record is never read on macOS', () async {
+      // Reading it would raise the system access prompt, which blocks startup
+      // until somebody clicks it, and an ad-hoc rebuild cannot be authorised
+      // anyway. The record is reported as unavailable so the startup page can
+      // offer the backup and password recovery paths instead.
       final storage = _DenyingStorage(
         PlatformException(code: 'unused', details: 0),
       );
@@ -189,11 +197,12 @@ void main() {
 
       final localKey = LocalStateKey(directory, storage, privateBackend: true);
       final read = await localKey.read();
-      expect(read.keys.single, key);
+      expect(read.keys, isEmpty);
+      expect(read.unavailable, isTrue);
       expect(
-        read.needsMigration,
-        isTrue,
-        reason: 'StateStore.open saves the key to the private backend',
+        storage.reads,
+        0,
+        reason: 'no keychain access prompt may be triggered',
       );
 
       await localKey.save(key);

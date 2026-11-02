@@ -50,7 +50,8 @@ void main() {
       for (final name in [
         'a,b.mp4',
         "it's a video.mp4",
-        r'back\slash.mp4',
+        // A backslash is a path separator on Windows, so the file cannot exist.
+        if (!Platform.isWindows) r'back\slash.mp4',
         'quote".mp4',
       ]) {
         final file = await File(p.join(root.path, name)).writeAsString('x');

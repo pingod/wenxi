@@ -71,6 +71,11 @@ void main() {
   });
   tearDown(() async => directory.delete(recursive: true));
 
+  // macOS and Android default to the private-file key backend. These cases are
+  // about the OS-storage pointer, so they pin the legacy backend explicitly.
+  LocalStateKey legacyKey(Directory dir) =>
+      LocalStateKey(dir, StateStore.secureStorage, privateBackend: false);
+
   Future<void> expectOriginals() async {
     for (final entry in original.entries) {
       expect(
@@ -84,7 +89,7 @@ void main() {
     'missing key is recoverable, leaves snapshots intact and creates no key',
     () async {
       await expectLater(
-        StateStore.open(directory),
+        StateStore.open(directory, localKey: legacyKey(directory)),
         throwsA(
           isA<StateRecoveryRequired>().having(
             (e) => e.cause,
@@ -113,7 +118,7 @@ void main() {
     'wrong backup password leaves all files and secure keys unchanged',
     () async {
       await expectLater(
-        StartupRecovery(failure).restore(backup, 'wrong-password'),
+        StartupRecovery(failure, localKey: legacyKey(directory)).restore(backup, 'wrong-password'),
         throwsA(isA<AppException>()),
       );
       await expectOriginals();
@@ -143,7 +148,7 @@ void main() {
         'fixture-password',
       ));
       await expectLater(
-        StartupRecovery(failure).restore(bad, 'fixture-password'),
+        StartupRecovery(failure, localKey: legacyKey(directory)).restore(bad, 'fixture-password'),
         throwsA(isA<AppException>()),
       );
       await expectOriginals();
@@ -167,7 +172,7 @@ void main() {
           entry.value,
         );
       }
-      final reopened = await StateStore.open(directory);
+      final reopened = await StateStore.open(directory, localKey: legacyKey(directory));
       expect(
         Vault(reopened).credential(CloudPlatform.baidu)?.primary,
         'BDUSS=fixture',
@@ -205,8 +210,8 @@ void main() {
         '${engine.path}/data',
       ).writeAsString('old encrypted engine data');
       await File('${cache.path}/video.mp4').writeAsString('existing download');
-      final result = await StartupRecovery(failure).reinitialize();
-      final reopened = await StateStore.open(directory);
+      final result = await StartupRecovery(failure, localKey: legacyKey(directory)).reinitialize();
+      final reopened = await StateStore.open(directory, localKey: legacyKey(directory));
       expect(reopened.data.obj('credentials'), isEmpty);
       expect(reopened.data.boolean('legacyImported'), isTrue);
       expect(
@@ -223,7 +228,7 @@ void main() {
       );
       await reopened.put('new-setting', true);
       reopened.dispose();
-      final again = await StateStore.open(directory);
+      final again = await StateStore.open(directory, localKey: legacyKey(directory));
       expect(again.data.boolean('new-setting'), isTrue);
       again.dispose();
     },
@@ -264,8 +269,8 @@ void main() {
         'untouched',
       );
       // A failed attempt must release the instance lock and allow retry.
-      await StartupRecovery(failure).reinitialize();
-      (await StateStore.open(directory)).dispose();
+      await StartupRecovery(failure, localKey: legacyKey(directory)).reinitialize();
+      (await StateStore.open(directory, localKey: legacyKey(directory))).dispose();
     },
   );
 
@@ -275,8 +280,8 @@ void main() {
       final oldDatabase = File('${directory.path}/gopeed/old.db');
       await oldDatabase.parent.create();
       await oldDatabase.writeAsString('encrypted with the missing old key');
-      await StartupRecovery(failure).reinitialize();
-      final reopened = await StateStore.open(directory);
+      await StartupRecovery(failure, localKey: legacyKey(directory)).reinitialize();
+      final reopened = await StateStore.open(directory, localKey: legacyKey(directory));
       final native = FakeNative();
       final services = AppServices(
         store: reopened,
@@ -316,7 +321,7 @@ void main() {
         value: 'invalid-base64!',
       );
       await expectLater(
-        StateStore.open(directory),
+        StateStore.open(directory, localKey: legacyKey(directory)),
         throwsA(
           isA<StateRecoveryRequired>().having(
             (e) => e.cause,
@@ -325,14 +330,14 @@ void main() {
           ),
         ),
       );
-      final result = await StartupRecovery(failure).reinitialize();
+      final result = await StartupRecovery(failure, localKey: legacyKey(directory)).reinitialize();
       final values = await StateStore.secureStorage.readAll();
       expect(values[StateStore.keyName], 'invalid-base64!');
       expect(
         await File('${result.archive.path}/state-v1.enc').readAsBytes(),
         original['state-v1.enc'],
       );
-      (await StateStore.open(directory)).dispose();
+      (await StateStore.open(directory, localKey: legacyKey(directory))).dispose();
     },
   );
 
@@ -352,7 +357,7 @@ void main() {
         );
         await primary.writeAsBytes(bytes);
         await expectLater(
-          StartupRecovery(failure).reinitialize(),
+          StartupRecovery(failure, localKey: legacyKey(directory)).reinitialize(),
           throwsA(isA<AppException>()),
         );
         expect(await primary.readAsBytes(), bytes);
@@ -370,7 +375,7 @@ void main() {
       final outcomes = await Future.wait(
         List.generate(2, (_) async {
           try {
-            await StartupRecovery(failure).reinitialize();
+            await StartupRecovery(failure, localKey: legacyKey(directory)).reinitialize();
             return true;
           } on AppException {
             return false;
@@ -378,7 +383,7 @@ void main() {
         }),
       );
       expect(outcomes.where((value) => value), hasLength(1));
-      (await StateStore.open(directory)).dispose();
+      (await StateStore.open(directory, localKey: legacyKey(directory))).dispose();
     },
   );
 
@@ -398,10 +403,10 @@ void main() {
         key: StateStore.keyName,
         value: base64Encode(key),
       );
-      final reopened = await StateStore.open(directory);
+      final reopened = await StateStore.open(directory, localKey: legacyKey(directory));
       expect(reopened.data.boolean('restored'), isTrue);
       reopened.dispose();
-      final again = await StateStore.open(directory);
+      final again = await StateStore.open(directory, localKey: legacyKey(directory));
       expect(again.data.boolean('restored'), isTrue);
       again.dispose();
     },

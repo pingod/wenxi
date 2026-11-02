@@ -156,9 +156,9 @@ class LocalStateKey {
     final result = StateKeyRead();
     _KeyLocation location;
     try {
-      // An empty Android installation never needs to initialize an OS keystore.
-      // The caller must check for encrypted snapshots and recovery metadata first.
-      if (nativeAndroid &&
+      // An empty installation never needs to touch OS storage. The caller checks
+      // for encrypted snapshots and recovery metadata first.
+      if (usePrivateFiles &&
           !readLegacyWithoutPointer &&
           !await localFile(locationName).exists()) {
         return result;
@@ -185,6 +185,15 @@ class LocalStateKey {
     // A pointer to an existing namespace is not a fresh installation, even if
     // every record disappears. Never replace its key with a random one.
     if (location.native && !nativeAndroid) {
+      result.unavailable = true;
+      return result;
+    }
+    // macOS keeps keys in private files and never contacts the login keychain.
+    // An item written by an older ad-hoc build cannot be read by this signature
+    // anyway: macOS answers with an access prompt that blocks startup until
+    // somebody clicks it. Report the record as unavailable instead, so the
+    // startup page can offer the backup/password recovery paths.
+    if (usePrivateFiles && !nativeAndroid && !location.privateFiles) {
       result.unavailable = true;
       return result;
     }
