@@ -161,3 +161,43 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
+  macos:
+    # Apple Silicon runner: the .app and the Go download helper are both built
+    # for arm64 here, so the default `build-native-darwin.sh` (GOARCH=arm64)
+    # lines up with the app the Flutter toolchain produces.
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Build the macOS app bundle (ad-hoc signed)
+        # CODESIGN_IDENTITY is unset, so build-macos.sh ad-hoc signs the bundle
+        # for CI verification only. Signing with a Developer ID and notarizing
+        # for distribution is documented in docs/BUILDING-MACOS.md.
+        run: ./tool/build-macos.sh --build-config config/build.community.json
+      - name: Verify and stage the app bundle
+        run: |
+          app="build/macos/Build/Products/Release/asterlink.app"
+          test -x "$app/Contents/MacOS/asterlink"
+          test -x "$app/Contents/MacOS/asterlink_gopeed"
+          file "$app/Contents/MacOS/asterlink_gopeed" | grep -q 'Mach-O'
+          codesign --verify --deep --strict "$app"
+          python3 tool/package-release.py --platform macos
+          ls -l .local/release-assets
+      - name: Summarise the package
+        run: |
+          cd .local/release-assets
+          shasum -a 256 ./*.zip | tee SHA256SUMS.txt
+      - name: Save macOS package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: package-macos
+          path: |
+            .local/release-assets/*.zip
+            .local/release-assets/SHA256SUMS.txt
+          include-hidden-files: true
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

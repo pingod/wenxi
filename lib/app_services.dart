@@ -59,6 +59,7 @@ import 'platform/native_engine.dart';
 import 'platform/desktop_actions.dart';
 import 'platform/desktop_platform.dart';
 import 'platform/linux_actions.dart';
+import 'platform/macos_actions.dart';
 import 'platform/windows_actions.dart';
 import 'platform/windows_webview.dart';
 import 'data/providers/ilanzou.dart';
@@ -494,6 +495,8 @@ class AppServices extends ChangeNotifier {
   static DesktopActions _defaultDesktopActions({required bool supported}) =>
       Platform.isWindows
       ? WindowsActions(supported: supported)
+      : Platform.isMacOS
+      ? MacosActions(supported: supported)
       : LinuxActions(supported: supported);
 
   static Future<AppServices> open() async {

@@ -17,14 +17,19 @@ class AppUpdateInstaller {
     final lower = name.toLowerCase();
     return platform == 'android'
         ? lower.endsWith('.apk')
-        : platform == 'windows' &&
-              (lower.endsWith('.exe') || lower.endsWith('.zip'));
+        : platform == 'windows'
+        ? (lower.endsWith('.exe') || lower.endsWith('.zip'))
+        : platform == 'macos'
+        ? (lower.endsWith('.dmg') || lower.endsWith('.zip'))
+        : false;
   }
 
   static void requirePackageName(String name, String platform) => require(
     supportsName(name, platform),
     platform == 'android'
         ? '安卓更新链接必须是单个 APK 安装包'
+        : platform == 'macos'
+        ? 'macOS 更新链接必须是单个 DMG 安装包或 ZIP 压缩包'
         : 'Windows 更新链接必须是单个 EXE 安装包或 ZIP 压缩包',
   );
 
@@ -42,6 +47,36 @@ class AppUpdateInstaller {
       } on PlatformException catch (error) {
         throw AppException(error.message ?? '安装包校验失败，请使用浏览器更新');
       }
+    }
+    if (platform == 'macos') {
+      final input = await File(path).open();
+      try {
+        final lower = task.spec.fileName.toLowerCase();
+        if (lower.endsWith('.dmg')) {
+          // A UDIF disk image ends with a 512-byte trailer whose first four
+          // bytes are the `koly` magic; reject HTML or other data renamed to
+          // .dmg without that trailer.
+          final length = await input.length();
+          require(length > 512, '安装包不完整，请重新下载');
+          await input.setPosition(length - 512);
+          final trailer = await input.read(512);
+          final magic = String.fromCharCodes(trailer.sublist(0, 4));
+          require(magic == 'koly', '下载内容不是有效的磁盘映像，请重试或使用浏览器更新');
+        } else {
+          final bytes = await input.read(4);
+          require(
+            bytes.length == 4 &&
+                bytes[0] == 0x50 &&
+                bytes[1] == 0x4b &&
+                bytes[2] == 3 &&
+                bytes[3] == 4,
+            '下载内容不是有效的 ZIP 压缩包，请重试或使用浏览器更新',
+          );
+        }
+      } finally {
+        await input.close();
+      }
+      return path;
     }
     require(platform == 'windows', '当前平台请使用浏览器更新');
     final input = await File(path).open();

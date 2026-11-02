@@ -4,6 +4,7 @@ import hashlib
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import tarfile
 import zipfile
 
@@ -56,7 +57,7 @@ def stage(root, platform, installer=None):
                 info.uname = info.gname = ''
                 with path.open('rb') as stream:
                     archive.addfile(info, stream)
-    else:
+    elif platform == 'windows':
         runtime = root / 'build/windows/x64/runner/Release'
         for name in ('asterlink.exe', 'asterlink_gopeed.exe', 'flutter_windows.dll', 'libmpv-2.dll', 'data/app.so'):
             if not (runtime / name).is_file():
@@ -82,6 +83,34 @@ def stage(root, platform, installer=None):
             if target.exists():
                 raise ValueError('A staged installer already exists')
             shutil.copy2(source, target)
+    elif platform == 'macos':
+        # Flutter's macOS bundle is a .app directory. AsterLink keeps both the
+        # app executable and the download helper in Contents/MacOS, so check
+        # the paths the Dart runtime resolves at startup (desktopHelperName).
+        app = root / 'build/macos/Build/Products/Release/asterlink.app'
+        contents = app / 'Contents'
+        required = (
+            ('Contents/MacOS/asterlink', app / 'Contents/MacOS/asterlink'),
+            ('Contents/MacOS/asterlink_gopeed', app / 'Contents/MacOS/asterlink_gopeed'),
+            ('Contents/Info.plist', contents / 'Info.plist'),
+            ('Contents/Frameworks/App.framework/App', contents / 'Frameworks/App.framework/App'),
+            (
+                'Contents/Frameworks/App.framework/Resources/flutter_assets/AssetManifest.bin',
+                contents / 'Frameworks/App.framework/Resources/flutter_assets/AssetManifest.bin',
+            ),
+        )
+        for name, path in required:
+            if not path.is_file():
+                raise ValueError('macOS bundle is incomplete: missing ' + name)
+        # `ditto -c -k` keeps the executable bit and symlinks intact, which a
+        # plain zip would drop; the .app must stay a directory tree on extract.
+        destination = output / ('asterlink-' + version + '-macos-arm64.zip')
+        if destination.exists():
+            raise ValueError('A staged macOS asset already exists')
+        subprocess.run(
+            ['ditto', '-c', '-k', '--keepParent', str(app), str(destination)],
+            check=True,
+        )
     return output
 
 
@@ -103,7 +132,7 @@ def checksums(directory):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--platform', choices=('android', 'windows', 'linux'))
+    parser.add_argument('--platform', choices=('android', 'windows', 'linux', 'macos'))
     parser.add_argument('--installer')
     parser.add_argument('--checksums', action='store_true')
     args = parser.parse_args()

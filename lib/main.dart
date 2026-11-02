@@ -5,6 +5,7 @@ import 'package:path/path.dart' as p;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:tray_manager/tray_manager.dart';
@@ -523,22 +524,12 @@ class _MainShellState extends State<MainShell>
         if (!mounted || _exiting) return;
         await windowManager.setPreventClose(true);
         // AppIndicator reads PNG/SVG icons; .ico is a Windows-only container.
-        await trayManager.setIcon(
-          Platform.isWindows
-              ? 'assets/icons/app.ico'
-              : p.join(
-                  p.dirname(Platform.resolvedExecutable),
-                  'data',
-                  'flutter_assets',
-                  'assets',
-                  'icons',
-                  'app.png',
-                ),
-        );
+        final trayIcon = await _trayIconPath();
+        if (trayIcon != null) await trayManager.setIcon(trayIcon);
         // The Linux implementation only handles icon, title and context menu;
         // a tooltip call raises MissingPluginException and would abort the
-        // menu setup that follows.
-        if (Platform.isWindows) {
+        // menu setup that follows. Windows and macOS support the tooltip.
+        if (!Platform.isLinux) {
           await trayManager.setToolTip('文析助手 · 单击打开，右键菜单');
         }
         await trayManager.setContextMenu(
@@ -558,6 +549,39 @@ class _MainShellState extends State<MainShell>
     } catch (error, stack) {
       DiagnosticLog.error('app.tray_init_failed', error, stack);
     }
+  }
+
+  /// Resolves a tray icon path the current platform's tray manager can load.
+  ///
+  /// Windows reads the .ico straight from the asset bundle. Linux keeps the
+  /// plain `data/flutter_assets` layout beside the executable. macOS bundles
+  /// assets under App.framework, which tray_manager cannot open from that
+  /// virtual path, so the PNG is copied to a temp file first.
+  Future<String?> _trayIconPath() async {
+    if (Platform.isWindows) return 'assets/icons/app.ico';
+    if (Platform.isLinux) {
+      return p.join(
+        p.dirname(Platform.resolvedExecutable),
+        'data',
+        'flutter_assets',
+        'assets',
+        'icons',
+        'app.png',
+      );
+    }
+    if (Platform.isMacOS) {
+      try {
+        final data = await rootBundle.load('assets/icons/app.png');
+        final dir = await getTemporaryDirectory();
+        final file = File(p.join(dir.path, 'asterlink_tray.png'));
+        await file.writeAsBytes(data.buffer.asUint8List(), flush: true);
+        return file.path;
+      } catch (error, stack) {
+        DiagnosticLog.error('app.tray_icon_failed', error, stack);
+        return null;
+      }
+    }
+    return null;
   }
 
   Future<void> _hideToTray({bool minimizedOnly = false}) =>
@@ -602,8 +626,9 @@ class _MainShellState extends State<MainShell>
   @override
   void onTrayIconRightMouseDown() {
     // AppIndicator owns the menu on Linux and has no popUpContextMenu method;
-    // calling it there only raises a missing-implementation error.
-    if (Platform.isWindows) unawaited(trayManager.popUpContextMenu());
+    // calling it there only raises a missing-implementation error. Windows and
+    // macOS both pop up the native context menu here.
+    if (!Platform.isLinux) unawaited(trayManager.popUpContextMenu());
   }
 
   @override

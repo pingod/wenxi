@@ -13,6 +13,11 @@ analyzer:
   exclude:
     - vendor_plugins/**
     - caiiliao/**
+    - build/**
+    - android/**
+    - windows/**
+    - linux/**
+    - macos/**
 
 linter:
   # The lint rules applied to this project can be customized in the

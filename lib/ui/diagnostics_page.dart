@@ -269,6 +269,7 @@ class _DiagnosticsPageState extends State<DiagnosticsPage> {
         if (lastSavedPath != null &&
             (Platform.isWindows ||
                 Platform.isLinux ||
+                Platform.isMacOS ||
                 widget.openExportLocation != null))
           TextButton.icon(
             key: const Key('diagnostics-open-location'),
