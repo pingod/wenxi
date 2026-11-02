@@ -91,8 +91,29 @@ flutter test --no-pub test/native_integration_test.dart   # 需要 native/bin/as
 
 原生播放测试在 macOS 上依赖 media_kit 提供的 libmpv；部分 golden / 平台差异测试在 macOS 开发机上会与 Windows CI runner 结果不同（像素、`Platform.operatingSystem`、`.exe` 探针等），属环境差异，以 Windows CI（`windows-2022`）为准。
 
+## 持续集成（GitHub Actions）
+
+`.github/workflows/packages.yml` 的 `macos` job 在 `macos-14`（Apple Silicon）runner 上运行 `./tool/build-macos.sh --build-config config/build.community.json`：脚本会编译 Darwin/arm64 下载内核、`flutter build macos`，并用 ad-hoc 签名产出 `asterlink.app`。随后 job 校验 `Contents/MacOS/asterlink`、`Contents/MacOS/asterlink_gopeed`（须为 Mach-O）、`codesign --verify --deep --strict`，再 `python3 tool/package-release.py --platform macos` 打成 `asterlink-<版本>-macos-arm64.zip`（`ditto -c -k --keepParent`，保留可执行位与符号链接），上传为 `package-macos` artifact。该 job 触发条件与 linux/windows 一致（push 到 `feat/**`、`main`、`master`，PR 到 `main`/`master`，或手动）。
+
+CI 产物只是**未公证**的 ad-hoc 签名包，用于验证「能编译、能打包」，不能直接分发（Gatekeeper 会拦截）。正式分发的签名 + 公证在下面「发布」说明。
+
+## 发布（签名 + 公证）
+
+`.github/workflows/release.yml` 的 `package` job 用 matrix 在 `windows-2022` 上构建 android/windows、在 `macos-14` 上构建 macOS（tag `v*` 触发）。macOS 那一步在存在证书密钥时完成 Developer ID 签名：
+
+| Secret | 说明 |
+| --- | --- |
+| `MACOS_CERTIFICATE_P12_BASE64` | Developer ID Application 证书导出为 .p12 后 base64（单行） |
+| `MACOS_CERTIFICATE_PASSWORD` | 上述 .p12 的密码 |
+| `MACOS_KEYCHAIN_PASSWORD` | 临时 keychain 的解锁密码，可任意 |
+| `MACOS_CODESIGN_IDENTITY` | 形如 `Developer ID Application: Your Name (TEAMID)` |
+
+未配置 `MACOS_CERTIFICATE_P12_BASE64` 时，release job 仍会 ad-hoc 签名并产出 zip（等同 packages.yml 的产物），只是不能分发。配置后 `tool/build-macos.sh` 会读取 `CODESIGN_IDENTITY` 用 Developer ID 签名。
+
+**公证仍需手动一次**（CI 的公证凭据差异较大，未固化到脚本）：`xcrun notarytool submit <zip> --apple-id ... --team-id ... --password <app 专用密码> --wait`，成功后 `xcrun stapler staple <zip 或 .app>`。凭据可放 Apple Developer Program 的 app-specific password 或 App Store Connect API Key。
+
 ## 已知限制
 
-- 本机若仅有 Command Line Tools 而无完整 Xcode，`flutter build macos` 会在 `xcodebuild` 阶段失败；需在装有 Xcode 的 Mac 上完成最终构建、签名与公证。
-- 目前未提供 `.github/workflows` 的 macOS 构建任务；如需 CI 产物，可在 `macos-14` runner 上复用 `tool/build-macos.sh`。
+- 本机若仅有 Command Line Tools 而无完整 Xcode，`flutter build macos` 会在 `xcodebuild` 阶段失败；CI 已用 `macos-14` runner 覆盖正式构建。
+- CI 的 macOS 产物是 ad-hoc 签名、未公证的 zip，仅供验证与内部测试；对外分发需配置 `MACOS_*` secrets 走 `release.yml` 并用 `notarytool` 公证。
 - 未实现 macOS 内嵌浏览器，需要网页登录的平台（115、百度、夸克、UC、移动、微云、联通等）走「系统浏览器 + 手动粘贴凭据」。

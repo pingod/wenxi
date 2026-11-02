@@ -256,6 +256,44 @@ class ReleaseFilesTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             release.stage(self.root, 'linux')
 
+    def _create_macos_app(self):
+        app = self.root / 'build/macos/Build/Products/Release/asterlink.app'
+        files = (
+            'Contents/MacOS/asterlink',
+            'Contents/MacOS/asterlink_gopeed',
+            'Contents/Info.plist',
+            'Contents/Frameworks/App.framework/App',
+            'Contents/Frameworks/App.framework/Resources/flutter_assets/AssetManifest.bin',
+        )
+        for name in files:
+            file = app / name
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_bytes(b'fixture')
+        (app / 'Contents/MacOS/asterlink').chmod(0o755)
+        (app / 'Contents/MacOS/asterlink_gopeed').chmod(0o755)
+        return app
+
+    def test_macos_bundle_is_zipped_as_a_single_app_tree(self):
+        self._create_macos_app()
+        output = release.stage(self.root, 'macos')
+        archive = output / 'asterlink-1.2.3+4-macos-arm64.zip'
+        self.assertTrue(archive.is_file())
+        with zipfile.ZipFile(archive) as bundle:
+            names = bundle.namelist()
+        # The whole .app is kept as one directory tree, not flattened into the
+        # archive root, and the helper must travel with the executable.
+        tops = {name.split('/', 1)[0] for name in names}
+        self.assertEqual(tops, {'asterlink.app'})
+        self.assertIn('asterlink.app/Contents/MacOS/asterlink', names)
+        self.assertIn('asterlink.app/Contents/MacOS/asterlink_gopeed', names)
+        self.assertIn('asterlink.app/Contents/Info.plist', names)
+
+    def test_macos_bundle_without_helper_is_rejected(self):
+        app = self._create_macos_app()
+        (app / 'Contents/MacOS/asterlink_gopeed').unlink()
+        with self.assertRaises(ValueError):
+            release.stage(self.root, 'macos')
+
     def test_runtime_with_private_key_is_rejected(self):
         runtime = self.root / 'build/windows/x64/runner/Release'
         for name in ('asterlink.exe', 'asterlink_gopeed.exe', 'flutter_windows.dll', 'libmpv-2.dll', 'data/app.so', 'private.jks'):
