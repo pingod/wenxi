@@ -22,8 +22,10 @@ import '../domain/models.dart';
 import '../domain/weiyun_web_login.dart';
 import '../domain/tianyi_web_login.dart';
 import '../platform/desktop_platform.dart';
+import '../diagnostics/app_log.dart';
 import '../diagnostics/web_login_diagnostics.dart';
 import 'common.dart';
+import 'loading_indicator.dart';
 import 'native_password_login_page.dart';
 import 'github_login_page.dart';
 import 'guangya_sms_login_page.dart';
@@ -39,6 +41,8 @@ import 'account_info_page.dart';
 export 'native_password_login_page.dart';
 export 'login_webview.dart' show webSettings, desktopLoginViewportScript;
 
+final _loginRoutes = Expando<MaterialPageRoute<void>>();
+
 Future<void> openLogin(
   BuildContext context,
   AppServices services,
@@ -46,28 +50,124 @@ Future<void> openLogin(
   bool addAccount = false,
   String? accountId,
 }) async {
+  if (!context.mounted) return;
   if (!allowCloudAction(context, services.control, platform)) return;
   if (!platform.requiresAccount) {
     message(context, '支持不登录解析');
     return;
   }
+  final navigator = Navigator.of(context);
+  if (_loginRoutes[navigator]?.isActive ?? false) return;
   final created =
       addAccount ||
       (accountId == null && services.vault.activeAccountId(platform) == null);
-  final owner = created
-      ? await services.vault.createAccount(platform)
-      : accountId ?? services.vault.activeAccountId(platform);
-  if (!context.mounted) {
-    if (created && owner != null) {
-      await services.vault.removeAccount(platform, owner, onlyIfEmpty: true);
-    }
-    return;
-  }
+  final entry = _LoginEntry(
+    services,
+    platform,
+    created: created,
+    accountId: accountId ?? services.vault.activeAccountId(platform),
+  );
+  final route = MaterialPageRoute<void>(builder: (_) => _LoginEntryPage(entry));
+  _loginRoutes[navigator] = route;
+  // Start the write on the caller's event loop, but push before awaiting it.
+  // The login route survives state rebuilds and shows a wait or a storage error.
+  unawaited(entry.prepare());
   try {
-    await Navigator.push<void>(
-      context,
-      MaterialPageRoute(
-        builder: (_) => switch (platform) {
+    await navigator.push(route);
+  } catch (error, stack) {
+    DiagnosticLog.error(
+      'login.open_failed',
+      error,
+      stack,
+      fields: {'platform': platform.key},
+    );
+    if (context.mounted) message(context, errorText(error));
+  } finally {
+    if (identical(_loginRoutes[navigator], route)) {
+      _loginRoutes[navigator] = null;
+    }
+    try {
+      await entry.close();
+    } catch (error, stack) {
+      DiagnosticLog.error(
+        'login.account_cleanup_failed',
+        error,
+        stack,
+        fields: {'platform': platform.key},
+      );
+      if (context.mounted) message(context, errorText(error));
+    } finally {
+      entry.dispose();
+    }
+  }
+}
+
+class _LoginEntry extends ChangeNotifier {
+  _LoginEntry(
+    this.services,
+    this.platform, {
+    required this.created,
+    String? accountId,
+  }) : owner = created ? null : accountId;
+
+  final AppServices services;
+  final CloudPlatform platform;
+  final bool created;
+  final _zone = Zone.current;
+  String? owner;
+  Object? error;
+  bool loading = true, _closed = false;
+  Future<void>? _pending;
+
+  Future<void> prepare() => _pending ??= _zone.run<Future<void>>(() async {
+    try {
+      if (created) owner = await services.vault.createAccount(platform);
+    } catch (failure, stack) {
+      error = failure;
+      DiagnosticLog.error(
+        'login.account_prepare_failed',
+        failure,
+        stack,
+        fields: {'platform': platform.key},
+      );
+    } finally {
+      loading = false;
+      if (!_closed) notifyListeners();
+    }
+  });
+
+  void retry() {
+    if (_closed || loading) return;
+    error = null;
+    loading = true;
+    _pending = null;
+    notifyListeners();
+    unawaited(prepare());
+  }
+
+  Future<void> close() async {
+    _closed = true;
+    // A cancelled route can finish reserving its slot later. Wait for it before
+    // cleaning up, and never remove a successfully authenticated account.
+    await _pending;
+    if (created && owner != null) {
+      await services.vault.removeAccount(platform, owner!, onlyIfEmpty: true);
+    }
+  }
+}
+
+class _LoginEntryPage extends StatelessWidget {
+  const _LoginEntryPage(this.entry);
+  final _LoginEntry entry;
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: entry,
+    builder: (context, _) {
+      if (!entry.loading && entry.error == null) {
+        final services = entry.services, platform = entry.platform;
+        final owner = entry.owner;
+        return switch (platform) {
           CloudPlatform.github => GitHubLoginPage(services, accountId: owner),
           CloudPlatform.xunlei ||
           CloudPlatform.ctfile ||
@@ -98,14 +198,34 @@ Future<void> openLogin(
             WebLoginTarget.targets[platform]!,
             accountId: owner,
           ),
-        },
-      ),
-    );
-  } finally {
-    if (created && owner != null) {
-      await services.vault.removeAccount(platform, owner, onlyIfEmpty: true);
-    }
-  }
+        };
+      }
+      return PageFrame(
+        title: '${entry.platform.shortName}登录',
+        child: entry.loading
+            ? const Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    AppLoadingIndicator(),
+                    SizedBox(height: 16),
+                    Text('正在准备登录…'),
+                  ],
+                ),
+              )
+            : EmptyPanel(
+                '无法打开登录',
+                errorText(entry.error!),
+                icon: CupertinoIcons.exclamationmark_circle,
+                action: FilledButton.icon(
+                  onPressed: entry.retry,
+                  icon: const Icon(CupertinoIcons.arrow_clockwise, size: 18),
+                  label: const Text('重试'),
+                ),
+              ),
+      );
+    },
+  );
 }
 
 // Keep both methods in one route so callers await the final login, including
@@ -144,6 +264,11 @@ class _PasswordLoginFlowState extends State<PasswordLoginFlow> {
             : _LoginMethod.sms)
       : _LoginMethod.password;
   AliyunWebPassword? _webPassword;
+  String get _nativeLoginLabel => switch (widget.platform) {
+    CloudPlatform.quark => '切换手机号登录',
+    CloudPlatform.baidu => '切换手机号或扫码登录',
+    _ => _defaultMethod == _LoginMethod.sms ? '切换短信验证码登录' : '切换账号密码登录',
+  };
 
   void _switch(_LoginMethod method) {
     _webPassword?.clear();
@@ -210,12 +335,7 @@ class _PasswordLoginFlowState extends State<PasswordLoginFlow> {
       accountId: widget.accountId,
       passwordLogin: _webPassword,
       onUsePassword: () => _switch(_defaultMethod),
-      nativeLoginLabel:
-          {CloudPlatform.quark, CloudPlatform.baidu}.contains(widget.platform)
-          ? '切换手机号或扫码登录'
-          : _defaultMethod == _LoginMethod.sms
-          ? '切换短信验证码登录'
-          : '切换账号密码登录',
+      nativeLoginLabel: _nativeLoginLabel,
     ),
     _LoginMethod.manual => ManualLoginPage(
       widget.services,
@@ -247,9 +367,7 @@ class _PasswordLoginFlowState extends State<PasswordLoginFlow> {
       widget.platform,
       accountId: widget.accountId,
       webLabel: supportsWebLoginUi ? '切换网页登录' : '手动填写登录信息',
-      onUseWeb: widget.platform == CloudPlatform.ctfile
-          ? null
-          : supportsWebLoginUi
+      onUseWeb: supportsWebLoginUi
           ? () => _switch(_LoginMethod.web)
           : () => _switch(_LoginMethod.manual),
       onUseManual: () => _switch(_LoginMethod.manual),
@@ -363,7 +481,9 @@ Future<void> accountMenu(
         ),
       );
   if (!context.mounted ||
-      services.vault.activeAccountId(platform) != accountId) {
+      (services.vault.activeAccountId(platform) != accountId &&
+          action != 'copyLogin' &&
+          action != 'info')) {
     return;
   }
   if (action != null &&
@@ -1121,6 +1241,7 @@ class _WebLoginPageState extends State<WebLoginPage>
               CloudPlatform.weiyun => '暂未读取到完整凭据，请刷新网页中的文件列表后再检测',
               CloudPlatform.tianyi => '天翼登录尚未完成，请在网页完成验证码或安全验证后再检测',
               CloudPlatform.lanzou => '请完成蓝奏网页登录并进入「我的文件」，系统会自动检测并保存登录信息',
+              CloudPlatform.ctfile => '请完成城通网页登录，系统会自动检测并保存登录信息',
               _ => '尚未读取到完整登录信息，请进入网盘首页后再检测',
             },
           );

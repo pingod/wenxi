@@ -102,7 +102,7 @@ void main() {
                         MaterialPageRoute(
                           builder: (_) => QuarkLoginPage(
                             services,
-                            onUseWeb: () {},
+                            onUseWeb: () => Navigator.pop(context),
                             onUseManual: () {},
                             verifyCaptcha: ({required useSlider}) async =>
                                 quarkProof(slider: useSlider),
@@ -212,7 +212,7 @@ void main() {
     await tap(tester, 'native-login-web');
     await tester.pumpAndSettle();
     expect(find.byType(WebLoginPage), findsOneWidget);
-    expect(find.text('切换手机号或扫码登录'), findsOneWidget);
+    expect(find.text('切换手机号登录'), findsOneWidget);
     expect(closed, isFalse);
     await tap(tester, 'web-login-password');
     await tester.pumpAndSettle();
@@ -414,41 +414,40 @@ void main() {
   });
 
   for (final action in ['switch', 'back']) {
-    testWidgets('$action cancels a pending confirmed QR before it can save', (
+    testWidgets('$action cancels pending SMS login before it can save', (
       tester,
     ) async {
-      await render(tester);
-      await qrMode(tester);
+      await render(tester, nativeOnly: true);
+      await fillSms(tester);
+      await tester.enterText(
+        find.byKey(const ValueKey('quark-sms-code')),
+        '1234',
+      );
       final answer = Completer<HttpResult>();
       var cancelled = false;
       f.override = (r) {
-        if (r.uri.path.endsWith('/getServiceTicketByQrcodeToken')) {
+        if (r.uri.path.endsWith('/commit')) {
           RequestScope.current!.whenCancel.then((_) => cancelled = true);
           return answer.future;
         }
         return null;
       };
-      await tester.pump(const Duration(seconds: 2));
-      await tester.pump();
+      await tester.runAsync(() async {
+        await tap(tester, 'quark-sms-submit');
+        await until(
+          () => f.http.calls.any((r) => r.uri.path.endsWith('/commit')),
+        );
+      });
       if (action == 'switch') {
-        await mobileMode(tester);
+        await tap(tester, 'native-login-web');
       } else {
         Navigator.of(tester.element(find.byType(QuarkLoginPage))).pop();
         await tester.pump();
       }
-      await tester.pump();
-      expect(cancelled, isTrue);
-      f.scanned = true;
+      await tester.runAsync(() => until(() => cancelled));
       f.override = null;
       answer.complete(
-        await f.respond(
-          RecordedRequest(
-            'GET',
-            'https://uop.quark.cn/cas/ajax/getServiceTicketByQrcodeToken',
-            null,
-            {},
-          ),
-        ),
+        jsonResponse({'status': 20000, 'data': 'late-fixture-ticket'}),
       );
       await tester.pumpAndSettle();
       expect(services.vault.credential(CloudPlatform.quark), isNull);

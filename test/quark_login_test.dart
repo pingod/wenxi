@@ -131,6 +131,10 @@ void main() {
         requests.last.headers['Cookie'],
         contains('qr_session=fixture-qr'),
       );
+      expect(
+        requests.map((r) => r.headers['Cache-Control']),
+        everyElement('no-cache, no-store'),
+      );
       qr.close();
     },
   );

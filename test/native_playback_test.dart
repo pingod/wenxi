@@ -54,6 +54,39 @@ void main() {
       }
 
       test(
+        'Actual decoding reports codec, frame rate and software mode without leaking the previous file metrics',
+        () async {
+          final native = player.platform as NativePlayer;
+          await native.setProperty('vo', 'null');
+          await native.setProperty('vid', 'auto');
+          await native.setProperty('hwdec', 'no');
+          for (final (path, codec, fps, width) in [
+            ('test/fixtures/player-hls/segment0.ts', 'h264', 25, 96),
+            (sample.path, 'mjpeg', 10, 320),
+          ]) {
+            await backend.open(
+              DownloadSpec(url: File(path).absolute.path, fileName: 'video'),
+              Duration.zero,
+            );
+            expect(backend.diagnosticFields, isNot(contains('videoCodec')));
+            expect(backend.hardwareDecodingActive, isNull);
+            await backend.play();
+            await until(
+              () =>
+                  backend.diagnosticFields['videoCodec'] == codec &&
+                  player.state.position > const Duration(milliseconds: 100),
+            );
+            expect(backend.hardwareDecodingActive, isFalse);
+            expect(backend.diagnosticFields['videoFps'], fps);
+            expect(backend.diagnosticFields['videoPixelFormat'], isNotEmpty);
+            expect(backend.diagnosticFields['decoderDroppedFrames'], 0);
+            expect(player.state.width, width);
+            expect(backend.failure, isNull);
+          }
+        },
+      );
+
+      test(
         'Reads real container dimensions while decoding and playback are disabled',
         () async {
           await (player.platform as NativePlayer).setProperty('vid', 'no');
@@ -500,9 +533,9 @@ void main() {
               response.headers.set('Content-Type', 'video/x-matroska');
               response.headers.set('ETag', '"streamed-fixture"');
               response.contentLength = end - start + 1;
-              // The startup reserve is now three seconds; keep enough real
+              // The startup reserve is now six seconds; keep enough real
               // packets for it while holding the remainder of the range.
-              const prefix = 256 * 1024;
+              const prefix = 512 * 1024;
               if (end - start + 1 > prefix) {
                 response.add(bytes.sublist(start, start + prefix));
                 await response.flush();

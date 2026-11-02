@@ -106,6 +106,7 @@ class QuarkLoginService {
   final int Function() now;
 
   static const clientId = '532';
+  static const qrLifetime = Duration(minutes: 3);
   static const accountOrigin = 'https://uop.quark.cn';
 
   /// `status` values of `getServiceTicketByQrcodeToken`.
@@ -306,6 +307,11 @@ class _QuarkLoginAttempt {
             ? QuarkLoginService.mobilePage
             : 'https://pan.quark.cn/',
         'Accept': 'application/json, text/plain, */*',
+        if (uri.host == 'uop.quark.cn' &&
+            uri.path.startsWith('/cas/ajax/')) ...{
+          'Cache-Control': 'no-cache, no-store',
+          'Pragma': 'no-cache',
+        },
         if (cookies.header(uri).isNotEmpty) 'Cookie': cookies.header(uri),
       },
       followRedirects: false,
@@ -336,9 +342,9 @@ class _QuarkLoginAttempt {
       queryParameters: {
         'client_id': QuarkLoginService.clientId,
         'v': '1.2',
-        // The official client sends a fresh request id per call; reusing one
-        // makes the second and later polls look like a duplicate request.
-        'request_id': newId().replaceAll('-', ''),
+        // This identifies one request, not the QR session. The token and
+        // cookie jar retain the session while each poll gets a fresh ID.
+        'request_id': newId(),
         ...extra,
       },
     ),
