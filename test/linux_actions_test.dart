@@ -50,9 +50,10 @@ void main() {
       for (final name in [
         'a,b.mp4',
         "it's a video.mp4",
-        // A backslash is a path separator on Windows, so the file cannot exist.
-        if (!Platform.isWindows) r'back\slash.mp4',
-        'quote".mp4',
+        // Windows forbids these characters in file names (a backslash is a path
+        // separator, a double quote is rejected by the filesystem), so the
+        // fixtures can only exist on POSIX hosts.
+        if (!Platform.isWindows) ...[r'back\slash.mp4', 'quote".mp4'],
       ]) {
         final file = await File(p.join(root.path, name)).writeAsString('x');
         late List<String> arguments;
