@@ -42,7 +42,8 @@ class AppUpdateService extends ChangeNotifier {
   final _stages = <String, String>{};
   bool _closed = false;
 
-  bool get supported => platform == 'android' || platform == 'windows';
+  bool get supported =>
+      platform == 'android' || platform == 'windows' || platform == 'macos';
 
   String keyFor(RemoteUpdate update) => sha256
       .convert(
@@ -219,7 +220,7 @@ class AppUpdateService extends ChangeNotifier {
         );
         _stage(
           update,
-          platform == 'windows' &&
+          (platform == 'windows' || platform == 'macos') &&
                   task.spec.fileName.toLowerCase().endsWith('.zip')
               ? '正在打开文件夹…'
               : '正在打开安装器…',

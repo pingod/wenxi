@@ -331,6 +331,13 @@ class SubtitleFontStore {
             if (Platform.environment['XDG_DATA_HOME'] case final String data)
               p.join(data, 'fonts'),
           ]
+        : Platform.isMacOS
+        ? [
+            '/System/Library/Fonts',
+            '/Library/Fonts',
+            if (Platform.environment['HOME'] case final String home)
+              p.join(home, 'Library', 'Fonts'),
+          ]
         : ['/System/Library/Fonts', '/usr/share/fonts/truetype'];
     final paths = <String>[];
     // Linux trees nest families one level deep (…/fonts/noto/NotoSans.ttf),

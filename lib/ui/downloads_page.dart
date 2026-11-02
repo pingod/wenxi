@@ -1297,6 +1297,8 @@ class _DownloadsPageState extends State<DownloadsPage>
                               ? Text(
                                   Platform.isWindows
                                       ? '在资源管理器中定位'
+                                      : Platform.isMacOS
+                                      ? '在访达中定位'
                                       : '在文件管理器中定位',
                                 )
                               : null,
