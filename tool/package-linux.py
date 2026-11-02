@@ -16,6 +16,7 @@ import hashlib
 import io
 import os
 from pathlib import Path
+import platform
 import re
 import shutil
 import subprocess
@@ -110,7 +111,9 @@ def epoch_of():
 
 
 def machine_arch():
-    machine = os.uname().machine
+    # platform.machine() is available on every host, so the packaging tool and
+    # its tests also run on a Windows/macOS runner where os.uname() is missing.
+    machine = platform.machine()
     return machine if machine in DEB_ARCH else 'x86_64'
 
 

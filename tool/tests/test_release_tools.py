@@ -228,6 +228,8 @@ class ReleaseFilesTest(unittest.TestCase):
             self.assertFalse(any(name.startswith('Release/') for name in archive.namelist()))
 
     def test_linux_archive_keeps_the_executable_mode(self):
+        if os.name == 'nt':
+            self.skipTest('Windows cannot represent POSIX file modes')
         runtime = self.root / 'build/linux/x64/release/bundle'
         for name in ('asterlink', 'asterlink_gopeed', 'lib/libapp.so', 'lib/libflutter_linux_gtk.so', 'data/icudtl.dat', 'data/flutter_assets/AssetManifest.bin'):
             file = runtime / name
