@@ -274,6 +274,8 @@ class ReleaseFilesTest(unittest.TestCase):
         return app
 
     def test_macos_bundle_is_zipped_as_a_single_app_tree(self):
+        if shutil.which('ditto') is None:
+            self.skipTest('ditto is only available on macOS')
         self._create_macos_app()
         output = release.stage(self.root, 'macos')
         archive = output / 'asterlink-1.2.3+4-macos-arm64.zip'
