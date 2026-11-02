@@ -1425,35 +1425,6 @@ class DownloadManager extends ChangeNotifier {
       rethrow;
     }
   });
-        }
-        await files.delete(savedPath);
-      }
-      _tasks.remove(id);
-      // Once writers are stopped, persist removal before slow native or
-      // filesystem cleanup. The durable markers retry after a restart.
-      await _persist(removedDownload: id);
-      _guestDownloadBatches.remove(id);
-      DiagnosticLog.event(
-        'download.record_removed',
-        fields: {'ref': DiagnosticLog.reference(id)},
-      );
-      notifyListeners();
-      _background(_drainRemovedDownloads());
-      _background(_readyRemovedCleanup(current.spec.cleanup));
-    } catch (e, stack) {
-      DiagnosticLog.error(
-        'download.remove_failed',
-        e,
-        stack,
-        fields: {'ref': DiagnosticLog.reference(id), 'deleteFile': deleteFile},
-      );
-      _tasks[id] ??= current!;
-      await _update(id, {
-        'error': e is AppException ? e.message : '删除未完成，记录已保留，请重试',
-      });
-      rethrow;
-    }
-  });
 
   Future<DownloadBatchResult?> _deleteIdleRecords(List<String> ids) async {
     bool idle() => ids.every((id) {

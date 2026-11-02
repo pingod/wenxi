@@ -26,7 +26,7 @@ class TextPreviewLoader {
       final status = response.statusCode ?? 0;
       if (status == 416 &&
           response.headers.value('content-range') == 'bytes */0') {
-        return _decode(Uint8List(0), source.fileName);
+        return await _decode(Uint8List(0), source.fileName);
       }
       if (status != 200 && status != 206) {
         throw DownloadHttpException.response(response);
@@ -61,7 +61,7 @@ class TextPreviewLoader {
             data.length > TextDocument.maxBytes,
         '文本内容读取不完整，请重试',
       );
-      return _decode(data.takeBytes(), source.fileName);
+      return await _decode(data.takeBytes(), source.fileName);
     } finally {
       cancel.cancel();
     }
