@@ -40,7 +40,14 @@ class CryptoBox {
     }
   }
 
-  static Uint8List derive(String password, Uint8List salt, int rounds) {
+  /// Derives a 32-byte key with PBKDF2-HMAC. Uses SHA-256 by default; pass
+  /// [sha1] only to read legacy envelopes that were sealed with HMAC-SHA1.
+  static Uint8List derive(
+    String password,
+    Uint8List salt,
+    int rounds, {
+    bool sha1 = false,
+  }) {
     require(
       rounds >= 100000 &&
           rounds <= 2000000 &&
@@ -50,8 +57,11 @@ class CryptoBox {
     );
     final bytes = Uint8List.fromList(utf8.encode(password));
     try {
-      final generator = PBKDF2KeyDerivator(HMac(SHA1Digest(), 64))
-        ..init(Pbkdf2Parameters(salt, rounds, 32));
+      final generator =
+          PBKDF2KeyDerivator(
+              sha1 ? HMac(SHA1Digest(), 64) : HMac(SHA256Digest(), 64),
+            )
+            ..init(Pbkdf2Parameters(salt, rounds, 32));
       return generator.process(bytes);
     } finally {
       bytes.fillRange(0, bytes.length, 0);

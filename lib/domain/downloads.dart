@@ -65,8 +65,8 @@ class RemoteIdentity {
   Json toJson() => {'total': total, 'etag': etag, 'modified': modified};
   factory RemoteIdentity.fromJson(Json j) => RemoteIdentity(
     j.integer('total'),
-    j['etag'] as String?,
-    j['modified'] as String?,
+    j.optStr('etag'),
+    j.optStr('modified'),
   );
 }
 
@@ -191,8 +191,8 @@ class DownloadTask {
     connections: j.integer('connections', 64).clamp(1, 512),
     retries: j.integer('retries', 3).clamp(0, 3),
     speedLimit: j.integer('speedLimit'),
-    destination: j['destination'] as String?,
-    savedPath: j['savedPath'] as String?,
+    destination: j.optStr('destination'),
+    savedPath: j.optStr('savedPath'),
     error: j.str('error'),
     recoveryAction: DownloadRecoveryAction.values.firstWhere(
       (action) => action.name == j.str('recoveryAction'),

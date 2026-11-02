@@ -14,6 +14,7 @@ class ExternalPlaybackStream {
   final DownloadSpec source;
   final _token = newId();
   final _resources = <String, Uri>{};
+  int _nextResourceId = 0;
   final _paths = <Uri, String>{};
   final _handlers = <Future<void>>{};
   final _requests = <HttpClientRequest>{};
@@ -70,7 +71,9 @@ class ExternalPlaybackStream {
       final suffix = upstream.path.toLowerCase().endsWith('.m3u8')
           ? 'index.m3u8'
           : 'video';
-      final path = '/$_token/${_resources.length}/$suffix';
+      // Use a monotonic counter, not `_resources.length`: concurrent _serve
+      // rewrites could otherwise compute the same key and overwrite the map.
+      final path = '/$_token/${_nextResourceId++}/$suffix';
       _resources[path] = upstream;
       return path;
     }();

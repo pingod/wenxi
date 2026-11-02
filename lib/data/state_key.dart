@@ -384,6 +384,7 @@ Uint8List _wrapKey((Uint8List, String) input) {
       utf8.encode(
         jsonEncode({
           'format': _purpose,
+          'kdf': 'PBKDF2WithHmacSHA256',
           'salt': base64Encode(salt),
           'iterations': 210000,
           'data': base64Encode(CryptoBox.seal(wrappingKey, plain)),
@@ -405,6 +406,8 @@ Uint8List _unwrapKey((Uint8List, String) input) {
       input.$2,
       base64Decode(envelope.str('salt')),
       envelope.integer('iterations'),
+      // Legacy local recovery files predate the kdf field and used SHA-1.
+      sha1: envelope.str('kdf', 'PBKDF2WithHmacSHA1') == 'PBKDF2WithHmacSHA1',
     );
     plain = CryptoBox.open(wrappingKey, base64Decode(envelope.str('data')));
     final payload = asJson(jsonDecode(utf8.decode(plain)));

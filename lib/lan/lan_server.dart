@@ -65,6 +65,7 @@ extension _LanServer on LanService {
         }
         if (body.str('code') != connectionCode) {
           attempts.add(clock());
+          _onPairFailed();
           _reply(response, {'error': '连接码不正确，请查看对方设备的 6 位连接码'}, status: 403);
           return;
         }
@@ -182,6 +183,9 @@ extension _LanServer on LanService {
           request.method == 'GET') {
         final share = _findShare(parts[2]);
         require(!share.draining, '此分享已停止接受新接收');
+        // Multi-file trees must not be readable without an authenticated
+        // session; only single-file shares are public pairing information.
+        if (!share.manifest.singleFile) _authorize(request, remote);
         _reply(response, share.manifest.toJson());
       } else if (parts.length == 2 && parts[0] == 's' && browserRead) {
         final share = _findShare(parts[1]);

@@ -1,5 +1,4 @@
 import '../http.dart';
-import '../state_store.dart';
 import '../../domain/models.dart';
 import '../../domain/auth.dart';
 import '../../domain/file_types.dart';
@@ -10,23 +9,13 @@ import 'uc_tv.dart';
 class UcConnector extends CookieCloudConnector {
   UcConnector(
     JsonHttp http, {
-    CredentialStore? store,
-    Duration taskDelay = const Duration(milliseconds: 750),
-    int Function()? now,
-    Future<void> Function(DownloadCleanup)? stageCleanup,
-    bool Function(bool authenticated)? directShareDownloadEnabled,
+    super.store,
+    super.now,
+    super.taskDelay,
+    super.stageCleanup,
+    super.directShareDownloadEnabled,
   }) : tv = UcTvService(http, store: store, now: now),
-       super(
-         CloudPlatform.uc,
-         http,
-         store: store,
-         taskDelay: taskDelay,
-         now: now,
-         stageCleanup: stageCleanup,
-         webUserAgent: webUa,
-         apiUserAgent: cloudUa,
-         directShareDownloadEnabled: directShareDownloadEnabled,
-       );
+       super(CloudPlatform.uc, http, webUserAgent: webUa, apiUserAgent: cloudUa);
 
   final UcTvService tv;
 

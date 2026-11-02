@@ -115,7 +115,7 @@ class SubtitleFontStore {
     for (final url in _downloadUrls) {
       try {
         await _download(url, target);
-        return _remember(
+        return await _remember(
           SubtitleFont(
             target.path,
             'Noto Sans SC',

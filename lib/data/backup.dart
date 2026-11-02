@@ -26,7 +26,7 @@ Uint8List encryptBackup((Json, String) input) {
       utf8.encode(
         const JsonEncoder.withIndent('  ').convert({
           'format': 'asterlink-backup-v1',
-          'kdf': 'PBKDF2WithHmacSHA1',
+          'kdf': 'PBKDF2WithHmacSHA256',
           'iterations': 210000,
           'salt': base64Encode(salt),
           'iv': base64Encode(packed.sublist(0, 12)),
@@ -51,8 +51,12 @@ Json decryptBackup((Uint8List, String) input) {
     {'asterlink-backup-v1', 'wenxi-backup-v1'}.contains(envelope.str('format')),
     '不是有效的文析助手备份文件',
   );
+  final kdf = envelope.str('kdf', 'PBKDF2WithHmacSHA1');
   require(
-    envelope.str('kdf', 'PBKDF2WithHmacSHA1') == 'PBKDF2WithHmacSHA1',
+    const {
+      'PBKDF2WithHmacSHA1',
+      'PBKDF2WithHmacSHA256',
+    }.contains(kdf),
     '不支持此备份的加密方式',
   );
   Uint8List salt, iv, encrypted;
@@ -68,6 +72,7 @@ Json decryptBackup((Uint8List, String) input) {
     input.$2,
     salt,
     envelope.integer('iterations', 210000),
+    sha1: kdf == 'PBKDF2WithHmacSHA1',
   );
   try {
     Json payload;
@@ -97,7 +102,7 @@ class BackupRepository {
     String password, {
     bool includeBackgroundImages = false,
   }) async {
-    require(password.length >= 6, '备份密码至少需要 6 位');
+    require(password.length >= 8, '备份密码至少需要 8 位');
     final credentials = store.data.obj('credentials'),
         secrets = store.data.obj('secrets');
     final vault = Vault(store);

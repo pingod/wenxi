@@ -486,7 +486,7 @@ class DownloadSpec {
     source: j['source'] == null ? null : j.obj('source'),
     profile: j['profile']?.toString(),
     torrent: j['torrent'] == null ? null : j.obj('torrent'),
-    appUpdateKey: j['appUpdateKey'] as String?,
+    appUpdateKey: j.optStr('appUpdateKey'),
     guestDownload: j.boolean('guestDownload', false),
   );
 }

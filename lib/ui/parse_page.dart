@@ -578,7 +578,10 @@ class ParsePageState extends State<ParsePage> {
               ),
             ],
     ),
-    child: child,
+    // Provide a Material ancestor for ink effects: the colored Container below
+    // would otherwise hide any descendant ListTile's ink splashes (framework
+    // debug assertion), so route them through a transparent Material.
+    child: Material(type: MaterialType.transparency, child: child),
   );
 
   Widget _inputHeader(

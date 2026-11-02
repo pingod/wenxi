@@ -640,7 +640,9 @@ class _DeviceLinkPageState extends State<DeviceLinkPage> {
       borderRadius: BorderRadius.circular(20),
       border: Border.all(color: border(context)),
     ),
-    child: child,
+    // Route descendant ListTile ink splashes through a transparent Material;
+    // the colored Container above would otherwise hide them (framework assert).
+    child: Material(type: MaterialType.transparency, child: child),
   );
 
   Widget _action(

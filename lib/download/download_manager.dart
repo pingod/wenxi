@@ -187,9 +187,10 @@ class DownloadManager extends ChangeNotifier {
       } else {
         _playbackHolds[id] = count;
       }
-      if (source != null) {
-        await cleanups.release(source.cleanup);
-        await cleanups.ready(source.cleanup);
+      final s = source;
+      if (s != null) {
+        await cleanups.release(s.cleanup);
+        await cleanups.ready(s.cleanup);
       }
       if (!_closing) {
         await _drainCompletedCaches();
@@ -706,10 +707,11 @@ class DownloadManager extends ChangeNotifier {
     if (_closing || _pausingAll != null) return;
     _background(
       _pumpGate.run(() async {
+        final concurrent = settings.concurrent;
         while (!_closing &&
             _pausingAll == null &&
-            _networkCount < settings.concurrent &&
-            _running.length < settings.concurrent + 2) {
+            _networkCount < concurrent &&
+            _running.length < concurrent + 2) {
           final pending = _tasks.values
               .where(
                 (t) =>
@@ -959,6 +961,14 @@ class DownloadManager extends ChangeNotifier {
   });
   Future<void> _control(String id, Future<void> Function() action) =>
       (_controls[id] ??= AsyncGate()).run(action);
+  /// Prunes the per-task gates for [id] once no work is pending on them.
+  void _schedulePruneGates(String id) {
+    Timer.run(() {
+      if (_tasks.containsKey(id) || _running.containsKey(id)) return;
+      _controls.remove(id);
+      _cacheAccess.remove(id);
+    });
+  }
   Future<void> _stop(String id) async {
     final run = _running[id];
     if (run != null) {
@@ -1273,6 +1283,10 @@ class DownloadManager extends ChangeNotifier {
           notifyListeners();
           _background(_drainRemovedDownloads());
           _background(_readyRemovedCleanup(current.spec.cleanup));
+          // Drop the per-task gates so these maps don't grow unbounded across
+          // a long session. Deferred so this very `_control` gate isn't
+          // disposed while still executing.
+          _schedulePruneGates(id);
         } catch (e, stack) {
           DiagnosticLog.error(
             'download.remove_failed',
@@ -1623,6 +1637,19 @@ class DownloadManager extends ChangeNotifier {
             await _deleteCache(id);
           }
         } catch (_) {
+          // Cleanup failed after a durable export. Stage a durable retry
+          // marker so `_drainCompletedCaches` can finish on a later tick
+          // instead of leaving an orphaned payload cache until restart.
+          try {
+            await store.change((draft) {
+              draft['completedCacheRemovals'] = <String>{
+                ...(draft['completedCacheRemovals'] as List? ?? []).map(
+                  (value) => '$value',
+                ),
+                id,
+              }.toList();
+            });
+          } catch (_) {}
           await _update(id, {'phase': '已保存，缓存稍后清理'});
         }
         // History can be removed while post-export cleanup is still pending.
