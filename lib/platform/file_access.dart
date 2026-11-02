@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import '../core/json.dart';
 import 'android_download_file.dart';
+import 'hard_link.dart';
 import 'native_engine.dart';
 import 'windows_storage.dart';
 
@@ -258,7 +259,7 @@ class PlatformFileAccess implements FileAccess {
       );
       return StoragePlan(volume('cache'), volume('target'));
     }
-    Future<(StorageVolume, bool)> volume(String path) async {
+    Future<StorageVolume> volume(String path) async {
       var directory = Directory(path).absolute;
       while (!await directory.exists() &&
           p.dirname(directory.path) != directory.path) {
@@ -266,25 +267,32 @@ class PlatformFileAccess implements FileAccess {
       }
       final resolved = await directory.resolveSymbolicLinks();
       final windows = WindowsStorage.volume(resolved);
-      return (
-        StorageVolume(
-          windows?.id ?? p.rootPrefix(resolved).toLowerCase(),
-          resolved,
-        ),
-        windows?.supportsHardLinks ?? false,
+      return StorageVolume(
+        windows?.id ?? p.rootPrefix(resolved).toLowerCase(),
+        resolved,
       );
     }
 
     final cacheVolume = await volume(cache);
     final targetVolume = await volume(destination ?? defaultDirectory.path);
     return StoragePlan(
-      cacheVolume.$1,
-      targetVolume.$1,
-      copyOnSave:
-          cacheVolume.$1.id != targetVolume.$1.id ||
-          !cacheVolume.$2 ||
-          !targetVolume.$2,
+      cacheVolume,
+      targetVolume,
+      copyOnSave: !_canHardLink(cacheVolume, targetVolume),
     );
+  }
+
+  /// A finished payload on [from] can be published into [to] without a second
+  /// copy only when both sit on one filesystem that links. Windows answers with
+  /// its kernel volume query; elsewhere the link itself is the probe.
+  static bool _canHardLink(StorageVolume from, StorageVolume to) {
+    if (from.id != to.id) return false;
+    final source = WindowsStorage.volume(from.path);
+    final target = WindowsStorage.volume(to.path);
+    if (source != null && target != null) {
+      return source.supportsHardLinks && target.supportsHardLinks;
+    }
+    return hardLinkableAcross(from.path, to.path);
   }
 
   @override
@@ -398,7 +406,7 @@ class PlatformFileAccess implements FileAccess {
         checkpoint();
         final file = File(p.join(resolved, i == 0 ? safe : '$base ($i)$ext'));
         try {
-          WindowsStorage.createHardLink(source.path, file.path);
+          linkPublishedFile(source.path, file.path);
         } on FileSystemException {
           if (!await file.exists()) rethrow;
           continue;
