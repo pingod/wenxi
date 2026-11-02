@@ -1,5 +1,6 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import '../data/backgrounds.dart';
 import '../domain/settings.dart';
 import 'app_background.dart';
@@ -111,12 +112,39 @@ class _AppearancePreviewState extends State<AppearancePreview> {
                               ),
                               borderRadius: BorderRadius.circular(12),
                             ),
-                            child: Text(
-                              '粘贴网盘分享链接',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: colors.onSurfaceVariant,
-                              ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                if (settings.hideResourceNavigation)
+                                  Align(
+                                    alignment: Alignment.centerRight,
+                                    child: TextButton.icon(
+                                      key: const Key(
+                                        'appearance-preview-resources',
+                                      ),
+                                      onPressed: () =>
+                                          setState(() => selected = 1),
+                                      icon: SvgPicture.asset(
+                                        'assets/navigation/search.svg',
+                                        width: 17,
+                                        height: 17,
+                                        colorFilter: ColorFilter.mode(
+                                          colors.primary,
+                                          BlendMode.srcIn,
+                                        ),
+                                        excludeFromSemantics: true,
+                                      ),
+                                      label: const Text('资源'),
+                                    ),
+                                  ),
+                                Text(
+                                  '粘贴网盘分享链接',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: colors.onSurfaceVariant,
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
                         ),
@@ -194,29 +222,61 @@ class _AppearancePreviewState extends State<AppearancePreview> {
                         ),
                         if (widget.expanded) const Spacer(),
                         if (!widget.desktop)
-                          MediaQuery.removePadding(
-                            context: context,
-                            removeTop: true,
-                            removeBottom: true,
-                            child: AppNavigation(
-                              selectedIndex: selected,
-                              onSelected: (index) =>
-                                  setState(() => selected = index),
-                            ),
+                          Stack(
+                            children: [
+                              // A flat surface hides transparency and blur.
+                              // Use sample content only when there is no wallpaper.
+                              if (BackgroundScope.of(context)?.active != true)
+                                Positioned.fill(
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 18,
+                                      vertical: 14,
+                                    ),
+                                    child: ClipRRect(
+                                      borderRadius: BorderRadius.circular(32),
+                                      child: Row(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.stretch,
+                                        children: [
+                                          for (final color in [
+                                            colors.primary,
+                                            colors.secondary,
+                                            colors.primary,
+                                          ])
+                                            Expanded(
+                                              child: ColoredBox(color: color),
+                                            ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              MediaQuery.removePadding(
+                                context: context,
+                                removeTop: true,
+                                removeBottom: true,
+                                child: AppNavigation(
+                                  selectedIndex: selected,
+                                  hideResources:
+                                      settings.hideResourceNavigation,
+                                  onSelected: (index) =>
+                                      setState(() => selected = index),
+                                ),
+                              ),
+                            ],
                           ),
                       ],
                     );
                     return widget.desktop
                         ? Row(
                             children: [
-                              Material(
-                                color: backgroundSurface(context),
-                                child: AppNavigation(
-                                  rail: true,
-                                  selectedIndex: selected,
-                                  onSelected: (index) =>
-                                      setState(() => selected = index),
-                                ),
+                              AppNavigation(
+                                rail: true,
+                                selectedIndex: selected,
+                                hideResources: settings.hideResourceNavigation,
+                                onSelected: (index) =>
+                                    setState(() => selected = index),
                               ),
                               Expanded(child: body),
                             ],

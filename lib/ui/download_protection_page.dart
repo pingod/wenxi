@@ -155,7 +155,7 @@ class _DownloadProtectionPageState extends State<DownloadProtectionPage>
               ),
               const SizedBox(height: 12),
               Text(
-                '关闭窗口时选择“后台下载”，任务会继续在托盘中运行。屏幕仍可自动熄灭。',
+                '点击最小化按钮可收起到系统托盘，下载和上传会继续。单击托盘图标恢复窗口，右键可退出。关闭窗口时也可选择“后台传输”。屏幕仍可自动熄灭。',
                 style: TextStyle(color: secondary(context), height: 1.6),
               ),
             ] else ...[

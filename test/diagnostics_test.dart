@@ -37,6 +37,9 @@ void main() {
         '__puus': 'private-puus',
         'pwd': 'private-code',
         'primary': 'private-primary',
+        'capability': 'private-job-capability',
+        'X-Parser-Job-Key': 'private-job-key',
+        'parserState': '{"opaque":"private-parser-state"}',
         'nested': [
           {'Authorization': 'private-auth', 'accessToken': 'private-token'},
           {
@@ -58,6 +61,8 @@ void main() {
       final input = [
         'Cookie: __puus=private-cookie; BDUSS=private-bduss',
         'Authorization: Bearer private-authorization',
+        'X-Parser-Job-Key: private-job-key',
+        'capability=private-job-capability; parserState="private-parser-state"',
         r'''{"access_token":"private-escaped\"private-tail", "pwd": "private-code"}''',
         'BDUSS=private-alone; __pus=private-pus; __puus=private-puus',
         '提取码 abcd; 访问码：efgh; password=private-password',

@@ -124,7 +124,7 @@ void main() {
       });
       final current = makeManager(
         DesktopGopeedTransport(
-          executable: File('native/bin/asterlink_gopeed.exe').absolute.path,
+          executable: gopeedTestExecutable(),
         ),
       );
       await current.initialize();

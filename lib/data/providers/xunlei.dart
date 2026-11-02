@@ -62,6 +62,16 @@ class XunleiConnector extends CloudConnector {
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
   String value(Credential c, String one, String two) =>
       c.field(one).trim().ifEmpty(c.field(two).trim());
+  bool webCredential(Credential c) =>
+      value(c, 'clientId', 'client_id') == XunleiWebLogin.clientId &&
+      c.field('authType') == 'webToken';
+  String clientVersion(Credential c) => webCredential(c)
+      ? XunleiProtocol.webVersion
+      : value(
+          c,
+          'clientVersion',
+          'client_version',
+        ).ifEmpty(XunleiProtocol.version);
   Future<XunleiSession> auth(Credential c) async {
     RequestScope.checkpoint();
     final current = vault.credential(platform);
@@ -78,11 +88,7 @@ class XunleiConnector extends CloudConnector {
       value(c, 'captchaToken', 'captcha_token'),
       value(c, 'clientId', 'client_id'),
       value(c, 'clientSecret', 'client_secret'),
-      value(
-        c,
-        'clientVersion',
-        'client_version',
-      ).ifEmpty(XunleiProtocol.version),
+      clientVersion(c),
       managed: managed,
     );
     checkpoint(a);
@@ -127,15 +133,13 @@ class XunleiConnector extends CloudConnector {
     a.device = value(credential, 'deviceId', 'device_id').ifEmpty(a.device);
     a.clientId = value(credential, 'clientId', 'client_id');
     a.clientSecret = value(credential, 'clientSecret', 'client_secret');
-    a.version = value(
-      credential,
-      'clientVersion',
-      'client_version',
-    ).ifEmpty(XunleiProtocol.version);
+    a.version = clientVersion(credential);
   }
 
   Map<String, String> headers(XunleiSession a) => {
-    'User-Agent': ua,
+    'User-Agent': webCredential(a.credential)
+        ? WebLoginTarget.desktopUserAgent
+        : ua,
     'Authorization': 'Bearer ${a.access}',
     'X-Device-Id': a.device,
     'X-Client-Version': a.version,
@@ -154,7 +158,7 @@ class XunleiConnector extends CloudConnector {
   }) async {
     final url = params.isEmpty ? '$base$path' : query('$base$path', params);
     final action = '$method:$path';
-    var refreshed = false;
+    var refreshed = false, captchaRefreshed = false;
     for (var attempt = 0; attempt < 3; attempt++) {
       checkpoint(a);
       final sentAccess = a.access, sentCaptcha = a.captcha;
@@ -174,6 +178,8 @@ class XunleiConnector extends CloudConnector {
         j = {};
       }
       final error = j.str('error');
+      final captchaRejected =
+          error == 'captcha_invalid' || error == 'captcha_required';
       if ((r.status == 401 || error == 'unauthenticated') &&
           attempt < 2 &&
           (a.access != sentAccess ||
@@ -182,14 +188,14 @@ class XunleiConnector extends CloudConnector {
         await refreshCaptcha(a, action);
         continue;
       }
-      if (error == 'captcha_invalid' &&
-          attempt == 0 &&
+      if (captchaRejected &&
+          !captchaRefreshed &&
+          attempt < 2 &&
           (a.captcha != sentCaptcha || await refreshCaptcha(a, action))) {
+        captchaRefreshed = true;
         continue;
       }
-      if (r.status == 401 ||
-          error == 'unauthenticated' ||
-          error == 'captcha_invalid') {
+      if (r.status == 401 || error == 'unauthenticated' || captchaRejected) {
         if (a.passwordRenewed) await _blockAutoLogin(a);
         throw const AccountLoginRequired('迅雷登录已失效，请重新登录并完成验证');
       }
@@ -385,8 +391,10 @@ class XunleiConnector extends CloudConnector {
   Future<bool> refreshCaptcha(XunleiSession a, String action) async {
     checkpoint(a);
     final sent = a.credential;
-    if (a.clientId != XunleiProtocol.clientId ||
-        a.version != XunleiProtocol.version) {
+    final web = webCredential(sent);
+    if (!web &&
+        (a.clientId != XunleiProtocol.clientId ||
+            a.version != XunleiProtocol.version)) {
       return false;
     }
     final timestamp = '${DateTime.now().millisecondsSinceEpoch}';
@@ -398,19 +406,28 @@ class XunleiConnector extends CloudConnector {
           'device_id': a.device,
           'action': action,
           'captcha_token': a.captcha,
-          'redirect_uri': 'xlaccsdk01://xunlei.com/callback?state=harbor',
+          if (!web)
+            'redirect_uri': 'xlaccsdk01://xunlei.com/callback?state=harbor',
           'meta': {
             'client_version': a.version,
-            'package_name': XunleiProtocol.packageName,
+            'package_name': web
+                ? XunleiProtocol.webPackageName
+                : XunleiProtocol.packageName,
             'timestamp': timestamp,
-            'captcha_sign': XunleiProtocol.captchaSign(a.device, timestamp),
+            'captcha_sign': web
+                ? XunleiProtocol.webCaptchaSign(a.device, timestamp)
+                : XunleiProtocol.captchaSign(a.device, timestamp),
             'user_id': XunleiProtocol.jwt(
               a.access,
             ).str('sub').ifEmpty(a.credential.field('userId')),
           },
         },
         {
-          'User-Agent': XunleiProtocol.appUa,
+          'User-Agent': web
+              ? WebLoginTarget.desktopUserAgent
+              : XunleiProtocol.appUa,
+          if (web) 'Origin': 'https://pan.xunlei.com',
+          if (web) 'Referer': 'https://pan.xunlei.com/',
           'Accept': 'application/json;charset=UTF-8',
           'X-Client-Id': a.clientId,
           'X-Device-Id': a.device,
@@ -421,7 +438,10 @@ class XunleiConnector extends CloudConnector {
       if (!sent.sameAs(a.credential)) return a.captcha.isNotEmpty;
       XunleiLoginService.checkAvailable(response);
       final token = response.json.str('captcha_token');
-      if (!response.successful || token.isEmpty || token == 'null') {
+      if (!response.successful ||
+          token.isEmpty ||
+          token == 'null' ||
+          response.json.str('url').isNotEmpty) {
         return false;
       }
       a.captcha = token;

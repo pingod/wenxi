@@ -38,22 +38,7 @@ class CloudCommandResolver {
     require(text.trim().isNotEmpty, '请先粘贴${platform.shortName}口令');
     require(text.length <= maximumLength, '口令内容过长，请只复制本次分享文案');
     RequestScope.checkpoint();
-    if (platform == CloudPlatform.xunlei) {
-      require(XunleiKouling.looksLike(text), '请粘贴迅雷中文口令；分享链接请使用链接解析');
-      final response = await http
-          .get(XunleiKouling.jumpUrl(XunleiKouling.normalize(text)), {
-            'User-Agent': XunleiKouling.userAgent,
-            'Accept': '*/*',
-            'Origin': XunleiKouling.origin,
-            'Referer': XunleiKouling.referer,
-          });
-      RequestScope.checkpoint();
-      final url = XunleiKouling.shareUrlFromResponse(
-        response.status,
-        response.json,
-      )!;
-      return LinkParser.parse(url).single;
-    }
+    if (platform == CloudPlatform.xunlei) return _resolveXunlei(text);
     final body = buildRequest(platform, text, clock().millisecondsSinceEpoch);
     final response = await http.postJsonRead(
       'https://utoken2.${platform == CloudPlatform.quark ? 'quark' : 'uc'}.cn/utoken/v2/parse',
@@ -68,6 +53,35 @@ class CloudCommandResolver {
     return decodeResponse(platform, response.json);
   }
 
+  Future<ParsedLink> _resolveXunlei(String text) async {
+    // Older commands need surrounding quotation marks removed. Keep the raw
+    // text as a fallback when punctuation is part of a newer command format.
+    final candidates = {
+      XunleiKouling.normalize(text),
+      text.trim(),
+    }.where((value) => value.isNotEmpty).toList();
+    for (var index = 0; index < candidates.length; index++) {
+      final response = await http
+          .get(XunleiKouling.jumpUrl(candidates[index]), {
+            'User-Agent': XunleiKouling.userAgent,
+            'Accept': '*/*',
+            'Origin': XunleiKouling.origin,
+            'Referer': XunleiKouling.referer,
+          });
+      RequestScope.checkpoint();
+      try {
+        final url = XunleiKouling.shareUrlFromResponse(
+          response.status,
+          response.json,
+        )!;
+        return LinkParser.parse(url).single;
+      } on AppException {
+        if (!response.successful || index == candidates.length - 1) rethrow;
+      }
+    }
+    throw const AppException('该迅雷口令没有对应的网盘分享');
+  }
+
   Json buildRequest(CloudPlatform platform, String clipboard, int timestamp) {
     require(
       platform == CloudPlatform.quark || platform == CloudPlatform.uc,
@@ -77,18 +91,7 @@ class CloudCommandResolver {
       clipboard.trim().isNotEmpty && clipboard.length <= maximumLength,
       '请粘贴有效口令',
     );
-    var identifier = '', secret = '';
     final quark = platform == CloudPlatform.quark;
-    if (quark) {
-      final matches = RegExp(
-        r'(咐置)(.+?)叩苓|(/~)([A-Za-z0-9_-]{6,128})~:/',
-      ).allMatches(clipboard).toList();
-      require(matches.isNotEmpty, '请粘贴「咐置…叩苓」或「/~…~:/」格式的夸克口令');
-      require(matches.length == 1, '一次只能解析一条口令，请只保留本次分享文案');
-      final match = matches.single;
-      identifier = (match[1] ?? match[3])!;
-      secret = (match[2] ?? match[4])!;
-    }
     final key = utf8.encode(quark ? keys.quark : keys.uc);
     require(
       key.length == (quark ? 88 : 24),
@@ -97,13 +100,15 @@ class CloudCommandResolver {
     final app = quark ? 'QUARK' : 'UC';
     // Clipboard bytes are preserved. No Unicode normalization, trimming,
     // JSON escaping, or Base64 decoding of the UTF-8 signing material.
-    final input = '$app$clipboard$identifier$secret$timestamp';
+    // Both services accept the full clipboard with empty extraction hints.
+    // Let the selected service recognize evolving formats before validation.
+    final input = '$app$clipboard$timestamp';
     final signature = Hmac(sha1, key).convert(utf8.encode(input)).toString();
     return {
       'app': app,
       'clipboard': clipboard,
-      'identifier': identifier,
-      'shareSecret': secret,
+      'identifier': '',
+      'shareSecret': '',
       'timestamp': '$timestamp',
       'sign': '${quark ? '2ee1' : '03e9'}$signature',
       'kps': '',

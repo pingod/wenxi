@@ -4,6 +4,9 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/platform/windows_window_theme.dart';
 
+/// Both desktop runners repaint their chrome from this channel.
+final _supportsNativeChrome = Platform.isWindows || Platform.isLinux;
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   const channel = MethodChannel('com.asterlink.app/window_theme');
@@ -34,25 +37,27 @@ void main() {
         ),
       );
 
-  testWidgets('Native caption follows explicit app theme changes', (
-    tester,
-  ) async {
-    final mode = ValueNotifier(ThemeMode.light);
-    addTearDown(mode.dispose);
-    await tester.pumpWidget(app(mode));
-    await tester.pumpAndSettle();
-    expect(themes, [false]);
+  testWidgets(
+    'Native caption follows explicit app theme changes',
+    (tester) async {
+      final mode = ValueNotifier(ThemeMode.light);
+      addTearDown(mode.dispose);
+      await tester.pumpWidget(app(mode));
+      await tester.pumpAndSettle();
+      expect(themes, [false]);
 
-    await tester.pumpWidget(app(mode));
-    await tester.pumpAndSettle();
-    expect(themes, [false]);
+      await tester.pumpWidget(app(mode));
+      await tester.pumpAndSettle();
+      expect(themes, [false]);
 
-    mode.value = ThemeMode.dark;
-    await tester.pumpAndSettle();
-    mode.value = ThemeMode.light;
-    await tester.pumpAndSettle();
-    expect(themes, [false, true, false]);
-  }, skip: !Platform.isWindows);
+      mode.value = ThemeMode.dark;
+      await tester.pumpAndSettle();
+      mode.value = ThemeMode.light;
+      await tester.pumpAndSettle();
+      expect(themes, [false, true, false]);
+    },
+    skip: !_supportsNativeChrome,
+  );
 
   testWidgets(
     'System appearance cannot override an explicit light app theme',
@@ -76,7 +81,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(themes, [false, true, false]);
     },
-    skip: !Platform.isWindows,
+    skip: !_supportsNativeChrome,
   );
 
   testWidgets('Disabled platform integration makes no native theme calls', (
@@ -111,6 +116,6 @@ void main() {
       await tester.pumpAndSettle();
       expect(themes, [true]);
     },
-    skip: !Platform.isWindows,
+    skip: !_supportsNativeChrome,
   );
 }

@@ -12,6 +12,7 @@ import 'package:asterlink/domain/torrent.dart';
 import 'package:asterlink/download/torrent_session.dart';
 import 'package:asterlink/platform/file_access.dart';
 import 'package:asterlink/platform/native_engine.dart';
+import 'package:asterlink/platform/desktop_platform.dart';
 import 'support.dart';
 
 class _LocalIo extends HttpOverrides {}
@@ -238,7 +239,7 @@ void main() {
         },
       );
     },
-    skip: !Platform.isWindows || !File(executable).existsSync()
+    skip: !isDesktopPlatform || !File(executable).existsSync()
         ? 'Windows helper is required.'
         : false,
   );

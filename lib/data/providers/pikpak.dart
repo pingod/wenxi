@@ -5,6 +5,7 @@ import '../../core/operation_progress.dart';
 import '../../domain/auth.dart';
 import '../../domain/links.dart';
 import '../../domain/models.dart';
+import '../../domain/pikpak_web_login.dart';
 import '../../domain/uploads.dart';
 import '../../domain/web_tokens.dart';
 import '../http.dart';
@@ -40,6 +41,27 @@ class PikPakConnector extends PersonalCloudConnector {
     '+RaaG7T8FRTI4cP019N5y9ofLyHE9ySFUr',
     '6Pf1l8UTeuzYldGtb/d',
   ];
+  // The official web frontend's captcha profile, build d254e901. Web tokens
+  // and refresh tokens belong to this client, not to the Android client.
+  static const _webVersion = '2.0.0';
+  static const _webTimestamp = '1792067577543';
+  static const _webSalts = [
+    'C9qPpZLN8ucRTaTiUMWYS9cQvWOE',
+    '+r6CQVxjzJV6LCV',
+    'F',
+    'pFJRC',
+    '9WXYIDGrwTCz2OiVlgZa90qpECPD6olt',
+    '/750aCr4lm/Sly/c',
+    'RB+DT/gZCrbV',
+    '',
+    'CyLsf7hdkIRxRm215hl',
+    '7xHvLi2tOYP0Y92b',
+    'ZGTXXxu8E/MIWaEDB+Sm/',
+    '1UI3',
+    'E7fP5Pfijd+7K+t6Tg/NhuLq0eEUVChpJSkrKxpO',
+    'ihtqpG6FMt65+Xk+tWUH2',
+    'NhXXU9rg4XXdzo7u5o',
+  ];
   @override
   CloudPlatform get platform => CloudPlatform.pikpak;
 
@@ -48,6 +70,11 @@ class PikPakConnector extends PersonalCloudConnector {
     return id;
   }
 
+  static String _client(TokenSession session) =>
+      session.field('clientId') == PikPakWebLogin.clientId
+      ? PikPakWebLogin.clientId
+      : clientId;
+
   Future<HttpResult> _raw(
     String method,
     String url,
@@ -55,13 +82,22 @@ class PikPakConnector extends PersonalCloudConnector {
     Json? body,
     String access = '',
     String captcha = '',
+    String client = clientId,
   }) => http.request(
     method,
     url,
     headers: {
-      'User-Agent': userAgent,
+      'User-Agent': client == PikPakWebLogin.clientId
+          ? WebLoginTarget.desktopUserAgent
+          : userAgent,
       'X-Device-Id': device,
-      'X-Client-Id': clientId,
+      'X-Client-Id': client,
+      if (client == PikPakWebLogin.clientId) ...{
+        'Origin': 'https://mypikpak.com',
+        'Referer': 'https://mypikpak.com/',
+        'X-Sdk-Version': '8.1.4',
+        'X-Protocol-Version': '301',
+      },
       if (access.isNotEmpty) 'Authorization': 'Bearer $access',
       if (captcha.isNotEmpty) 'X-Captcha-Token': captcha,
     },
@@ -112,10 +148,14 @@ class PikPakConnector extends PersonalCloudConnector {
     String username = '',
     String user = '',
     String previous = '',
+    String client = clientId,
   }) async {
-    final timestamp = '${sessions.now()}';
-    var sign = '${clientId}1.21.0com.pikcloud.pikpak$device$timestamp';
-    for (final salt in _salts) {
+    final web = client == PikPakWebLogin.clientId;
+    final timestamp = web ? _webTimestamp : '${sessions.now()}';
+    final version = web ? _webVersion : '1.21.0';
+    final package = web ? 'mypikpak.com' : 'com.pikcloud.pikpak';
+    var sign = '$client$version$package$device$timestamp';
+    for (final salt in web ? _webSalts : _salts) {
       sign = md5.convert(utf8.encode('$sign$salt')).toString();
     }
     final result = _checked(
@@ -123,8 +163,9 @@ class PikPakConnector extends PersonalCloudConnector {
         'POST',
         '$userApi/v1/shield/captcha/init',
         device,
+        client: client,
         body: {
-          'client_id': clientId,
+          'client_id': client,
           'device_id': device,
           'action': action,
           if (username.isEmpty) 'captcha_token': previous,
@@ -133,12 +174,14 @@ class PikPakConnector extends PersonalCloudConnector {
               : {
                   'captcha_sign': '1.$sign',
                   'user_id': user,
-                  'package_name': 'com.pikcloud.pikpak',
-                  'client_version': '1.21.0',
+                  'package_name': package,
+                  'client_version': version,
                   'timestamp': timestamp,
                 },
           if (username.isEmpty)
-            'redirect_uri': 'ttps://api.mypikpak.com/v1/auth/callback',
+            'redirect_uri': web
+                ? 'https://mypikpak.com/loading'
+                : 'https://api.mypikpak.com/v1/auth/callback',
         },
       ),
     );
@@ -207,9 +250,10 @@ class PikPakConnector extends PersonalCloudConnector {
         'POST',
         '$userApi/v1/auth/token',
         session.field('deviceId'),
+        client: _client(session),
         body: {
-          'client_id': clientId,
-          'client_secret': _secret,
+          'client_id': _client(session),
+          if (_client(session) == clientId) 'client_secret': _secret,
           'grant_type': 'refresh_token',
           'refresh_token': session.refresh,
         },
@@ -236,6 +280,7 @@ class PikPakConnector extends PersonalCloudConnector {
         method,
         url,
         session.field('deviceId'),
+        client: _client(session),
         access: access,
         captcha: captcha,
         body: body,
@@ -272,6 +317,7 @@ class PikPakConnector extends PersonalCloudConnector {
             '$method:${user ? userApi + path : actionPath}',
             user: session.field('userId'),
             previous: captcha,
+            client: _client(session),
           );
           await sessions.update(session, {'captchaToken': token});
         });

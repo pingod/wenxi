@@ -3,11 +3,13 @@ import 'dart:io';
 import 'dart:convert';
 import 'package:media_kit/media_kit.dart';
 import 'package:file_selector/file_selector.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/domain/playback.dart';
+import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/core/operation_progress.dart';
 import 'package:asterlink/main.dart';
 import 'package:asterlink/ui/player_page.dart';
@@ -214,13 +216,6 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  Future<void> doubleTap(WidgetTester tester, Offset position) async {
-    await tester.tapAt(position);
-    await tester.pump(const Duration(milliseconds: 70));
-    await tester.tapAt(position);
-    await tester.pump(const Duration(milliseconds: 350));
-  }
-
   testWidgets(
     'Phone exposes the external player button and cancellation restores playback',
     (tester) async {
@@ -416,6 +411,64 @@ void main() {
     },
   );
 
+  testWidgets(
+    'Resolution waits for video metadata and updates with decoded dimensions',
+    (tester) async {
+      final fixture = PlaybackFixture()
+        ..configureBackend = (backend) =>
+            backend.emit(backend.state.copyWith(width: 0, height: 0));
+      await render(tester, suppliedFixture: fixture);
+      final badge = find.byKey(const Key('player-resolution'));
+      expect(badge, findsNothing);
+
+      for (final (width, height, rotation, label) in [
+        (1280, 720, 0, '1280 × 720'),
+        (1920, 1080, 0, '1920 × 1080'),
+        (1920, 800, 0, '1920 × 800'),
+        (3840, 2160, 0, '3840 × 2160'),
+        (1920, 1080, 90, '1080 × 1920'),
+      ]) {
+        fixture.current.emit(
+          fixture.current.state.copyWith(
+            videoParams: VideoParams(dw: width, dh: height, rotate: rotation),
+          ),
+        );
+        await tester.pump();
+        expect(
+          find.descendant(of: badge, matching: find.text(label)),
+          findsOneWidget,
+        );
+        expect(tester.takeException(), isNull);
+      }
+
+      await tester.tapAt(const Offset(196, 300));
+      await tester.pumpAndSettle();
+      expect(badge, findsNothing);
+      await tester.tapAt(const Offset(196, 300));
+      await tester.pumpAndSettle();
+      expect(badge, findsOneWidget);
+    },
+  );
+
+  testWidgets('Audio playback does not display a video resolution', (
+    tester,
+  ) async {
+    await render(
+      tester,
+      suppliedFixture: PlaybackFixture(
+        suppliedEntries: [
+          PlaybackEntry(
+            id: 'audio',
+            key: 'audio',
+            name: '音乐.mp3',
+            video: false,
+          ),
+        ],
+      ),
+    );
+    expect(find.byKey(const Key('player-resolution')), findsNothing);
+  });
+
   for (final (name, size, scale, dark) in [
     ('player-phone', const Size(393, 864), 1.0, false),
     ('player-landscape', const Size(844, 390), 1.0, false),
@@ -434,6 +487,16 @@ void main() {
       expect(
         find.byKey(const Key('player-play-pause')).hitTestable(),
         findsOneWidget,
+      );
+      final resolution = find.byKey(const Key('player-resolution'));
+      final title = find.text('AsterLink 演示 · 第 1 集.mkv');
+      expect(
+        find.descendant(of: resolution, matching: find.text('1920 × 1080')),
+        findsOneWidget,
+      );
+      expect(
+        tester.getRect(resolution).top,
+        greaterThan(tester.getRect(title).bottom),
       );
       expect(tester.takeException(), isNull);
       await expectLater(
@@ -633,6 +696,31 @@ void main() {
     },
   );
 
+  testWidgets('Desktop subtitle size reaches 120 and is persisted', (
+    tester,
+  ) async {
+    final page = await render(tester, size: const Size(1920, 1080));
+    await openSetting(tester, '字幕');
+    final slider = find.byKey(const Key('player-subtitle-size'));
+    await tester.ensureVisible(slider);
+    await tester.pumpAndSettle();
+    final track = tester.widget<Slider>(slider);
+    expect(track.max, 120);
+    track.onChanged!(120);
+    await tester.pumpAndSettle();
+    tester.widget<Slider>(slider).onChangeEnd!(120);
+    await tester.pumpAndSettle();
+    expect(page.fixture.controller.preferences.subtitleSize, 120);
+    expect(page.fixture.history.preferences.subtitleSize, 120);
+    expect(find.text('字幕字号  120'), findsOneWidget);
+    await tap(tester, find.byTooltip('关闭面板'));
+    final captions = tester.widgetList<SubtitleCaption>(
+      find.byType(SubtitleCaption),
+    );
+    expect(captions.any((caption) => caption.size == 120), true);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('Desktop subtitle panel previews the real lowest position', (
     tester,
   ) async {
@@ -749,7 +837,7 @@ void main() {
   }
 
   testWidgets(
-    'Single-tap fade starts next frame and retains controls through system-inset changes',
+    'Confirmed single-tap fade retains controls through system-inset changes',
     (tester) async {
       tester.view.padding = FakeViewPadding(top: 24, bottom: 20);
       tester.view.viewPadding = FakeViewPadding(top: 24, bottom: 20);
@@ -764,6 +852,7 @@ void main() {
       final caption = find.byKey(const Key('player-captions'));
       final initialCaption = tester.getRect(caption);
       await tester.tapAt(const Offset(196, 300));
+      await tester.pump(const Duration(milliseconds: 350));
       await tester.pump();
       expect(page.device.barsVisible, isFalse);
       expect(
@@ -793,7 +882,7 @@ void main() {
   );
 
   testWidgets(
-    'Quickly reversing visibility continues from the current opacity',
+    'Pausing during the control fade reverses from the current opacity',
     (tester) async {
       final page = await render(tester);
       double opacity() => tester
@@ -803,17 +892,17 @@ void main() {
           .opacity
           .value;
       await tester.tapAt(const Offset(196, 300));
+      await tester.pump(const Duration(milliseconds: 350));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 32));
       final fading = opacity();
       expect(fading, allOf(greaterThan(0), lessThan(1)));
-      // A separate tap location is not a double-tap seek/pause gesture.
-      await tester.tapAt(const Offset(196, 520));
+      await page.fixture.controller.pause();
       await tester.pump();
       expect(opacity(), closeTo(fading, .01));
       await tester.pump(const Duration(milliseconds: 32));
       expect(opacity(), greaterThan(fading));
-      expect(page.fixture.current.state.playing, isTrue);
+      expect(page.fixture.current.state.playing, isFalse);
       await tester.pumpAndSettle();
       expect(opacity(), 1);
     },
@@ -846,6 +935,31 @@ void main() {
     },
   );
 
+  testWidgets('Desktop seek hover shows the target playback time', (
+    tester,
+  ) async {
+    await render(tester, size: const Size(1100, 780));
+    final slider = find.byKey(const Key('player-seek'));
+    final rect = tester.getRect(slider);
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: Offset.zero);
+    await mouse.moveTo(
+      Offset(rect.left + rect.width * .5, rect.center.dy),
+    );
+    await tester.pump();
+    expect(find.byKey(const Key('player-seek-hover-time')), findsOneWidget);
+    expect(find.text('05:00'), findsOneWidget);
+
+    await mouse.moveTo(Offset(rect.left + rect.width * .75, rect.center.dy));
+    await tester.pump();
+    expect(find.text('07:30'), findsOneWidget);
+
+    await mouse.moveTo(const Offset(10, 10));
+    await tester.pump();
+    expect(find.byKey(const Key('player-seek-hover-time')), findsNothing);
+    await mouse.removePointer();
+  });
+
   testWidgets(
     'Reduced-motion preferences hide controls without leaving an animated overlay',
     (tester) async {
@@ -856,6 +970,7 @@ void main() {
       );
       final page = await render(tester);
       await tester.tapAt(const Offset(196, 300));
+      await tester.pump(const Duration(milliseconds: 350));
       await tester.pump();
       expect(find.byKey(const Key('player-top-controls')), findsNothing);
       expect(page.device.barsVisible, isFalse);
@@ -910,6 +1025,88 @@ void main() {
       expect(page.fixture.controller.index, 1);
     },
   );
+
+  testWidgets(
+    'Quark defaults to 128 and custom playback connections validate and persist per drive',
+    (tester) async {
+      final page = await render(
+        tester,
+        suppliedFixture: PlaybackFixture(
+          platforms: [
+            CloudPlatform.quark,
+            CloudPlatform.uc,
+            CloudPlatform.quark,
+          ],
+        ),
+      );
+      expect(page.fixture.current.connections, 128);
+      await tap(tester, find.byTooltip('播放设置'));
+      final preset = find.byKey(const Key('player-connections-128'));
+      await scrollPanelTo(tester, preset);
+      expect(tester.widget<ChoiceChip>(preset).selected, isTrue);
+      final custom = find.byKey(const Key('player-connections-custom'));
+      await scrollPanelTo(tester, custom);
+      await tap(tester, custom);
+      final input = find.byKey(const Key('player-custom-connections'));
+      final apply = find.byKey(const Key('player-apply-custom-connections'));
+      expect(tester.widget<TextField>(input).controller!.text, '128');
+      await expectLater(
+        find.byKey(const Key('player-capture')),
+        matchesGoldenFile('goldens/player-custom-connections.png'),
+      );
+      for (final invalid in ['0', '513', '1.5', 'abc', '']) {
+        await tester.enterText(input, invalid);
+        await tap(tester, apply);
+        expect(find.text('请输入 1 至 512 之间的整数'), findsOneWidget);
+        expect(page.fixture.current.connections, 128);
+      }
+      await tester.enterText(input, '96');
+      await tap(tester, apply);
+      expect(page.fixture.current.connections, 96);
+      expect(
+        page.fixture.history.preferences.connectionsFor(CloudPlatform.quark),
+        96,
+      );
+      await openSetting(tester, '选集');
+      await tap(tester, find.byKey(const Key('episode-1')));
+      expect(page.fixture.current.connections, 8);
+      await openSetting(tester, '选集');
+      await tap(tester, find.byKey(const Key('episode-2')));
+      expect(page.fixture.current.connections, 96);
+      await tap(tester, find.byTooltip('播放设置'));
+      await scrollPanelTo(tester, custom);
+      expect(find.text('自定义 · 96'), findsOneWidget);
+      await tap(tester, custom);
+      expect(tester.widget<TextField>(input).controller!.text, '96');
+    },
+  );
+
+  for (final (size, scale) in [
+    (const Size(320, 700), 1.8),
+    (const Size(844, 390), 1.0),
+    (const Size(1100, 780), 1.0),
+  ]) {
+    testWidgets('Custom connections fit $size at text scale $scale', (
+      tester,
+    ) async {
+      await render(tester, size: size, scale: scale);
+      await tap(tester, find.byTooltip('播放设置'));
+      final custom = find.byKey(const Key('player-connections-custom'));
+      await scrollPanelTo(tester, custom);
+      await tap(tester, custom);
+      tester.view.viewInsets = const FakeViewPadding(bottom: 220);
+      addTearDown(tester.view.resetViewInsets);
+      await tester.pumpAndSettle();
+      final input = find.byKey(const Key('player-custom-connections'));
+      await tester.ensureVisible(input);
+      await tester.enterText(input, '256');
+      final apply = find.byKey(const Key('player-apply-custom-connections'));
+      await tester.ensureVisible(apply);
+      await tap(tester, apply);
+      expect(find.byKey(const Key('player-panel')), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+  }
 
   testWidgets(
     'Secondary controls live in settings and landscape overlays leave the center clear',
@@ -1021,30 +1218,37 @@ void main() {
     },
   );
 
-  testWidgets('Single taps only toggle controls; double taps skip or pause', (
-    tester,
-  ) async {
-    final page = await render(tester), backend = page.fixture.current;
-    final initialVolumeWrites = backend.volumes.length;
-    await tester.tapAt(const Offset(196, 300));
-    await tester.pump(const Duration(milliseconds: 350));
-    expect(
-      find.byKey(const Key('player-play-pause')).hitTestable(),
-      findsNothing,
-    );
-    await tester.pumpAndSettle();
-    expect(find.byKey(const Key('player-play-pause')), findsNothing);
-    expect(backend.volumes.length, initialVolumeWrites);
-    expect(backend.state.volume, 100);
-    await doubleTap(tester, const Offset(320, 300));
-    expect(backend.state.position, const Duration(seconds: 135));
-    await doubleTap(tester, const Offset(90, 300));
-    expect(backend.state.position, const Duration(seconds: 120));
-    await doubleTap(tester, const Offset(196, 300));
-    expect(backend.state.playing, isFalse);
-    expect(find.byKey(const Key('player-play-pause')), findsOneWidget);
-    expect(backend.volumes.length, initialVolumeWrites);
-  });
+  testWidgets(
+    'Single taps toggle controls and double taps pause without seeking',
+    (tester) async {
+      final page = await render(tester), backend = page.fixture.current;
+      final initialVolumeWrites = backend.volumes.length;
+      await tester.tapAt(const Offset(196, 300));
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(
+        find.byKey(const Key('player-play-pause')).hitTestable(),
+        findsNothing,
+      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('player-play-pause')), findsNothing);
+      expect(backend.volumes.length, initialVolumeWrites);
+      expect(backend.state.volume, 100);
+      final position = backend.state.position;
+      await tester.tapAt(const Offset(320, 300));
+      await tester.pump(const Duration(milliseconds: 70));
+      await tester.tapAt(const Offset(320, 300));
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(backend.state.position, position);
+      expect(backend.state.playing, isFalse);
+      expect(backend.volumes.length, initialVolumeWrites);
+      await tester.tapAt(const Offset(320, 300));
+      await tester.pump(const Duration(milliseconds: 70));
+      await tester.tapAt(const Offset(320, 300));
+      await tester.pumpAndSettle();
+      expect(backend.state.playing, isTrue);
+      expect(backend.state.position, position);
+    },
+  );
 
   testWidgets(
     'Progress, brightness and volume gestures act on the intended control',
@@ -1082,7 +1286,7 @@ void main() {
       await tap(tester, find.byKey(const Key('player-lock')));
       expect(find.byKey(const Key('player-play-pause')), findsNothing);
       final position = backend.state.position;
-      await doubleTap(tester, const Offset(320, 300));
+      await tester.tapAt(const Offset(320, 300));
       await tester.dragFrom(const Offset(160, 300), const Offset(110, 0));
       await tester.sendKeyEvent(LogicalKeyboardKey.space);
       await tester.pump();

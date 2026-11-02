@@ -88,10 +88,13 @@ func TestLegacyCacheIsRebuiltWithoutTouchingOtherTasks(t *testing.T) {
 }
 
 func TestRetrySettingControlsEveryConnection(t *testing.T) {
-	for _, retries := range []int{0, 2, 3} {
+	for _, retries := range []int{0, 2, 3, 64} {
 		t.Run(fmt.Sprint(retries), func(t *testing.T) {
 			openTestCore(t)
 			var attempts atomic.Int32
+			// Exercise the 64-retry bridge setting without waiting ten minutes
+			// for every backoff; ten real retries also exceeds the former cap.
+			failures := int32(min(10, max(3, retries)))
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Header.Get("Range") == "bytes=0-0" {
 					w.Header().Set("Content-Range", "bytes 0-0/8")
@@ -99,7 +102,7 @@ func TestRetrySettingControlsEveryConnection(t *testing.T) {
 					w.Write([]byte("a"))
 					return
 				}
-				if attempts.Add(1) <= 3 {
+				if attempts.Add(1) <= failures {
 					w.WriteHeader(503)
 					return
 				}
@@ -112,10 +115,10 @@ func TestRetrySettingControlsEveryConnection(t *testing.T) {
 			if err := Begin(string(raw)); err != nil {
 				t.Fatal(err)
 			}
-			state := waitState(t, "retry", func(s snapshot) bool { return s.Status == "done" || s.Status == "error" }, 45*time.Second)
+			state := waitState(t, "retry", func(s snapshot) bool { return s.Status == "done" || s.Status == "error" }, 45*time.Second+time.Duration(retries)*10*time.Second)
 			wantAttempts := int32(retries + 1)
-			if retries >= 3 {
-				wantAttempts = 4
+			if int32(retries) >= failures {
+				wantAttempts = failures + 1
 				if state.Status != "done" {
 					t.Fatal("configured retries were cut short")
 				}
@@ -193,6 +196,77 @@ func TestRepeatedPauseResumeKeepsNativeCheckpoint(t *testing.T) {
 		}
 	}
 	assertPayload(t, waitState(t, "repeat", func(s snapshot) bool { return s.Status == "done" }), f.data)
+}
+
+func TestUcCookieResumeAfterRestartUsesFreshHeadersAndSavedRanges(t *testing.T) {
+	storage, payload, key := openTestCore(t)
+	data := make([]byte, 2*1024*1024)
+	for i := range data {
+		data[i] = byte((i*37 + i/101) % 251)
+	}
+	var fresh, rejected, resumed atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cookie := "__pus=fixture; __puus=before"
+		if fresh.Load() != 0 {
+			cookie = "__pus=fixture; __puus=after"
+		}
+		if r.Header.Get("Cookie") != cookie {
+			rejected.Add(1)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		var begin, end int
+		if _, err := fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &begin, &end); err != nil || begin < 0 || end < begin || end >= len(data) {
+			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		if fresh.Load() != 0 && begin > 0 {
+			resumed.Add(1)
+		}
+		w.Header().Set("ETag", `"uc-original"`)
+		w.Header().Set("Content-Length", fmt.Sprint(end-begin+1))
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", begin, end, len(data)))
+		w.WriteHeader(http.StatusPartialContent)
+		w.Write(data[begin : end+1])
+	}))
+	t.Cleanup(server.Close)
+	start := func(cookie string) {
+		t.Helper()
+		raw, err := json.Marshal(request{
+			ID: "uc-cookie-resume", URL: server.URL + "/file",
+			Headers:     map[string]string{"Cookie": cookie, "If-Range": `"uc-original"`},
+			Connections: 1, ConnectionProfile: "uc", Retries: 0, SpeedLimit: 512 * 1024,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := Begin(string(raw)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	start("__pus=fixture; __puus=before")
+	waitState(t, "uc-cookie-resume", func(s snapshot) bool { return s.Downloaded > 0 && s.Status != "done" })
+	if err := Pause("uc-cookie-resume"); err != nil {
+		t.Fatal(err)
+	}
+	paused := waitState(t, "uc-cookie-resume", func(s snapshot) bool { return s.Status == "pause" })
+	previousID := taskIDs["uc-cookie-resume"]
+	if err := Close(); err != nil {
+		t.Fatal(err)
+	}
+	fresh.Store(1)
+	if err := Open(storage, payload, key); err != nil {
+		t.Fatal(err)
+	}
+	start("__pus=fixture; __puus=after")
+	if taskIDs["uc-cookie-resume"] != previousID {
+		t.Fatal("saved UC task was replaced instead of resumed")
+	}
+	state := waitState(t, "uc-cookie-resume", func(s snapshot) bool { return s.Status == "done" })
+	assertPayload(t, state, data)
+	if paused.Downloaded <= 0 || resumed.Load() == 0 || rejected.Load() != 0 {
+		t.Fatalf("progress=%d resumed=%d rejected=%d", paused.Downloaded, resumed.Load(), rejected.Load())
+	}
 }
 
 func TestUnknownLengthAndEmptyFiles(t *testing.T) {

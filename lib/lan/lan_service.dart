@@ -23,6 +23,7 @@ class LanShare {
   final LanManifest manifest;
   final Map<String, LanLocalFile> sources;
   final clients = <String>{};
+  final clientRequests = <String, int>{};
   final responses = <HttpResponse>{};
   bool stopped = false, draining = false;
   int transferred = 0;

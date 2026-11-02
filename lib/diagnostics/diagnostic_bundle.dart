@@ -8,6 +8,7 @@ import '../core/json.dart';
 import 'app_log.dart';
 import 'diagnostic_summary.dart';
 import 'redaction.dart';
+import 'windows_diagnostics.dart';
 
 class DiagnosticBundle {
   DiagnosticBundle(
@@ -20,10 +21,15 @@ class DiagnosticBundle {
   final Json Function() snapshot;
   final bool nativeEnabled;
   final Future<Object?> Function(String method, Json args)? nativeCall;
-  static const _channel = MethodChannel('com.asterlink.app/native');
+  static final _channel = MethodChannel(
+    Platform.isWindows
+        ? 'com.asterlink.app/diagnostics'
+        : 'com.asterlink.app/native',
+  );
 
   Future<Object?> _call(String method, [Json args = const {}]) async {
-    if (!nativeEnabled || (!Platform.isAndroid && nativeCall == null)) {
+    if (!nativeEnabled ||
+        (!Platform.isAndroid && !Platform.isWindows && nativeCall == null)) {
       return null;
     }
     return await (nativeCall?.call(method, args) ??
@@ -80,13 +86,18 @@ class DiagnosticBundle {
           '版本：$applicationVersion\n'
           'summary.txt：便于反馈的简短排查摘要，已按日志脱敏规则隐藏敏感内容。\n'
           'logs/：Flutter 错误与操作线索，按 UTC 时间和会话编号关联。\n'
-          'native/：Android Java/Kotlin 错误和系统退出信息。\n'
+          'native/：Android Java/Kotlin 异常，或 Windows 原生异常、WebView2 步骤和系统退出信息。\n'
           'diagnostics.json：脱敏运行状态；manifest.json：SHA-256 校验。\n'
           '仅保存本机最近 7 天、受容量上限约束的记录，不自动上传。\n'
           '不主动读取请求正文、请求头、用户下载文件或账号数据库；常见凭据、完整链接和绝对路径已脱敏。\n'
           '系统未提供堆栈时只记录退出原因；low_memory/user_requested 不等于代码崩溃。\n'
           'previousSessionInterrupted 仅说明上次没有正常关闭标记，不能据此认定崩溃。\n'
-          'Android 11 以下无系统退出历史；Windows 原生进程硬崩溃可能只有最后操作线索。\n'
+          'Android 11 以下无系统退出历史。Windows 尝试保存异常代码、模块与栈偏移；'
+          '绕过应用异常处理的崩溃，由 Windows Application Error 事件补充，系统未提供时无法补录。\n'
+          'Windows 原生 trace 最多 8 份、每份 256 KiB；异常最多 8 份、每份 16 KiB，不生成内存转储。\n'
+          'Windows trace 中 webview.process_failed 的 value1/2/3 分别为进程类型、原因和退出码；'
+          'cookie_read 仅记录请求编号、结果码和是否有返回值，不记录凭据内容。\n'
+          'hresult_failed 的 value1/2/3 为 HRESULT、源码行号和源码文件名 FNV-1a 编号，不含本机路径。\n'
           '旧版未启用此功能时的 Dart 堆栈无法补录。\n',
       'diagnostics.json': const JsonEncoder.withIndent('  ').convert(
         LogRedactor.value({
@@ -108,6 +119,7 @@ class DiagnosticBundle {
       ),
       for (final entry in log.exportFiles().entries)
         'logs/${entry.key}': entry.value,
+      ...windowsDiagnosticTraces(native, log.clock()),
     };
     var index = 0;
     for (final report in native.list('reports').take(8)) {
@@ -121,6 +133,7 @@ class DiagnosticBundle {
       }
     }
     native.remove('reports');
+    native.remove('traces');
     files['native/system.json'] = const JsonEncoder.withIndent(
       '  ',
     ).convert(LogRedactor.value(native));

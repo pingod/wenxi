@@ -3,11 +3,11 @@
 package bt
 
 import (
+	"github.com/GopeedLab/gopeed/internal/outputfile"
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/storage"
 	"io"
 	"log"
-	"os"
 )
 
 type filePieceImpl struct {
@@ -35,7 +35,7 @@ func (fs *filePieceImpl) Completion() storage.Completion {
 	if c.Complete {
 		// If it's allegedly complete, check that its constituent files have the necessary length.
 		for _, fi := range extentCompleteRequiredLengths(fs.p.Info, fs.p.Offset(), fs.p.Length()) {
-			s, err := os.Stat(fs.files[fi.fileIndex].path)
+			s, err := outputfile.Stat(fs.files[fi.fileIndex].path)
 			if err != nil || s.Size() < fi.length {
 				verified = false
 				break

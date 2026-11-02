@@ -1,0 +1,134 @@
+[
+  {
+    "package": {
+      "schema": 1,
+      "id": "public_json_example",
+      "name": "公开 JSON 示例",
+      "requires": {
+        "source": 1,
+        "javascript": 1,
+        "http": 1
+      },
+      "entry": "main.js",
+      "match": [
+        {
+          "host": "api.github.com",
+          "pathPrefix": "/repos/quickjs-ng/quickjs"
+        }
+      ],
+      "permissions": {
+        "hosts": [
+          "api.github.com"
+        ],
+        "downloadHosts": [
+          "codeload.github.com"
+        ],
+        "methods": [
+          "GET"
+        ],
+        "headers": [
+          "User-Agent"
+        ]
+      },
+      "operations": {
+        "resolve": "resolve",
+        "download": "download"
+      },
+      "modules": {
+        "main.js": "export async function resolve(input,api) {\n const response=await api.request({url:input.url,headers:{\"User-Agent\":\"AsterLink-source-test\"}});\n const repo=JSON.parse(response.text);\n if(repo.name!==\"quickjs\") throw new Error(\"Unexpected repository\");\n return {title:repo.name,items:[{id:\"v0.14.0\",name:\"quickjs-v0.14.0.zip\",kind:\"file\"}]};\n}\nexport function download(){return {urls:[\"https://codeload.github.com/quickjs-ng/quickjs/zip/refs/tags/v0.14.0\"]};}"
+      }
+    },
+    "input": {
+      "url": "https://api.github.com/repos/quickjs-ng/quickjs"
+    }
+  },
+  {
+    "package": {
+      "schema": 1,
+      "id": "public_html_example",
+      "name": "公开 HTML 示例",
+      "requires": {
+        "source": 1,
+        "javascript": 1,
+        "http": 1,
+        "html": 1,
+        "codec": 1
+      },
+      "entry": "main.js",
+      "match": [
+        {
+          "host": "www.rfc-editor.org",
+          "pathPrefix": "/rfc/"
+        }
+      ],
+      "permissions": {
+        "hosts": [
+          "www.rfc-editor.org",
+          "rfc-editor.org"
+        ],
+        "downloadHosts": [
+          "www.rfc-editor.org",
+          "rfc-editor.org"
+        ],
+        "methods": [
+          "GET"
+        ],
+        "headers": []
+      },
+      "operations": {
+        "resolve": "resolve",
+        "download": "download"
+      },
+      "modules": {
+        "main.js": "export async function resolve(input,api) {\n const response=await api.request({url:input.url,redirects:true});\n const page=await api.html(response.text,{links:{selector:'a[href=\"./rfc20\"]',attributes:[\"href\"],limit:1}});\n const items=[];\n for(const row of page.links) items.push({id:\"rfc20\",name:\"rfc20.txt\",kind:\"file\",url:await api.codec(\"urlResolve\",[input.url,row.href+\".txt\"])});\n return {title:\"RFC 20\",items};\n}\nexport function download(input){return {urls:[input.resource.url]};}"
+      }
+    },
+    "input": {
+      "url": "https://www.rfc-editor.org/rfc/rfc20.html"
+    }
+  },
+  {
+    "package": {
+      "schema": 1,
+      "id": "public_signed_example",
+      "name": "公开签名回显示例",
+      "requires": {
+        "source": 1,
+        "javascript": 1,
+        "http": 1,
+        "crypto": 1
+      },
+      "entry": "main.js",
+      "match": [
+        {
+          "host": "httpbingo.org",
+          "pathPrefix": "/anything"
+        }
+      ],
+      "permissions": {
+        "hosts": [
+          "httpbingo.org"
+        ],
+        "downloadHosts": [
+          "httpbingo.org"
+        ],
+        "methods": [
+          "POST",
+          "GET"
+        ],
+        "headers": []
+      },
+      "operations": {
+        "resolve": "resolve",
+        "download": "download"
+      },
+      "modules": {
+        "main.js": "import {signatureInput} from \"./sign.js\";\nexport async function resolve(input,api) {\n const sign=await api.crypto(\"hash\",[\"sha256\",signatureInput(input.url)]);\n const response=await api.request({url:input.url,method:\"POST\",body:{token:sign}});\n const data=JSON.parse(response.text);\n if(data.json.token!==sign)throw new Error(\"Signature echo mismatch\");\n return {items:[{id:\"test\",name:\"source-runtime.txt\",kind:\"file\",size:20}]};\n}\nexport function download(){return {urls:[\"https://httpbingo.org/base64/U291cmNlIHJ1bnRpbWUgdGVzdAo=\"]};}",
+        "sign.js": "export function signatureInput(text){let result=14695981039346656037n;for(const c of text){result=BigInt.asUintN(64,(result^BigInt(c.charCodeAt(0)))*1099511628211n);}return result.toString(16);}"
+      }
+    },
+    "input": {
+      "url": "https://httpbingo.org/anything"
+    }
+  }
+]

@@ -7,6 +7,7 @@ import 'package:asterlink/ui/browser_page.dart';
 import 'package:asterlink/ui/cloud_page.dart';
 import 'package:asterlink/ui/guangya_sms_login_page.dart';
 import 'package:asterlink/ui/login_page.dart';
+import 'package:asterlink/ui/wopan_sms_login_page.dart';
 import 'browser_test_support.dart';
 import 'token_cloud_support.dart';
 
@@ -47,6 +48,7 @@ void main() {
   for (final p in [
     CloudPlatform.aliyun,
     CloudPlatform.guangya,
+    CloudPlatform.wopan,
     CloudPlatform.ilanzou,
   ]) {
     testWidgets(
@@ -70,16 +72,13 @@ void main() {
           );
           await tester.tap(find.text(p.label));
           await tester.pumpAndSettle();
-          if (p == CloudPlatform.guangya) {
+          if (p == CloudPlatform.guangya || p == CloudPlatform.wopan) {
             expect(find.text('手机号验证码登录'), findsOneWidget);
             expect(
-              find.byKey(const ValueKey('guangya-sms-mobile')),
+              find.byKey(ValueKey('${p.name}-sms-mobile')),
               findsOneWidget,
             );
-            expect(
-              find.byKey(const ValueKey('guangya-sms-code')),
-              findsOneWidget,
-            );
+            expect(find.byKey(ValueKey('${p.name}-sms-code')), findsOneWidget);
           } else {
             expect(find.byType(NativePasswordLoginPage), findsOneWidget);
             expect(
@@ -123,11 +122,11 @@ void main() {
           await tester.tap(find.byKey(const ValueKey('manual-login-password')));
           await tester.pumpAndSettle();
           expect(
-            find.byType(
-              p == CloudPlatform.guangya
-                  ? GuangyaSmsLoginPage
-                  : NativePasswordLoginPage,
-            ),
+            find.byType(switch (p) {
+              CloudPlatform.guangya => GuangyaSmsLoginPage,
+              CloudPlatform.wopan => WopanSmsLoginPage,
+              _ => NativePasswordLoginPage,
+            }),
             findsOneWidget,
           );
           await tester.pageBack();

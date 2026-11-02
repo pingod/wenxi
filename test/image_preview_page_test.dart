@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
@@ -8,11 +9,15 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/app_services.dart';
+import 'package:asterlink/data/resource_pool_preview.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/models.dart';
+import 'package:asterlink/domain/resource_search.dart';
 import 'package:asterlink/download/transfer_http.dart';
 import 'package:asterlink/ui/preview_page.dart';
+import 'package:asterlink/ui/text_preview.dart';
 import 'browser_test_support.dart';
+import 'resource_search_test.dart' show SearchApiFixture;
 import 'support.dart';
 
 class _ImageConnector extends BrowserTestConnector {
@@ -30,6 +35,40 @@ class _ImageConnector extends BrowserTestConnector {
     expectedSize: bytes.length,
     profile: 'quark_route_2',
   );
+}
+
+class _PoolTextConnector extends _ImageConnector {
+  _PoolTextConnector(super.bytes);
+  BrowseSession? preparedSession;
+  CloudFile? preparedFile;
+  @override
+  Future<BrowseSession> openShare(
+    ParsedLink link,
+    Credential? credential,
+  ) async => const BrowseSession(
+    platform: CloudPlatform.quark,
+    mode: BrowseMode.share,
+    title: '开源文档',
+    rootId: 'newroot',
+  );
+
+  @override
+  Future<List<CloudFile>> list(
+    BrowseSession session,
+    String parentId,
+    Credential? credential,
+  ) async => [CloudFile(id: 'newfile', name: 'demo.py', size: bytes.length)];
+
+  @override
+  Future<DownloadSpec> download(
+    BrowseSession session,
+    CloudFile file,
+    Credential? credential,
+  ) {
+    preparedSession = session;
+    preparedFile = file;
+    return super.download(session, file, credential);
+  }
 }
 
 class _ImageTransfer extends TransferHttp {
@@ -51,7 +90,9 @@ class _ImageTransfer extends TransferHttp {
     }
     final match = RegExp(r'^bytes=(\d+)-(\d+)$').firstMatch(h['Range'] ?? '');
     final first = match == null ? 0 : int.parse(match[1]!);
-    final last = match == null ? bytes.length - 1 : int.parse(match[2]!);
+    final last = match == null
+        ? bytes.length - 1
+        : int.parse(match[2]!).clamp(0, bytes.length - 1);
     final headers = {
       'etag': ['"preview-v1"'],
       'content-length': ['${last - first + 1}'],
@@ -130,7 +171,9 @@ void main() {
       http: FakeHttp(),
       transferHttp: transfer,
     );
-    services.cloud.connectors[CloudPlatform.quark] = _ImageConnector(bytes);
+    services.cloud.connectors[CloudPlatform.quark] = _ImageConnector(
+      transfer.bytes,
+    );
     await services.initialize();
     addTearDown(() {
       transfer.dio.close(force: true);
@@ -196,6 +239,120 @@ void main() {
       },
     );
   }
+
+  for (final name in ['说明.txt.zip', 'demo.js', 'demo.py']) {
+    testWidgets('cloud preview reads $name inside the app', (tester) async {
+      const content = 'print("中文预览")\n';
+      final transfer = _ImageTransfer(Uint8List.fromList(utf8.encode(content)));
+      final services = await servicesFor(transfer, 1);
+      try {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: PreviewPage(
+              services,
+              const BrowseSession(
+                platform: CloudPlatform.quark,
+                mode: BrowseMode.personal,
+                title: 'test',
+                rootId: 'root',
+              ),
+              CloudFile(id: 'text', name: name, size: transfer.bytes.length),
+            ),
+          ),
+        );
+        for (
+          var i = 0;
+          i < 100 && find.byType(TextPreview).evaluate().isEmpty;
+          i++
+        ) {
+          await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 20)),
+          );
+          await tester.pump();
+        }
+        final preview = tester.widget<TextPreview>(find.byType(TextPreview));
+        expect(preview.document.text, content);
+        expect(preview.document.highlighted, !name.endsWith('.zip'));
+        expect(tester.takeException(), isNull);
+      } finally {
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+        await services.close();
+      }
+    });
+  }
+
+  testWidgets('pool preview loads text using the new share and new file ID', (
+    tester,
+  ) async {
+    const content = 'print("从转存后的分享读取")\n';
+    final transfer = _ImageTransfer(Uint8List.fromList(utf8.encode(content)));
+    final services = await servicesFor(transfer, 1);
+    final connector = _PoolTextConnector(transfer.bytes);
+    services.cloud.connectors[CloudPlatform.quark] = connector;
+    final api = SearchApiFixture((_, _) => const Stream.empty());
+    api.resolve = (hit, _, selection) async =>
+        ResourceSearchOpenResult.fromJson(hit, {
+          'mode': 'temp_share',
+          'transfer_scope': 'file',
+          'source_file_id': selection.fileId,
+          'url': 'https://pan.quark.cn/s/pooltext',
+          'password': 'nEw2',
+        });
+    final pool = ResourcePoolPreview(
+      source: ResourceSearchHit.fromRaw({
+        'title': '开源文档',
+        'url': 'https://pan.quark.cn/s/original',
+        'open_ticket': 'grant',
+      }),
+      api: api,
+      cloud: services.cloud,
+    );
+    try {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: PreviewPage(
+            services,
+            const BrowseSession(
+              platform: CloudPlatform.quark,
+              mode: BrowseMode.share,
+              title: '开源文档',
+              rootId: 'oldroot',
+            ),
+            CloudFile(
+              id: 'oldfile',
+              name: 'demo.py',
+              size: transfer.bytes.length,
+            ),
+            poolPreview: pool,
+          ),
+        ),
+      );
+      for (
+        var i = 0;
+        i < 100 && find.byType(TextPreview).evaluate().isEmpty;
+        i++
+      ) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 20)),
+        );
+        await tester.pump();
+      }
+      expect(api.openCalls, hasLength(1));
+      expect(connector.preparedSession!.sourceLink!.shareId, 'pooltext');
+      expect(connector.preparedSession!.sourceLink!.passcode, 'nEw2');
+      expect(connector.preparedFile!.id, 'newfile');
+      expect(
+        tester.widget<TextPreview>(find.byType(TextPreview)).document.text,
+        content,
+      );
+      expect(tester.takeException(), isNull);
+    } finally {
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+      await services.close();
+    }
+  });
 
   testWidgets('closing the image page cancels every unfinished range', (
     tester,

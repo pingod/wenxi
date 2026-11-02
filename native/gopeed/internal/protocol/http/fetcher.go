@@ -24,6 +24,7 @@ import (
 
 	"github.com/GopeedLab/gopeed/internal/controller"
 	"github.com/GopeedLab/gopeed/internal/fetcher"
+	"github.com/GopeedLab/gopeed/internal/outputfile"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	fhttp "github.com/GopeedLab/gopeed/pkg/protocol/http"
 	"github.com/GopeedLab/gopeed/pkg/util"
@@ -271,16 +272,29 @@ func (f *Fetcher) Create(opts *base.Options) error {
 
 func (f *Fetcher) Start() (err error) {
 	name := f.meta.SingleFilepath()
-	// if file not exist, create it, else open it
-	_, err = os.Stat(name)
-	if err != nil {
-		if os.IsNotExist(err) {
-			f.file, err = f.ctl.Touch(name, f.meta.Res.Size)
-		} else {
-			return
+	_, direct := outputfile.Path(name)
+	if !direct && f.meta.Req.Labels[outputfile.KeyLabel] != "" {
+		return errors.New("direct output lease unavailable")
+	}
+	if direct {
+		if f.connections == nil {
+			if err = outputfile.Reset(name, f.meta.Res.Size); err != nil {
+				return err
+			}
 		}
+		f.file, err = outputfile.OpenFile(name, os.O_RDWR, 0)
 	} else {
-		f.file, err = os.OpenFile(name, os.O_RDWR, os.ModeAppend)
+		// if file not exist, create it, else open it
+		_, err = os.Stat(name)
+		if err != nil {
+			if os.IsNotExist(err) {
+				f.file, err = f.ctl.Touch(name, f.meta.Res.Size)
+			} else {
+				return
+			}
+		} else {
+			f.file, err = os.OpenFile(name, os.O_RDWR, os.ModeAppend)
+		}
 	}
 	if err != nil {
 		return err
@@ -446,7 +460,7 @@ func (f *Fetcher) run(index int, ctx context.Context) (err error) {
 	// These providers return signed original-file URLs. Slow response headers
 	// on one request must not hold every other range in a redirect lookup queue.
 	profile := f.meta.Opts.Extra.(*fhttp.OptsExtra).ConnectionProfile
-	cacheRedirect := profile != "aliyun" && profile != "xunlei"
+	cacheRedirect := profile != "aliyun" && profile != "xunlei" && f.sourceNetworkPolicy() == nil
 	var (
 		client = f.buildClient()
 		buf    = make([]byte, 8192)
@@ -455,9 +469,9 @@ func (f *Fetcher) run(index int, ctx context.Context) (err error) {
 
 	downloadChunk := func() (err error) {
 		attempts := 0
-		retries := 3
+		retries := fhttp.DefaultRetryLimit
 		if configured := f.meta.Opts.Extra.(*fhttp.OptsExtra).RetryLimit; configured != nil {
-			retries = max(0, min(3, *configured))
+			retries = max(0, min(fhttp.MaxRetryLimit, *configured))
 		}
 		// A task's retry setting applies even if every connection is failing.
 		for {
@@ -573,6 +587,9 @@ func (f *Fetcher) run(index int, ctx context.Context) (err error) {
 						if profile == "xunlei" {
 							limitXunleiHost(host)
 						}
+						if profile == "guangya" {
+							guangyaHosts.limit(host)
+						}
 						deadline := time.Now().Add(retryDelay(attempts))
 						if failure.RetryAfter.After(deadline) {
 							deadline = failure.RetryAfter
@@ -628,7 +645,7 @@ func (f *Fetcher) run(index int, ctx context.Context) (err error) {
 			}()
 			if err != nil {
 				// If canceled, do not retry
-				if errors.Is(err, context.Canceled) {
+				if errors.Is(err, context.Canceled) || errors.Is(err, fhttp.ErrNetworkPolicy) {
 					return
 				}
 				var status *RequestError
@@ -730,7 +747,7 @@ func (f *Fetcher) helpOtherConnection(helper *connection) bool {
 
 func (f *Fetcher) buildRequest(ctx context.Context, req *base.Request) (httpReq *http.Request, err error) {
 	var reqUrl string
-	if f.redirectURL != "" {
+	if f.redirectURL != "" && f.sourceNetworkPolicy() == nil {
 		reqUrl = f.redirectURL
 	} else {
 		reqUrl = req.URL
@@ -772,6 +789,11 @@ func (f *Fetcher) buildRequest(ctx context.Context, req *base.Request) (httpReq 
 		return
 	}
 	httpReq.Header = headers
+	if policy := f.sourceNetworkPolicy(); policy != nil {
+		if err = policy.CheckURL(httpReq.URL); err != nil {
+			return nil, err
+		}
+	}
 	// Override Host header
 	if host := headers.Get(base.HttpHeaderHost); host != "" {
 		httpReq.Host = host
@@ -831,6 +853,9 @@ func (f *Fetcher) buildClient() *http.Client {
 		},
 	}
 	// Cookie handle
+	if policy := f.sourceNetworkPolicy(); policy != nil {
+		return sourceClient(transport, policy)
+	}
 	jar, _ := cookiejar.New(nil)
 	return &http.Client{
 		Transport: transport,

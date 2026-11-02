@@ -471,6 +471,34 @@ void _failureAndCleanupTests() {
   });
 
   test(
+    'A cleanup delete timeout is accepted when the folder is already gone',
+    () async {
+      final fixture = _Fixture();
+      await fixture.login();
+      final spec = await fixture.repository.prepare(
+        fixture.share,
+        fixture.file,
+      );
+      await fixture.outbox.release(spec.cleanup);
+      await fixture.outbox.ready(spec.cleanup);
+      fixture.intercept = (request) {
+        if (request.uri.path == '/drive/v1/files:batchDelete') {
+          return jsonResponse({
+            'error': 'not_found',
+            'error_description': '文件不存在',
+          }, 404);
+        }
+        if (request.method == 'GET' && request.uri.path == '/drive/v1/files') {
+          return jsonResponse({'files': []});
+        }
+        return null;
+      };
+      await fixture.outbox.drain();
+      expect(fixture.outbox.pendingCount, 0);
+    },
+  );
+
+  test(
     'Old HTTP cleanup records keep their original identity and still work',
     () async {
       final fixture = _Fixture();

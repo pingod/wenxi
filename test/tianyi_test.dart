@@ -132,6 +132,7 @@ class _Transfer {
   String folderName = '';
   final pollCounts = <String, int>{};
   bool wrongSize = false, wrongHash = false, empty = false;
+  bool shareDirect = false;
   Json? completedTask;
   FutureOr<HttpResult?> Function(RecordedRequest)? override;
   Future<void> initialize() => vault.putCredential(_platform, _credential());
@@ -186,10 +187,19 @@ class _Transfer {
           },
         ]);
       case '/api/open/file/getFileDownloadUrl.action':
+        if (p.containsKey('shareId')) {
+          expect(p['shareId'], '123456');
+          expect(p['fileId'], _file.id);
+          expect(p['dt'], '1');
+          expect(r.headers['Cookie'], contains('share_123456=a1B2'));
+          return shareDirect
+              ? _ok({'fileDownloadUrl': _signedUrl})
+              : jsonResponse({'res_code': 'FileTooLarge'}, 400);
+        }
         expect(
           p['fileId'],
           '901',
-          reason: 'download the actual personal ID, never the shared ID',
+          reason: 'transferred downloads use the verified personal ID',
         );
         expect(p['dt'], '1');
         expect(p.containsKey('shareId'), isFalse);
@@ -232,6 +242,26 @@ void main() {
   );
 
   group('Tianyi links and login routing', () {
+    test('Official copied links separate parenthesized access codes', () {
+      for (final url in [
+        'https://cloud.189.cn/web/share?code=TestShare123',
+        'https://cloud.189.cn/t/TestShare123',
+        'https://h5.cloud.189.cn/share.html#/t/TestShare123',
+        'https://h5.cloud.189.cn/share.html#/share?code=TestShare123',
+      ]) {
+        for (final suffix in ['（访问码：a1B2）', '(访问码:a1B2)']) {
+          final source = '$url$suffix';
+          final link = LinkParser.parse(source).single;
+          expect(link.kind, LinkKind.cloudShare, reason: source);
+          expect(link.platform, _platform);
+          expect(link.shareId, 'TestShare123');
+          expect(link.passcode, 'a1B2');
+          expect(link.url, url);
+          expect(link.source, source);
+        }
+      }
+    });
+
     test('Query code identifies the share and never becomes its password', () {
       for (final url in [
         'https://cloud.189.cn/web/share?code=TestShare123',
@@ -636,7 +666,8 @@ void main() {
               'fileId': '100',
               'isFolder': 'true',
               'shareId': '123456',
-              'needAccessCode': 0,
+              'shareType': 1,
+              'needAccessCode': 1,
             });
           }
           expect(r.uri.queryParameters['isFolder'], 'true');
@@ -767,6 +798,69 @@ void main() {
 
   group('Tianyi transfer, operations and cleanup', () {
     test(
+      'Share direct download works without creating a temporary folder or using account space',
+      () async {
+        final f = _Transfer()..shareDirect = true;
+        await f.initialize();
+        final spec = await f.repository.prepare(_share(), _file);
+        expect(spec.url, _signedUrl);
+        expect(spec.expectedSize, _file.size);
+        expect(spec.checksumValue, _md5);
+        expect(spec.cleanup, isNull);
+        expect(
+          spec.headers.keys.map((key) => key.toLowerCase()),
+          isNot(contains('cookie')),
+        );
+        expect(f.folderName, isEmpty);
+        expect(f.outbox.pendingCount, 0);
+        expect(f.http.calls, hasLength(1));
+      },
+    );
+
+    test(
+      'A rejected share access code never creates a transfer as fallback',
+      () async {
+        final f = _Transfer();
+        await f.initialize();
+        f.override = (r) => r.uri.path.endsWith('/getFileDownloadUrl.action')
+            ? jsonResponse({'res_code': 'ShareAccessCodeError'}, 400)
+            : null;
+        await expectLater(
+          f.repository.prepare(_share(), _file),
+          _message('访问码错误'),
+        );
+        expect(f.http.calls, hasLength(1));
+        expect(f.outbox.pendingCount, 0);
+      },
+    );
+
+    test(
+      'InsufficientStorageSpace during required transfer reports account capacity',
+      () async {
+        final f = _Transfer()
+          ..completedTask = {
+            'res_code': 0,
+            'taskStatus': 4,
+            'failedCount': 1,
+            'successedCount': 0,
+            'errorCode': 'InsufficientStorageSpace',
+          };
+        await f.initialize();
+        await expectLater(
+          f.repository.prepare(_share(), _file),
+          _message('网盘空间不足'),
+        );
+        expect(f.outbox.pendingCount, 1);
+        expect(
+          f.http.calls.where(
+            (r) => r.uri.path.endsWith('/createBatchTask.action'),
+          ),
+          hasLength(1),
+        );
+      },
+    );
+
+    test(
       'System directories cannot be renamed, moved, deleted or shared',
       () async {
         final http = FakeHttp(), credential = _credential();
@@ -808,7 +902,7 @@ void main() {
       },
     );
     test(
-      'Share download waits, resolves the personal ID and retains cleanup until release',
+      'Share size restriction falls back to transfer and retains cleanup until release',
       () async {
         final f = _Transfer();
         await f.initialize();
@@ -881,7 +975,7 @@ void main() {
       ),
     ]) {
       test(
-        '$name never produces a download URL and keeps cleanup retryable',
+        '$name during size-restricted transfer never produces a download URL and keeps cleanup retryable',
         () async {
           final f = _Transfer()..completedTask = status;
           await f.initialize();
@@ -890,7 +984,11 @@ void main() {
             throwsA(isA<AppException>()),
           );
           expect(
-            f.http.calls.any((r) => r.uri.path.contains('getFileDownloadUrl')),
+            f.http.calls.any(
+              (r) =>
+                  r.uri.path.contains('getFileDownloadUrl') &&
+                  !r.uri.queryParameters.containsKey('shareId'),
+            ),
             isFalse,
           );
           expect(f.outbox.pendingCount, 1);
@@ -923,7 +1021,11 @@ void main() {
             throwsA(isA<AppException>()),
           );
           expect(
-            f.http.calls.any((r) => r.uri.path.contains('getFileDownloadUrl')),
+            f.http.calls.any(
+              (r) =>
+                  r.uri.path.contains('getFileDownloadUrl') &&
+                  !r.uri.queryParameters.containsKey('shareId'),
+            ),
             isFalse,
           );
           expect(f.outbox.pendingCount, 1);
@@ -958,7 +1060,7 @@ void main() {
           scope.run(() => f.repository.prepare(_share(), _file)),
           _message('取消'),
         );
-        expect(f.http.calls, hasLength(1));
+        expect(f.http.calls, hasLength(2));
         expect(f.outbox.pendingCount, 1);
         expect(
           asJson(f.store.data.obj('cleanups').values.single).boolean('ready'),
@@ -981,7 +1083,7 @@ void main() {
           f.repository.prepare(_share(), _file),
           _message('账号已变化'),
         );
-        expect(f.http.calls, hasLength(1));
+        expect(f.http.calls, hasLength(2));
         final payload = asJson(
           f.store.data.obj('cleanups').values.single,
         ).obj('payload');

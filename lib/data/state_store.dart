@@ -25,7 +25,7 @@ class StateRecoveryRequired extends AppException {
   const StateRecoveryRequired(this.directory, this.cause)
     : super(
         cause == StateRecoveryCause.secureStorageUnavailable
-            ? '系统安全存储读取失败，可能是设备存储兼容或密钥访问异常。原文件已保留，请重试；仍无法进入时，可使用下方的恢复方式。'
+            ? '本地密钥读取失败，可能是设备存储兼容或密钥访问异常。原文件已保留，请重试；仍无法进入时，可使用下方的恢复方式。'
             : '本地账号和设置暂时无法读取，原文件已保留。可以尝试下方的恢复方式。',
       );
   final Directory directory;
@@ -60,7 +60,13 @@ class StateStore extends ChangeNotifier {
     localKey = testKey == null
         ? (localKey ?? LocalStateKey(directory, storage))
         : null;
-    final saved = await localKey?.read();
+    final saved = await localKey?.read(
+      readLegacyWithoutPointer:
+          await file.exists() ||
+          await backup.exists() ||
+          await pending.exists() ||
+          await localKey.canUnlock(),
+    );
     final keys = testKey != null ? [testKey] : saved!.keys;
     List<StateKeyFallback>? fallbackKeys;
     Future<List<StateKeyFallback>> fallbacks() async =>
@@ -163,8 +169,9 @@ class StateStore extends ChangeNotifier {
     if (!found && localKey != null && await localKey.canUnlock()) {
       throw StateRecoveryRequired(directory, StateRecoveryCause.unreadableData);
     }
-    if (recovered &&
-        (usedFallback != null || saved?.needsRepair(key) == true)) {
+    if (saved?.needsMigration == true ||
+        recovered &&
+            (usedFallback != null || saved?.needsRepair(key) == true)) {
       try {
         if (usedFallback != null) {
           await localKey!.useFallback(usedFallback);
@@ -274,6 +281,29 @@ class StateStore extends ChangeNotifier {
     draft[key] = value;
   });
   Future<void> flush() => _gate.run(() async {});
+
+  /// Protect the current device key with a password while leaving its system
+  /// storage and existing snapshots intact. This also works if Keystore became
+  /// unavailable after this process successfully unlocked the state.
+  Future<void> protectRecovery(String password) => _gate.run(() async {
+    final localKey = _localKey;
+    if (file == null || localKey == null) return;
+    final envelope = await localKey.prepareRecovery(_key, password);
+    final hasSnapshot =
+        await file!.exists() ||
+        await File('${file!.path}.tmp').exists() ||
+        await File('${file!.path}.bak').exists();
+    if (!hasSnapshot) {
+      // A first-launch export can precede the first state edit. Persist that
+      // empty state before publishing a recovery envelope for it.
+      await LocalStateKey.writeAtomic(
+        file!,
+        await compute(_encryptSnapshot, (_key, jsonEncode(_data))),
+      );
+    }
+    await validateRecoveryKey(localKey.directory, _key);
+    await localKey.installRecovery(envelope);
+  });
 
   /// Password recovery must authenticate the current data, never silently pick
   /// an older backup encrypted with a different key.

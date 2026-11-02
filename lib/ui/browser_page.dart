@@ -1,35 +1,45 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as p;
 import '../app_services.dart';
 import '../core/json.dart';
+import '../core/natural_name.dart';
 import '../core/operation_progress.dart';
 import '../data/http.dart';
+import '../data/resource_pool_preview.dart';
 import '../data/cloud_search.dart';
 import '../data/cloud_search_history.dart';
 import '../domain/cloud_search_options.dart';
 import '../domain/models.dart';
+import '../domain/aliyun_share.dart';
 import '../domain/baidu_share_route.dart';
+import '../domain/public_share_route.dart';
 import '../domain/github.dart';
 import '../domain/settings.dart';
 import '../domain/cloud_file_time.dart';
 import '../diagnostics/app_log.dart';
 import 'app_popup_menu.dart';
+import 'app_context_menu.dart';
 import 'account_cookie.dart';
 import 'account_info_page.dart';
 import 'cloud_accounts_page.dart';
 import 'common.dart';
 import 'baidu_download_prompt.dart';
 import 'baidu_share_route_picker.dart';
+import 'parser_site_picker.dart';
+import '../data/parser_rules/hub.dart';
 import 'cloud_thumbnail.dart';
 import 'cloud_search_page.dart';
 import '../upload/upload_task.dart';
 import 'login_page.dart';
 import 'preview_page.dart';
 import 'cloud_favorites_page.dart';
-import 'cleanup_progress.dart';
 import 'loading_indicator.dart';
+import 'cloud_upload_drop_target.dart';
+import 'uc_video_download.dart';
 
 class BrowserPage extends StatefulWidget {
   const BrowserPage(
@@ -43,8 +53,11 @@ class BrowserPage extends StatefulWidget {
     this.highlightedFileId,
     this.searchPage = false,
     this.popAtInitialDirectory = false,
+    this.onDestinationPicked,
+    this.poolPreview,
   });
   final AppServices services;
+  final ResourcePoolPreview? poolPreview;
   final BrowseSession session;
   final bool picking;
   final Set<String> excludedFolders;
@@ -53,6 +66,8 @@ class BrowserPage extends StatefulWidget {
   final String? highlightedFileId;
   final bool searchPage;
   final bool popAtInitialDirectory;
+  final void Function(BrowseSession, List<(String, String)>)?
+  onDestinationPicked;
   @override
   State<BrowserPage> createState() => _BrowserPageState();
 }
@@ -93,6 +108,20 @@ class _BrowserPageState extends State<BrowserPage> {
   CloudConnector get _provider =>
       widget.services.cloud.connector(session.platform);
   bool get _canUpload => _provider.canUploadTo(session, stack.last.$1);
+  bool get _canDropUpload =>
+      CloudUploadDropTarget.supported &&
+      !widget.picking &&
+      !widget.searchPage &&
+      !_searchResults &&
+      !loading &&
+      !changingAccount &&
+      !pickingUpload &&
+      error.isEmpty &&
+      _available &&
+      _canUpload &&
+      widget.services.cloud.sessionCredential(session) != null &&
+      accountRevision ==
+          widget.services.cloud.sessionCredential(session)?.updatedAt;
   bool get _canCreateFolder =>
       _provider.canCreateFolderIn(session, stack.last.$1);
   BrowserDisplaySettings get _display =>
@@ -105,6 +134,7 @@ class _BrowserPageState extends State<BrowserPage> {
   RequestScope? request;
   StreamSubscription<UploadTask>? _uploadChanges;
   Timer? _uploadRefresh;
+  (BrowseSession, List<(String, String)>)? _pickedDestination;
   late bool _available = widget.services.control.cloudEnabled(session.platform);
   @override
   void initState() {
@@ -129,6 +159,7 @@ class _BrowserPageState extends State<BrowserPage> {
     }
     widget.services.control.addListener(_controlChanged);
     widget.services.store.addListener(_profileChanged);
+    widget.services.parserRules.addListener(_parserRulesChanged);
     _uploadChanges = widget.services.uploads.completions.stream.listen((task) {
       if (!mounted ||
           task.session.platform != session.platform ||
@@ -151,6 +182,7 @@ class _BrowserPageState extends State<BrowserPage> {
 
   @override
   void dispose() {
+    widget.services.parserRules.removeListener(_parserRulesChanged);
     widget.services.control.removeListener(_controlChanged);
     widget.services.store.removeListener(_profileChanged);
     _uploadChanges?.cancel();
@@ -161,6 +193,10 @@ class _BrowserPageState extends State<BrowserPage> {
     _progress.dispose();
     search.dispose();
     super.dispose();
+  }
+
+  void _parserRulesChanged() {
+    if (mounted) setState(() {});
   }
 
   void _controlChanged() {
@@ -291,6 +327,7 @@ class _BrowserPageState extends State<BrowserPage> {
           session,
           currentTrail: List.of(stack),
           currentItems: loading || error.isNotEmpty ? null : List.of(items),
+          poolPreview: widget.poolPreview,
         ),
       ),
     );
@@ -311,6 +348,7 @@ class _BrowserPageState extends State<BrowserPage> {
           widget.services,
           session,
           initialTrail: trail,
+          poolPreview: widget.poolPreview,
           popAtInitialDirectory: true,
         ),
       ),
@@ -374,6 +412,7 @@ class _BrowserPageState extends State<BrowserPage> {
           widget.services,
           session,
           initialTrail: hit.trail,
+          poolPreview: widget.poolPreview,
           highlightedFileId: file.id,
           popAtInitialDirectory: widget.searchPage,
         ),
@@ -450,6 +489,19 @@ class _BrowserPageState extends State<BrowserPage> {
         error = errorText(e);
         items = [];
       });
+      if (e is ParserPasswordRequired) {
+        final grant = await showParserPasswordDialog(
+          context,
+          widget.services.parserRules,
+          e.siteId,
+          resolveUcPassword:
+              widget.services.cloud.publicPasswords.fromUcCommand,
+        );
+        if (grant != null && mounted && current == generation) {
+          _setParserPasswordGrant(grant);
+          await _load(preserveSelection: preserveSelection);
+        }
+      }
     }
   }
 
@@ -492,6 +544,10 @@ class _BrowserPageState extends State<BrowserPage> {
     final dates = sort == 'date'
         ? {for (final file in result) file: cloudFileDate(file.modifiedAt)}
         : <CloudFile, DateTime?>{};
+    final names = sort == 'size'
+        ? <CloudFile, NaturalName>{}
+        : {for (final file in result) file: NaturalName(file.name)};
+    final positions = {for (final (index, file) in result.indexed) file: index};
     result.sort((a, b) {
       if (a.isDirectory != b.isDirectory) return a.isDirectory ? -1 : 1;
       if (sort == 'date' && (dates[a] == null) != (dates[b] == null)) {
@@ -499,15 +555,33 @@ class _BrowserPageState extends State<BrowserPage> {
       }
       final order = switch (sort) {
         'size' => a.size.compareTo(b.size),
-        'date' => dates[a]?.compareTo(dates[b]!) ?? a.name.compareTo(b.name),
-        _ => a.name.toLowerCase().compareTo(b.name.toLowerCase()),
+        'date' =>
+          dates[a]?.compareTo(dates[b]!) ?? names[a]!.compareTo(names[b]!),
+        _ => names[a]!.compareTo(names[b]!),
       };
+      // Keep equivalent names (e.g. 第1集 and 第01集) in their source order.
+      if (order == 0) return positions[a]!.compareTo(positions[b]!);
       return ascending ? order : -order;
     });
     return result;
   }
 
   Future<void> _download(List<CloudFile> files) async {
+    if (PublicShareRoute.uses(session)) {
+      final ready = await withParserPassword<bool>(
+        context,
+        widget.services.parserRules,
+        (_) async {
+          await widget.services.cloud.ensureParserPassword(session);
+          return true;
+        },
+        initialGrant: session.meta('parserPasswordGrant'),
+        onGranted: _setParserPasswordGrant,
+        label: '正在准备解析密码…',
+        resolveUcPassword: widget.services.cloud.publicPasswords.fromUcCommand,
+      );
+      if (ready != true || !mounted) return;
+    }
     if (_searchResults) {
       final directories = files
           .where((file) => file.isDirectory)
@@ -567,6 +641,7 @@ class _BrowserPageState extends State<BrowserPage> {
   }
 
   Future<String?> _destination(List<CloudFile> files) async {
+    _pickedDestination = null;
     final personal = await busy(
       context,
       () => session.platform == CloudPlatform.github
@@ -598,6 +673,9 @@ class _BrowserPageState extends State<BrowserPage> {
           widget.services,
           personal,
           picking: true,
+          onDestinationPicked: (target, trail) {
+            _pickedDestination = (target, List.of(trail));
+          },
           excludedFolders: session.mode == BrowseMode.personal
               ? files
                     .where((f) => f.isDirectory)
@@ -649,6 +727,16 @@ class _BrowserPageState extends State<BrowserPage> {
       await _download(files);
       return;
     }
+    if (action == 'uc-playable') {
+      _checkAccount();
+      await downloadUcPlayable(
+        context,
+        widget.services,
+        session: session,
+        file: files.single,
+      );
+      return;
+    }
     if (action == 'preview') {
       _checkAccount();
       _deepSearch.stop();
@@ -659,6 +747,10 @@ class _BrowserPageState extends State<BrowserPage> {
             widget.services,
             session,
             files.first,
+            poolPreview: widget.poolPreview,
+            sourceFolders: _trailFor(
+              files.first,
+            ).skip(1).map((part) => part.$2).toList(),
             playlist: displayed,
             parentFolders: {
               for (final file in {...displayed, files.first})
@@ -731,7 +823,7 @@ class _BrowserPageState extends State<BrowserPage> {
           case 'save':
             await OperationProgress.step(
               OperationStage.transfer,
-              () => connector.saveShare(session, files, target!, c),
+              () => widget.services.cloud.saveShare(session, files, target!),
             );
           case 'share':
             return connector.createShare(session, files, options!, c);
@@ -762,6 +854,24 @@ class _BrowserPageState extends State<BrowserPage> {
         ),
       );
     } else if (result == true) {
+      final destination = _pickedDestination;
+      if (action == 'save' &&
+          AliyunShareLink.isFastTransfer(session) &&
+          destination != null) {
+        message(context, '快传转存完成，可在目标目录中浏览和下载');
+        await Navigator.push<void>(
+          context,
+          MaterialPageRoute(
+            builder: (_) => BrowserPage(
+              widget.services,
+              destination.$1,
+              initialTrail: destination.$2,
+              popAtInitialDirectory: true,
+            ),
+          ),
+        );
+        return;
+      }
       message(context, action == 'save' ? '转存完成' : '操作完成');
       await _refresh();
     }
@@ -812,6 +922,13 @@ class _BrowserPageState extends State<BrowserPage> {
                   leading: const Icon(CupertinoIcons.arrow_down_circle),
                   title: const Text('下载'),
                   onTap: () => Navigator.pop(context, 'download'),
+                ),
+              if (canDownloadUcPlayable(session, file))
+                ListTile(
+                  leading: const Icon(CupertinoIcons.film),
+                  title: const Text('下载可播放版本'),
+                  subtitle: const Text('先查看画质和大小，再确认下载'),
+                  onTap: () => Navigator.pop(context, 'uc-playable'),
                 ),
               if (!file.isDirectory)
                 ListTile(
@@ -869,6 +986,209 @@ class _BrowserPageState extends State<BrowserPage> {
     if (action != null && mounted) await _operate(action, [file]);
   }
 
+  List<CloudFile> _contextFiles(CloudFile file) =>
+      selected.contains(_fileKey(file)) && selected.length > 1
+      ? _sourceItems.where((f) => selected.contains(_fileKey(f))).toList()
+      : [file];
+
+  List<AppMenuAction<String>> _fileContextActions(CloudFile file) {
+    if (loading ||
+        changingAccount ||
+        !_available ||
+        !_sourceItems.any((f) => _fileKey(f) == _fileKey(file))) {
+      return [];
+    }
+    final files = _contextFiles(file);
+    final single = files.length == 1;
+    final count = single ? '' : '（${files.length} 项）';
+    final canSave =
+        session.mode == BrowseMode.share &&
+        session.platform != CloudPlatform.lanzou &&
+        session.platform != CloudPlatform.ctfile &&
+        session.platform.requiresAccount &&
+        session.platform.supportsSharing;
+    return [
+      if (single && file.isDirectory)
+        const AppMenuAction(
+          value: 'open',
+          label: '打开文件夹',
+          icon: CupertinoIcons.folder_open,
+        ),
+      if (single && !file.isDirectory)
+        const AppMenuAction(
+          value: 'preview',
+          label: '预览 / 文件详情',
+          icon: CupertinoIcons.eye,
+        ),
+      if (single && _hit(file) != null)
+        const AppMenuAction(
+          value: 'locate',
+          label: '打开所在文件夹',
+          icon: CupertinoIcons.folder,
+        ),
+      if (files.every((f) => _provider.canDownloadFile(session, f)))
+        AppMenuAction(
+          value: 'download',
+          label: '下载$count',
+          icon: CupertinoIcons.arrow_down_circle,
+        ),
+      if (single && canDownloadUcPlayable(session, file))
+        const AppMenuAction(
+          value: 'uc-playable',
+          label: '下载可播放版本',
+          icon: CupertinoIcons.film,
+        ),
+      if (single && !file.isDirectory)
+        const AppMenuAction(
+          value: 'copy',
+          label: '复制下载链接',
+          icon: CupertinoIcons.link,
+        ),
+      if (single) ...[
+        const AppMenuAction(
+          value: 'copy-name',
+          label: '复制文件名',
+          icon: CupertinoIcons.doc_on_doc,
+        ),
+        AppMenuAction(
+          value: 'favorite',
+          label: widget.services.favorites.contains(session, file)
+              ? '取消收藏'
+              : '收藏',
+          icon: CupertinoIcons.star,
+        ),
+      ],
+      if (canSave)
+        AppMenuAction(
+          value: 'save',
+          label: '转存到我的网盘$count',
+          icon: CupertinoIcons.folder_badge_plus,
+        )
+      else if (session.canManageFiles) ...[
+        if (single && _provider.canRenameFile(session, file))
+          const AppMenuAction(
+            value: 'rename',
+            label: '重命名',
+            icon: CupertinoIcons.pencil,
+          ),
+        if (files.every((f) => _provider.canMoveFile(session, f)))
+          AppMenuAction(
+            value: 'move',
+            label: '移动$count',
+            icon: CupertinoIcons.folder,
+          ),
+        if (session.platform.supportsSharing)
+          AppMenuAction(
+            value: 'share',
+            label: '创建分享$count',
+            icon: CupertinoIcons.share,
+          ),
+        if (files.every((f) => _provider.canDeleteFile(session, f)))
+          AppMenuAction(
+            value: 'delete',
+            label: '删除$count',
+            icon: CupertinoIcons.trash,
+            destructive: true,
+          ),
+      ],
+      AppMenuAction(
+        value: 'select',
+        label: selected.contains(_fileKey(file)) ? '取消选择此项' : '选择此项',
+        icon: CupertinoIcons.checkmark_circle,
+      ),
+      if (_selecting)
+        const AppMenuAction(
+          value: 'clear-selection',
+          label: '退出多选',
+          icon: CupertinoIcons.xmark_circle,
+        ),
+    ];
+  }
+
+  Future<void> _fileContextAction(CloudFile file, String action) async {
+    switch (action) {
+      case 'open':
+        if (AliyunShareLink.isFastTransfer(session)) {
+          await _operate('save', items);
+        } else {
+          _enter(file);
+        }
+      case 'copy-name':
+        await widget.services.copyText(file.name);
+        if (mounted) message(context, '文件名已复制');
+      case 'select':
+        _toggle(file);
+      case 'clear-selection':
+        _finishSelection();
+      default:
+        await _operate(action, _contextFiles(file));
+    }
+  }
+
+  Object _fileContextIdentity(CloudFile file) => (
+    session,
+    accountRevision,
+    stack.last.$1,
+    _fileKey(file),
+    selected.contains(_fileKey(file))
+        ? (selected.toList()..sort()).join('\u0000')
+        : '',
+  );
+
+  Widget _folderContextMenu(Widget child) => AppContextMenu<String>(
+    enabled: !widget.picking && !loading && !changingAccount,
+    identity: (session, accountRevision, stack.last.$1),
+    actions: () => [
+      const AppMenuAction(
+        value: 'refresh',
+        label: '刷新',
+        icon: CupertinoIcons.refresh,
+      ),
+      if (!widget.searchPage && !_searchResults && _available) ...[
+        if (_canUpload)
+          AppMenuAction(
+            value: 'upload',
+            label: '上传文件',
+            icon: CupertinoIcons.arrow_up_doc,
+            enabled: !pickingUpload,
+          ),
+        if (_canCreateFolder)
+          const AppMenuAction(
+            value: 'new-folder',
+            label: '新建文件夹',
+            icon: CupertinoIcons.folder_badge_plus,
+          ),
+      ],
+      if (displayed.isNotEmpty)
+        AppMenuAction(
+          value: 'select-all',
+          label: _allVisibleSelected(displayed) ? '取消全选' : '全选',
+          icon: CupertinoIcons.checkmark_circle,
+        ),
+      if (_selecting)
+        const AppMenuAction(
+          value: 'clear-selection',
+          label: '退出多选',
+          icon: CupertinoIcons.xmark_circle,
+        ),
+    ],
+    onSelected: (action) async {
+      switch (action) {
+        case 'refresh':
+          await _refresh();
+        case 'upload':
+          await _upload();
+        case 'new-folder':
+          await _newFolder();
+        case 'select-all':
+          _toggleAllVisible(displayed);
+        case 'clear-selection':
+          _finishSelection();
+      }
+    },
+    child: child,
+  );
+
   Future<void> _newFolder() async {
     if (!allowCloudAction(context, widget.services.control, session.platform)) {
       return;
@@ -893,36 +1213,59 @@ class _BrowserPageState extends State<BrowserPage> {
     if (result != null && mounted) await _refresh();
   }
 
-  Future<void> _upload() async {
+  Future<List<XFile>> _droppedUploadFiles(List<XFile> dropped) async {
+    final paths = <String>{}, files = <XFile>[];
+    for (final file in dropped) {
+      require(file.path.isNotEmpty && p.isAbsolute(file.path), '请从资源管理器拖入本地文件');
+      final type = await FileSystemEntity.type(file.path);
+      require(type != FileSystemEntityType.directory, '暂不支持拖拽文件夹，请选择文件夹内的文件');
+      require(type == FileSystemEntityType.file, '无法读取拖入的文件，请检查文件是否存在及访问权限');
+      if (paths.add(p.normalize(file.path).toLowerCase())) files.add(file);
+    }
+    return files;
+  }
+
+  Future<void> _upload({List<XFile>? droppedFiles}) async {
+    if (droppedFiles != null &&
+        (!_canDropUpload || !(ModalRoute.isCurrentOf(context) ?? true))) {
+      return;
+    }
     if (pickingUpload || !_canUpload) return;
     if (!allowCloudAction(context, widget.services.control, session.platform)) {
       return;
     }
-    final parent = stack.last.$1, activeSession = session;
+    final (parent, folderName) = stack.last;
+    final activeSession = session;
     final revision = accountRevision;
+    final source = droppedFiles == null ? 'pick' : 'drop';
     setState(() => pickingUpload = true);
     try {
       _checkAccount();
       DiagnosticLog.event(
-        'upload.pick.start',
+        'upload.$source.start',
         fields: {'platform': activeSession.platform.key},
       );
-      final files = await busy(context, () async {
-        try {
-          return await openFiles();
-        } catch (error, stack) {
-          DiagnosticLog.error(
-            'upload.pick.failed',
-            error,
-            stack,
-            fields: {'platform': activeSession.platform.key},
-          );
-          throw const AppException('无法读取所选文件，请重新选择，并检查文件权限和可用空间');
-        }
-      }, label: '正在读取所选文件…');
+      final List<XFile>? files;
+      if (droppedFiles != null) {
+        files = await _droppedUploadFiles(droppedFiles);
+      } else {
+        files = await busy(context, () async {
+          try {
+            return await openFiles();
+          } catch (error, stack) {
+            DiagnosticLog.error(
+              'upload.pick.failed',
+              error,
+              stack,
+              fields: {'platform': activeSession.platform.key},
+            );
+            throw const AppException('无法读取所选文件，请重新选择，并检查文件权限和可用空间');
+          }
+        }, label: '正在读取所选文件…');
+      }
       if (!mounted || files == null || files.isEmpty) return;
       DiagnosticLog.event(
-        'upload.pick.ready',
+        'upload.$source.ready',
         fields: {'platform': activeSession.platform.key, 'count': files.length},
       );
       if (!identical(session, activeSession) || accountRevision != revision) {
@@ -932,7 +1275,7 @@ class _BrowserPageState extends State<BrowserPage> {
       final ids = await widget.services.uploads.enqueue(
         activeSession,
         parent,
-        stack.last.$2,
+        folderName,
         files,
       );
       if (mounted && ids.isNotEmpty) {
@@ -1085,6 +1428,10 @@ class _BrowserPageState extends State<BrowserPage> {
         return widget.services.cloud.share(
           link!,
           baiduRoute: BaiduShareRoute.fromSession(previous),
+          parserSiteId: previous.meta('parserSiteId').isEmpty
+              ? null
+              : previous.meta('parserSiteId'),
+          parserPasswordGrant: previous.meta('parserPasswordGrant'),
         );
       }
       return keepSpace
@@ -1122,13 +1469,25 @@ class _BrowserPageState extends State<BrowserPage> {
     }
   }
 
-  Future<void> _switchBaiduRoute(BaiduShareRoute route) async {
-    if (changingAccount || route == BaiduShareRoute.fromSession(session)) {
+  Future<void> _switchBaiduRoute(
+    BaiduShareRoute route, {
+    String? parserSiteId,
+  }) async {
+    if (changingAccount ||
+        (route == BaiduShareRoute.publicParser) ==
+                PublicShareRoute.uses(session) &&
+            (parserSiteId == null ||
+                parserSiteId == session.meta('parserSiteId'))) {
       return;
     }
     setState(() => changingAccount = true);
     try {
+      if (route == BaiduShareRoute.publicParser) {
+        widget.services.parserRules.checkPublicParsing(session.platform);
+      }
       if (route == BaiduShareRoute.account &&
+          (session.platform == CloudPlatform.baidu ||
+              session.platform.shareRequiresAccount) &&
           widget.services.cloud.sessionCredential(session) == null) {
         await _login();
         if (!mounted ||
@@ -1137,27 +1496,59 @@ class _BrowserPageState extends State<BrowserPage> {
         }
       }
       final previous = session, link = session.sourceLink;
-      if (link == null) return;
-      final result = await busy<(BrowseSession, List<CloudFile>)>(
+      if (link == null || !mounted) return;
+      if (route == BaiduShareRoute.publicParser && parserSiteId == null) {
+        parserSiteId = (await widget.services.parserRules.forNewShare(
+          platform: session.platform,
+        ))?.id;
+      }
+      if (!mounted) return;
+      final result = await withParserPassword<(BrowseSession, List<CloudFile>)>(
         context,
-        () => widget.services.cloud.withSession(previous, () async {
+        widget.services.parserRules,
+        (grant) => widget.services.cloud.withSession(previous, () async {
           _checkAccount();
           final next = await widget.services.cloud.share(
             link,
             baiduRoute: route,
+            parserSiteId: parserSiteId,
+            parserPasswordGrant: grant,
           );
           final files = await widget.services.cloud.list(next, next.rootId);
           _checkAccount();
           return (next, files);
         }),
         label: '正在切换解析方式…',
+        resolveUcPassword: widget.services.cloud.publicPasswords.fromUcCommand,
       );
       if (result != null && mounted && session == previous) {
+        if (session.platform != CloudPlatform.baidu) {
+          await widget.services.parserRules.preferPublic(
+            session.platform,
+            route == BaiduShareRoute.publicParser,
+          );
+          if (!mounted) return;
+        }
         await _replaceSession(result.$1, initialItems: result.$2);
       }
+    } catch (error) {
+      if (mounted) message(context, errorText(error));
     } finally {
       if (mounted) setState(() => changingAccount = false);
     }
+  }
+
+  void _setParserPasswordGrant(String grant) {
+    setState(
+      () => session = BrowseSession(
+        platform: session.platform,
+        mode: session.mode,
+        title: session.title,
+        rootId: session.rootId,
+        sourceLink: session.sourceLink,
+        metadata: {...session.metadata, 'parserPasswordGrant': grant},
+      ),
+    );
   }
 
   Future<void> _login() async {
@@ -1500,6 +1891,8 @@ class _BrowserPageState extends State<BrowserPage> {
   void _open(CloudFile file) {
     if (_selecting && !widget.picking) {
       _toggle(file);
+    } else if (AliyunShareLink.isFastTransfer(session)) {
+      _operate('save', items);
     } else if (file.isDirectory) {
       _enter(file);
     } else {
@@ -1508,6 +1901,10 @@ class _BrowserPageState extends State<BrowserPage> {
   }
 
   Widget _fileList(List<CloudFile> files, BoxConstraints constraints) {
+    return _folderContextMenu(_fileListContent(files, constraints));
+  }
+
+  Widget _fileListContent(List<CloudFile> files, BoxConstraints constraints) {
     final key = ValueKey(
       '${session.platform.name}:${session.mode.name}:${session.familyId}:${session.personalSpaceId}:${stack.last.$1}:$view:${_searchResults ? _searchGeneration : 0}',
     );
@@ -1558,8 +1955,12 @@ class _BrowserPageState extends State<BrowserPage> {
 
   Widget _listRow(CloudFile file, bool wide) {
     final checked = selected.contains(_fileKey(file));
-    return GestureDetector(
-      onSecondaryTap: widget.picking ? null : () => _menu(file),
+    return AppContextMenu<String>(
+      key: ValueKey('file-context-${_fileKey(file)}'),
+      enabled: !widget.picking,
+      identity: _fileContextIdentity(file),
+      actions: () => _fileContextActions(file),
+      onSelected: (action) => _fileContextAction(file, action),
       child: ListTile(
         key: ValueKey('browser-file-${_fileKey(file)}'),
         dense: true,
@@ -1612,8 +2013,10 @@ class _BrowserPageState extends State<BrowserPage> {
     return Semantics(
       key: ValueKey('browser-file-${_fileKey(file)}'),
       selected: checked,
-      child: GestureDetector(
-        onSecondaryTap: () => _menu(file),
+      child: AppContextMenu<String>(
+        identity: _fileContextIdentity(file),
+        actions: () => _fileContextActions(file),
+        onSelected: (action) => _fileContextAction(file, action),
         child: Material(
           color: checked || file.id == highlight
               ? themeAccent(context).withValues(alpha: .07)
@@ -2311,6 +2714,73 @@ class _BrowserPageState extends State<BrowserPage> {
     );
   }
 
+  Widget _fastTransferContent() {
+    if (loading) return const Center(child: AppLoadingIndicator());
+    if (error.isNotEmpty || items.isEmpty) {
+      return EmptyPanel(
+        '暂时无法打开快传',
+        error.ifEmpty('此快传暂未返回可保存的文件'),
+        action: TextButton(onPressed: _load, child: const Text('重试')),
+      );
+    }
+    final loggedIn = widget.services.cloud.sessionCredential(session) != null;
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(24),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 480),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Icon(
+                CupertinoIcons.paperplane,
+                size: 44,
+                color: Theme.of(context).colorScheme.primary,
+              ),
+              const SizedBox(height: 16),
+              Text(
+                '阿里云盘快传',
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+              const SizedBox(height: 16),
+              Text(items.single.name, textAlign: TextAlign.center),
+              const SizedBox(height: 12),
+              Text(
+                '快传需整包转存到网盘后，才能查看完整文件、选择下载或播放。'
+                '转存完成后会自动打开你选择的目录。',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: secondary(context)),
+              ),
+              const SizedBox(height: 24),
+              FilledButton.icon(
+                key: const Key('aliyun-fast-transfer-save'),
+                icon: const Icon(CupertinoIcons.folder_badge_plus),
+                label: Text(loggedIn ? '转存全部文件' : '登录并转存全部文件'),
+                onPressed: changingAccount
+                    ? null
+                    : () async {
+                        if (!loggedIn) {
+                          await _accountAction('login');
+                          if (!mounted ||
+                              widget.services.cloud.sessionCredential(
+                                    session,
+                                  ) ==
+                                  null) {
+                            return;
+                          }
+                        }
+                        await _operate('save', List.of(items));
+                      },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (!widget.services.control.cloudEnabled(session.platform)) {
@@ -2451,256 +2921,323 @@ class _BrowserPageState extends State<BrowserPage> {
                 ],
               ),
         ],
-        child: Column(
-          children: [
-            if (!widget.picking &&
-                session.platform == CloudPlatform.baidu &&
-                session.mode == BrowseMode.share &&
-                session.sourceLink != null)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
-                child: Align(
-                  alignment: Alignment.centerLeft,
-                  child: BaiduShareRoutePicker(
-                    value: BaiduShareRoute.fromSession(session),
-                    onChanged: loading || changingAccount
-                        ? null
-                        : _switchBaiduRoute,
-                  ),
-                ),
-              ),
-            if (session.platform == CloudPlatform.github) _githubContext(),
-            if (!widget.picking &&
-                session.mode == BrowseMode.personal &&
-                session.platform.supportsFamilyCloud)
-              _spaceSelector(),
-            if (session.mode == BrowseMode.personal &&
-                session.platform.supportsPersonalSpaces)
-              Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 4,
-                ),
-                child: Align(
-                  alignment: Alignment.centerLeft,
-                  child: TextButton.icon(
-                    key: const ValueKey('personal-space-selector'),
-                    onPressed: changingAccount ? null : _choosePersonalSpace,
-                    icon: const Icon(CupertinoIcons.cloud, size: 18),
-                    label: Text(
-                      '${session.meta('driveName').ifEmpty('存储空间')} ▾',
-                    ),
-                  ),
-                ),
-              ),
-            CleanupProgress(widget.services.cleanups),
-            SizedBox(
-              height: 42,
-              child: ListView(
-                scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.symmetric(horizontal: 10),
+        child: AliyunShareLink.isFastTransfer(session)
+            ? _fastTransferContent()
+            : Column(
                 children: [
-                  for (var i = 0; i < stack.length; i++)
-                    Row(
-                      children: [
-                        if (i > 0)
-                          Icon(
-                            CupertinoIcons.chevron_right,
-                            size: 11,
-                            color: secondary(context),
-                          ),
-                        TextButton(
-                          onPressed: i == stack.length - 1
+                  if (!widget.picking &&
+                      (session.platform == CloudPlatform.baidu ||
+                          widget.services.parserRules.configured &&
+                              PublicShareRoute.platforms.contains(
+                                session.platform,
+                              )) &&
+                      (widget.services.parserRules.publicParsingAllowed(
+                            session.platform,
+                          ) ||
+                          PublicShareRoute.uses(session)) &&
+                      session.mode == BrowseMode.share &&
+                      session.sourceLink != null)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: BaiduShareRoutePicker(
+                          platform: session.platform,
+                          publicAllowed: widget.services.parserRules
+                              .publicParsingAllowed(session.platform),
+                          value: PublicShareRoute.uses(session)
+                              ? BaiduShareRoute.publicParser
+                              : BaiduShareRoute.account,
+                          onChanged: loading || changingAccount
                               ? null
-                              : () {
-                                  stack.removeRange(i + 1, stack.length);
-                                  _load();
-                                },
-                          child: Text(
-                            stack[i].$2,
-                            style: const TextStyle(fontSize: 12),
+                              : _switchBaiduRoute,
+                        ),
+                      ),
+                    ),
+                  if (!widget.picking &&
+                      session.mode == BrowseMode.share &&
+                      PublicShareRoute.uses(session))
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        child: ParserSitePicker(
+                          services: widget.services,
+                          platform: session.platform,
+                          siteId: session.meta('parserSiteId').isEmpty
+                              ? null
+                              : session.meta('parserSiteId'),
+                          enabled: !loading && !changingAccount,
+                          onPasswordReady: _setParserPasswordGrant,
+                          onSelected: (id) => _switchBaiduRoute(
+                            BaiduShareRoute.publicParser,
+                            parserSiteId: id,
                           ),
                         ),
-                      ],
+                      ),
                     ),
-                ],
-              ),
-            ),
-            _browserToolbar(files),
-            if (_includeSubfolders && search.text.trim().isNotEmpty)
-              _searchSummary(),
-            if (_selecting && !widget.picking)
-              Container(
-                color: fill(context),
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: Row(
-                    children: [
-                      TextButton(
-                        onPressed: files.isEmpty
-                            ? null
-                            : () => _toggleAllVisible(files),
-                        child: Text(_allVisibleSelected(files) ? '取消全选' : '全选'),
+                  if (session.platform == CloudPlatform.github)
+                    _githubContext(),
+                  if (!widget.picking &&
+                      session.mode == BrowseMode.personal &&
+                      session.platform.supportsFamilyCloud)
+                    _spaceSelector(),
+                  if (session.mode == BrowseMode.personal &&
+                      session.platform.supportsPersonalSpaces)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 4,
                       ),
-                      Text(
-                        '已选 ${selection.length} 项',
-                        style: const TextStyle(fontSize: 12),
-                      ),
-                      const SizedBox(width: 8),
-                      TextButton(
-                        onPressed:
-                            selection.isEmpty ||
-                                selection.any(
-                                  (f) => !_provider.canDownloadFile(session, f),
-                                )
-                            ? null
-                            : () => _operate('download', selection),
-                        child: const Text('下载'),
-                      ),
-                      if (!_searchResults &&
-                          session.mode == BrowseMode.share &&
-                          session.platform != CloudPlatform.lanzou &&
-                          session.platform != CloudPlatform.ctfile &&
-                          session.platform.requiresAccount &&
-                          session.platform.supportsSharing)
-                        TextButton(
-                          onPressed: selection.isEmpty
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton.icon(
+                          key: const ValueKey('personal-space-selector'),
+                          onPressed: changingAccount
                               ? null
-                              : () => _operate('save', selection),
-                          child: const Text('转存'),
-                        )
-                      else if (!_searchResults && session.canManageFiles) ...[
-                        if (selection.every(
-                          (f) => _provider.canMoveFile(session, f),
-                        ))
-                          TextButton(
-                            onPressed: selection.isEmpty
-                                ? null
-                                : () => _operate('move', selection),
-                            child: const Text('移动'),
+                              : _choosePersonalSpace,
+                          icon: const Icon(CupertinoIcons.cloud, size: 18),
+                          label: Text(
+                            '${session.meta('driveName').ifEmpty('存储空间')} ▾',
                           ),
-                        if (session.platform.supportsSharing)
-                          TextButton(
-                            onPressed: selection.isEmpty
-                                ? null
-                                : () => _operate('share', selection),
-                            child: const Text('分享'),
-                          ),
-                        if (selection.every(
-                          (f) => _provider.canDeleteFile(session, f),
-                        ))
-                          TextButton(
-                            onPressed: selection.isEmpty
-                                ? null
-                                : () => _operate('delete', selection),
-                            child: const Text(
-                              '删除',
-                              style: TextStyle(color: Colors.red),
-                            ),
-                          ),
-                      ],
-                    ],
-                  ),
-                ),
-              ),
-            Expanded(
-              child: loading
-                  ? Center(
-                      child: SingleChildScrollView(
-                        padding: const EdgeInsets.all(24),
-                        child: ConstrainedBox(
-                          constraints: const BoxConstraints(maxWidth: 360),
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
+                        ),
+                      ),
+                    ),
+                  SizedBox(
+                    height: 42,
+                    child: ListView(
+                      scrollDirection: Axis.horizontal,
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                      children: [
+                        for (var i = 0; i < stack.length; i++)
+                          Row(
                             children: [
-                              const AppLoadingIndicator(size: 40),
-                              const SizedBox(height: 16),
-                              ValueListenableBuilder<List<OperationStep>>(
-                                valueListenable: _progress,
-                                builder: (context, steps, _) {
-                                  final read = steps
-                                      .where(
-                                        (step) =>
-                                            step.stage ==
-                                            OperationStage.readFiles,
-                                      )
-                                      .lastOrNull;
-                                  final label = read?.waitingForRetry == true
-                                      ? '请求较频繁，正在等待重试…'
-                                      : '正在加载网盘文件…';
-                                  final count = read?.itemsRead;
-                                  return Text(
-                                    count == null
-                                        ? label
-                                        : '$label\n已读取 $count 项',
-                                    textAlign: TextAlign.center,
-                                    style: TextStyle(
-                                      fontSize: 14,
-                                      height: 1.5,
-                                      color: secondary(context),
-                                    ),
-                                  );
-                                },
+                              if (i > 0)
+                                Icon(
+                                  CupertinoIcons.chevron_right,
+                                  size: 11,
+                                  color: secondary(context),
+                                ),
+                              TextButton(
+                                onPressed: i == stack.length - 1
+                                    ? null
+                                    : () {
+                                        stack.removeRange(i + 1, stack.length);
+                                        _load();
+                                      },
+                                child: Text(
+                                  stack[i].$2,
+                                  style: const TextStyle(fontSize: 12),
+                                ),
                               ),
                             ],
                           ),
+                      ],
+                    ),
+                  ),
+                  _browserToolbar(files),
+                  if (_includeSubfolders && search.text.trim().isNotEmpty)
+                    _searchSummary(),
+                  if (_selecting && !widget.picking)
+                    Container(
+                      color: fill(context),
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: Row(
+                          children: [
+                            TextButton(
+                              onPressed: files.isEmpty
+                                  ? null
+                                  : () => _toggleAllVisible(files),
+                              child: Text(
+                                _allVisibleSelected(files) ? '取消全选' : '全选',
+                              ),
+                            ),
+                            Text(
+                              '已选 ${selection.length} 项',
+                              style: const TextStyle(fontSize: 12),
+                            ),
+                            const SizedBox(width: 8),
+                            TextButton(
+                              onPressed:
+                                  selection.isEmpty ||
+                                      selection.any(
+                                        (f) => !_provider.canDownloadFile(
+                                          session,
+                                          f,
+                                        ),
+                                      )
+                                  ? null
+                                  : () => _operate('download', selection),
+                              child: const Text('下载'),
+                            ),
+                            if (!_searchResults &&
+                                session.mode == BrowseMode.share &&
+                                session.platform != CloudPlatform.lanzou &&
+                                session.platform != CloudPlatform.ctfile &&
+                                session.platform.requiresAccount &&
+                                session.platform.supportsSharing)
+                              TextButton(
+                                onPressed: selection.isEmpty
+                                    ? null
+                                    : () => _operate('save', selection),
+                                child: const Text('转存'),
+                              )
+                            else if (!_searchResults &&
+                                session.canManageFiles) ...[
+                              if (selection.every(
+                                (f) => _provider.canMoveFile(session, f),
+                              ))
+                                TextButton(
+                                  onPressed: selection.isEmpty
+                                      ? null
+                                      : () => _operate('move', selection),
+                                  child: const Text('移动'),
+                                ),
+                              if (session.platform.supportsSharing)
+                                TextButton(
+                                  onPressed: selection.isEmpty
+                                      ? null
+                                      : () => _operate('share', selection),
+                                  child: const Text('分享'),
+                                ),
+                              if (selection.every(
+                                (f) => _provider.canDeleteFile(session, f),
+                              ))
+                                TextButton(
+                                  onPressed: selection.isEmpty
+                                      ? null
+                                      : () => _operate('delete', selection),
+                                  child: const Text(
+                                    '删除',
+                                    style: TextStyle(color: Colors.red),
+                                  ),
+                                ),
+                            ],
+                          ],
                         ),
                       ),
-                    )
-                  : error.isNotEmpty
-                  ? EmptyPanel(
-                      '文件列表读取失败',
-                      error,
-                      action: TextButton(
-                        onPressed: _load,
-                        child: const Text('重试'),
-                      ),
-                    )
-                  : files.isEmpty
-                  ? EmptyPanel(
-                      _searchResults
-                          ? _deepSearch.running
-                                ? '正在搜索子文件夹…'
-                                : '暂未找到匹配的文件'
-                          : search.text.isEmpty
-                          ? '文件夹为空'
-                          : '没有匹配的文件',
-                      _searchResults
-                          ? _deepSearch.phase == CloudSearchPhase.completed
-                                ? '试试其他文件名或关键词'
-                                : '结果可能不完整，可重新搜索或查看未能读取的文件夹'
-                          : widget.picking
-                          ? '可选择当前文件夹作为目标'
-                          : '下拉刷新文件列表',
-                    )
-                  : RefreshIndicator(
-                      onRefresh: _refresh,
-                      child: LayoutBuilder(
-                        builder: (context, constraints) =>
-                            _fileList(files, constraints),
+                    ),
+                  Expanded(
+                    child: CloudUploadDropTarget(
+                      enabled: _canDropUpload,
+                      folderName: stack.last.$2,
+                      onFilesDropped: (files) =>
+                          unawaited(_upload(droppedFiles: files)),
+                      child: loading
+                          ? Center(
+                              child: SingleChildScrollView(
+                                padding: const EdgeInsets.all(24),
+                                child: ConstrainedBox(
+                                  constraints: const BoxConstraints(
+                                    maxWidth: 360,
+                                  ),
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      const AppLoadingIndicator(size: 40),
+                                      const SizedBox(height: 16),
+                                      ValueListenableBuilder<
+                                        List<OperationStep>
+                                      >(
+                                        valueListenable: _progress,
+                                        builder: (context, steps, _) {
+                                          final read = steps
+                                              .where(
+                                                (step) =>
+                                                    step.stage ==
+                                                    OperationStage.readFiles,
+                                              )
+                                              .lastOrNull;
+                                          final label =
+                                              read?.waitingForRetry == true
+                                              ? '请求较频繁，正在等待重试…'
+                                              : '正在加载网盘文件…';
+                                          final count = read?.itemsRead;
+                                          return Text(
+                                            count == null
+                                                ? label
+                                                : '$label\n已读取 $count 项',
+                                            textAlign: TextAlign.center,
+                                            style: TextStyle(
+                                              fontSize: 14,
+                                              height: 1.5,
+                                              color: secondary(context),
+                                            ),
+                                          );
+                                        },
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            )
+                          : error.isNotEmpty
+                          ? EmptyPanel(
+                              '文件列表读取失败',
+                              error,
+                              action: TextButton(
+                                onPressed: _load,
+                                child: const Text('重试'),
+                              ),
+                            )
+                          : files.isEmpty
+                          ? _folderContextMenu(
+                              EmptyPanel(
+                                _searchResults
+                                    ? _deepSearch.running
+                                          ? '正在搜索子文件夹…'
+                                          : '暂未找到匹配的文件'
+                                    : search.text.isEmpty
+                                    ? '文件夹为空'
+                                    : '没有匹配的文件',
+                                _searchResults
+                                    ? _deepSearch.phase ==
+                                              CloudSearchPhase.completed
+                                          ? '试试其他文件名或关键词'
+                                          : '结果可能不完整，可重新搜索或查看未能读取的文件夹'
+                                    : widget.picking
+                                    ? '可选择当前文件夹作为目标'
+                                    : _canDropUpload
+                                    ? '将本地文件拖到这里上传，或点击右上角“+”'
+                                    : '下拉刷新文件列表',
+                              ),
+                            )
+                          : RefreshIndicator(
+                              onRefresh: _refresh,
+                              child: LayoutBuilder(
+                                builder: (context, constraints) =>
+                                    _fileList(files, constraints),
+                              ),
+                            ),
+                    ),
+                  ),
+                  if (widget.picking)
+                    Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: SizedBox(
+                        width: double.infinity,
+                        child: FilledButton(
+                          onPressed: loading || error.isNotEmpty
+                              ? null
+                              : () {
+                                  widget.onDestinationPicked?.call(
+                                    session,
+                                    List.of(stack),
+                                  );
+                                  Navigator.pop(
+                                    context,
+                                    widget.services.cloud
+                                        .connector(session.platform)
+                                        .destinationId(session, stack.last.$1),
+                                  );
+                                },
+                          child: Text('选择“${stack.last.$2}”'),
+                        ),
                       ),
                     ),
-            ),
-            if (widget.picking)
-              Padding(
-                padding: const EdgeInsets.all(16),
-                child: SizedBox(
-                  width: double.infinity,
-                  child: FilledButton(
-                    onPressed: loading || error.isNotEmpty
-                        ? null
-                        : () => Navigator.pop(
-                            context,
-                            widget.services.cloud
-                                .connector(session.platform)
-                                .destinationId(session, stack.last.$1),
-                          ),
-                    child: Text('选择“${stack.last.$2}”'),
-                  ),
-                ),
+                ],
               ),
-          ],
-        ),
       ),
     );
   }

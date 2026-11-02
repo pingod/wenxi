@@ -43,6 +43,12 @@ list(APPEND PLUGIN_SOURCES
   "flutter_inappwebview_windows_plugin.cpp"
   "flutter_inappwebview_windows_plugin.h"
   "utils/log.h"
+  "utils/webview_json.h"
+  "utils/javascript_reply.h"
+  "utils/webview_lifetime.h"
+  "utils/texture_release.h"
+  "utils/gpu_surface_frame.h"
+  "utils/native_diagnostics.h"
   "utils/strconv.h"
   "utils/map.h"
   "utils/vector.h"
@@ -191,7 +197,8 @@ function(FLUTTER_INAPPWEBVIEW_WINDOWS_APPLY_STANDARD_SETTINGS TARGET)
   target_compile_features(${TARGET} PUBLIC cxx_std_17)
   target_compile_options(${TARGET} PRIVATE /W4 /wd"4100")
   target_compile_options(${TARGET} PRIVATE /EHsc)
-  target_compile_definitions(${TARGET} PRIVATE "_HAS_EXCEPTIONS=0")
+  # Filesystem/COM callback error boundaries must also work in Release.
+  target_compile_definitions(${TARGET} PRIVATE "_HAS_EXCEPTIONS=1")
   target_compile_definitions(${TARGET} PRIVATE "$<$<CONFIG:Debug>:_DEBUG>")
 endfunction()
 flutter_inappwebview_windows_apply_standard_settings(${PLUGIN_NAME})

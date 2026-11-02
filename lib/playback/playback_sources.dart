@@ -147,7 +147,6 @@ PlaybackController cloudPlayback(
           source.headers,
           SubtitleFiles.maximumBytes,
         );
-        checkAccount();
         RequestScope.checkpoint();
         staged = await SubtitleFiles(
           Directory(p.join(services.cacheDirectory.path, 'subtitles')),

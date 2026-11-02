@@ -158,6 +158,7 @@ class DiagnosticLog extends ChangeNotifier {
     Object? error,
     StackTrace? stack,
     Map<String, Object?> fields = const {},
+    bool flush = false,
   }) {
     if (!_enabled || _closed || _writing) return;
     _writing = true;
@@ -223,7 +224,7 @@ class DiagnosticLog extends ChangeNotifier {
           _current!.writeAsBytesSync(
             bytes,
             mode: FileMode.append,
-            flush: level == 'error' || level == 'fatal',
+            flush: flush || level == 'error' || level == 'fatal',
           );
           storageError = null;
         } catch (_) {

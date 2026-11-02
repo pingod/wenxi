@@ -1,0 +1,18 @@
+name: asterlink_js
+description: Bounded QuickJS runtime for signed AsterLink source packages.
+version: 1.0.0
+publish_to: none
+environment:
+  sdk: '>=3.11.0 <4.0.0'
+  flutter: '>=3.35.0'
+dependencies:
+  flutter:
+    sdk: flutter
+  ffi: ^2.1.4
+flutter:
+  plugin:
+    platforms:
+      android:
+        ffiPlugin: true
+      windows:
+        ffiPlugin: true

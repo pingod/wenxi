@@ -6,6 +6,7 @@ import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/cloud_command_resolver.dart';
 import 'package:asterlink/data/http.dart';
 import 'package:asterlink/data/http_retry.dart';
+import 'package:asterlink/data/parser_rules/hub.dart';
 import 'package:asterlink/data/providers/baidu_public_parser.dart';
 import 'package:asterlink/data/providers/baidu_public_command.dart';
 import 'package:asterlink/data/providers/baidu_public_password.dart';
@@ -137,6 +138,25 @@ class _UcSource {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  test(
+    'Web UC command reads a guest text prefix and never consults the daily source',
+    () async {
+      final source = _UcSource()..command = '网页当前口令';
+      final passwords = source.passwords();
+      expect(await passwords.fromUcCommand(source.command), '测试密码');
+      expect(
+        source.requests.where((r) => r.uri.host == 'www.yuque.com'),
+        isEmpty,
+      );
+      source.prefix = '==新123中文ABC密码==\r\n第二行不是密码';
+      expect(await passwords.fromUcCommand(source.command), '新中文密码');
+      expect(
+        source.requests.where((r) => r.uri.host == 'utoken2.uc.cn').length,
+        2,
+      );
+      await passwords.close();
+    },
+  );
   late DateTime now;
   late StateStore state;
   late Vault vault;
@@ -149,7 +169,13 @@ void main() {
 
   setUp(() {
     now = DateTime.utc(2026, 10, 11, 15, 59, 59);
-    state = StateStore.memory();
+    state = StateStore.memory({
+      'credentials': {
+        CloudPlatform.uc.key: Credential('UC fixture', {
+          'primary': '__pus=private-account-cookie',
+        }, updatedAt: 1).toJson(),
+      },
+    });
     vault = Vault(state);
     fetches = 0;
     next = '今日密码';
@@ -161,6 +187,11 @@ void main() {
       store: vault,
       clock: () => now,
       fetch: () async {
+        fetches++;
+        if (fail) throw const AccountLoginRequired('private-account-cookie');
+        return next;
+      },
+      fetchAuthenticated: (_) async {
         fetches++;
         if (fail) throw const AccountLoginRequired('private-account-cookie');
         return next;
@@ -796,7 +827,7 @@ void main() {
     test(
       'parser password code 20016 at HTTP $status refreshes and retries once',
       () async {
-        final old = await passwords.get();
+        final old = await passwords.authenticated();
         next = '站点新密码';
         final fixture = BaiduPublicFixture();
         final http = FakeHttp(
@@ -850,7 +881,7 @@ void main() {
           isA<AppException>().having(
             (e) => e.message,
             'bounded failure',
-            contains('账号下载'),
+            contains('密码'),
           ),
         ),
       );
@@ -866,9 +897,9 @@ void main() {
   );
 
   test(
-    'parser tries UC refresh then Gitee once after site rejections',
+    'authenticated parser refreshes UC but never uses a Gitee backup',
     () async {
-      await passwords.get();
+      await passwords.authenticated();
       next = '主源新密码';
       backupValue = '备用最终密码';
       final fixture = BaiduPublicFixture();
@@ -877,24 +908,23 @@ void main() {
             ? fixture.respond(r)
             : jsonResponse({'code': 20016}, 400),
       );
-      await BaiduPublicParser(
-        http,
-        passwords: passwords,
-      ).openShare(fixture.link);
+      await expectLater(
+        BaiduPublicParser(http, passwords: passwords).openShare(fixture.link),
+        throwsA(isA<ParserPasswordRequired>()),
+      );
       expect(http.calls.map((r) => r.json.str('parse_password')), [
         '今日密码',
         '主源新密码',
-        '备用最终密码',
       ]);
       expect(fetches, 2);
-      expect(backupFetches, 1);
+      expect(backupFetches, 0);
     },
   );
 
   test(
-    'all three different passwords rejected stop and keep a retry delay',
+    'both authenticated passwords rejected stop and keep a retry delay',
     () async {
-      await passwords.get();
+      await passwords.authenticated();
       next = '主源新密码';
       backupValue = '备用最终密码';
       final http = FakeHttp((_) => jsonResponse({'code': 20016}, 400));
@@ -905,7 +935,7 @@ void main() {
           isA<AppException>().having(
             (e) => e.message,
             'bounded',
-            contains('仍未通过验证'),
+            contains('密码'),
           ),
         ),
       );
@@ -913,9 +943,9 @@ void main() {
         parser.openShare(BaiduPublicFixture().link),
         throwsA(isA<AppException>()),
       );
-      expect(http.calls, hasLength(3));
+      expect(http.calls, hasLength(2));
       expect(fetches, 2);
-      expect(backupFetches, 1);
+      expect(backupFetches, 0);
     },
   );
 
@@ -935,7 +965,7 @@ void main() {
         expect(http.calls, hasLength(1));
       }
       expect(fetches, 1);
-      expect((await passwords.get()).value, next);
+      expect((await passwords.authenticated()).value, next);
     },
   );
 }

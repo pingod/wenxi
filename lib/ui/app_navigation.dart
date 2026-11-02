@@ -1,9 +1,12 @@
+import 'dart:ui' as ui;
 import 'liquid_bottom_navigation.dart';
 import 'navigation_transfer_icon.dart';
 import '../download/navigation_transfers.dart';
+import '../domain/appearance.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'app_theme.dart' show AppAppearance;
 import 'common.dart';
 
 class AppNavigation extends StatelessWidget {
@@ -12,30 +15,50 @@ class AppNavigation extends StatelessWidget {
     required this.selectedIndex,
     required this.onSelected,
     this.rail = false,
+    this.hideResources = false,
     this.transfers,
   });
 
   final int selectedIndex;
   final ValueChanged<int> onSelected;
   final bool rail;
+  final bool hideResources;
   final ValueListenable<NavigationTransferStatus>? transfers;
 
   static const destinations = [
     ('解析', 'assets/navigation/parse.svg'),
+    ('资源', 'assets/navigation/search.svg'),
     ('网盘', 'assets/navigation/cloud.svg'),
     ('传输', 'assets/navigation/downloads.svg'),
     ('我的', 'assets/navigation/settings.svg'),
   ];
 
+  // Keep page IDs stable when a destination is hidden.
+  static List<int> visibleIndices({bool hideResources = false}) => [
+    0,
+    if (!hideResources) 1,
+    2,
+    3,
+    4,
+  ];
+
   @override
   Widget build(BuildContext context) {
+    final indices = visibleIndices(hideResources: hideResources);
+    final visibleSelection = indices.indexOf(selectedIndex);
+    final navigationSelection = visibleSelection < 0 ? 0 : visibleSelection;
     final compact = rail && MediaQuery.sizeOf(context).height < 560;
+    final appearance = AppAppearance.of(context);
+    final highContrast = MediaQuery.highContrastOf(context);
+    final colors = Theme.of(context).colorScheme;
     final active = themeAccent(context);
-    final inactive = Theme.of(context).colorScheme.onSurfaceVariant;
+    final inactive = highContrast || appearance.glassStyle == GlassStyle.clear
+        ? colors.onSurface
+        : colors.onSurfaceVariant;
 
     Widget item(int index) {
       final (label, asset) = destinations[index];
-      final selected = index == selectedIndex;
+      final selected = index == indices[navigationSelection];
       final color = selected ? active : inactive;
       void activate() => onSelected(index);
       return Semantics(
@@ -61,7 +84,7 @@ class AppNavigation extends StatelessWidget {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  if (index == 2)
+                  if (label == '传输')
                     NavigationTransferIcon(
                       asset: asset,
                       color: color,
@@ -99,49 +122,70 @@ class AppNavigation extends StatelessWidget {
     }
 
     if (rail) {
-      return Container(
-        width: 88,
-        decoration: BoxDecoration(
-          border: Border(right: BorderSide(color: border(context), width: .5)),
-        ),
-        child: SafeArea(
-          right: false,
-          child: Column(
-            children: [
-              Padding(
-                padding: EdgeInsets.symmetric(vertical: compact ? 12 : 24),
-                child: Image.asset(
-                  'assets/icons/app.png',
-                  width: 34,
-                  height: 34,
+      final solid = highContrast || appearance.glassStyle == GlassStyle.solid;
+      return ClipRect(
+        child: BackdropFilter(
+          enabled: !solid,
+          filter: ui.ImageFilter.blur(
+            sigmaX: appearance.blurSigma,
+            sigmaY: appearance.blurSigma,
+          ),
+          child: Material(
+            key: const Key('navigation-rail-surface'),
+            color: appearance.glassColor.withValues(
+              alpha: solid ? 1 : appearance.glassOpacity,
+            ),
+            child: Container(
+              width: 88,
+              decoration: BoxDecoration(
+                border: Border(
+                  right: BorderSide(color: border(context), width: .5),
                 ),
               ),
-              Expanded(
-                child: SingleChildScrollView(
-                  child: Column(
-                    children: [
-                      for (var i = 0; i < destinations.length; i++) item(i),
-                    ],
-                  ),
+              child: SafeArea(
+                right: false,
+                child: Column(
+                  children: [
+                    Padding(
+                      padding: EdgeInsets.symmetric(
+                        vertical: compact ? 12 : 24,
+                      ),
+                      child: Image.asset(
+                        'assets/icons/app.png',
+                        width: 34,
+                        height: 34,
+                      ),
+                    ),
+                    Expanded(
+                      child: SingleChildScrollView(
+                        child: Column(
+                          children: [for (final index in indices) item(index)],
+                        ),
+                      ),
+                    ),
+                    Padding(
+                      padding: EdgeInsets.only(bottom: compact ? 10 : 18),
+                      child: Text(
+                        '文析助手',
+                        style: TextStyle(fontSize: 10, color: inactive),
+                      ),
+                    ),
+                  ],
                 ),
               ),
-              Padding(
-                padding: EdgeInsets.only(bottom: compact ? 10 : 18),
-                child: Text(
-                  '文析助手',
-                  style: TextStyle(fontSize: 10, color: inactive),
-                ),
-              ),
-            ],
+            ),
           ),
         ),
       );
     }
 
     return LiquidBottomNavigation(
-      selectedIndex: selectedIndex,
-      onSelected: onSelected,
-      destinations: destinations,
+      key: ValueKey(hideResources),
+      selectedIndex: navigationSelection,
+      allowReselect: visibleSelection < 0,
+      onSelected: (index) => onSelected(indices[index]),
+      destinations: [for (final index in indices) destinations[index]],
+      destinationIds: indices,
       transfers: transfers,
     );
   }

@@ -11,6 +11,7 @@ import '../../diagnostics/app_log.dart';
 import '../../domain/auth.dart';
 import '../../domain/models.dart';
 import '../../domain/tianyi_web_login.dart';
+import '../../domain/tianyi_share.dart';
 import '../../domain/uploads.dart';
 import '../http.dart';
 import '../uploads/upload_io.dart';
@@ -155,6 +156,7 @@ class TianyiConnector extends CloudConnector {
     if (code == 'InvalidDeviceStatus') {
       throw const AccountLoginRequired('天翼要求设备安全验证，请在官方客户端完成验证后重新登录');
     }
+    if (code == 'FileTooLarge') throw const _TianyiFileTooLarge();
     final message = switch (code) {
       'AccessCodeError' ||
       'ShareAccessCodeError' ||
@@ -174,7 +176,9 @@ class TianyiConnector extends CloudConnector {
       'MemberInfoNotExist' ||
       'FamilyNotFound' ||
       'InvalidFamilyId' => '当前账号已无法访问该家庭云，请重新选择家庭',
-      'InsufficientSpace' || 'NotEnoughSpace' => '天翼网盘空间不足，无法转存',
+      'InsufficientStorageSpace' ||
+      'InsufficientSpace' ||
+      'NotEnoughSpace' => '天翼网盘空间不足，无法转存，请清理空间后重试',
       _ =>
         '天翼请求失败${RegExp(r'^[A-Za-z0-9_-]{1,64}$').hasMatch(code) ? '（$code）' : ''}',
     };
@@ -766,8 +770,7 @@ class TianyiConnector extends CloudConnector {
     );
     final folder = _flag(info['isFolder']);
     require(info.str('fileId').isNotEmpty && folder != null, '天翼未返回有效分享文件信息');
-    final needsCode =
-        _flag(info['needAccessCode']) ?? info.integer('shareType') == 3;
+    final needsCode = tianyiNeedsAccessCode(info);
     require(!needsCode || accessCode.isNotEmpty, '该天翼分享需要访问码，请补充后重新解析');
     var shareId = info.str('shareId');
     if (accessCode.isNotEmpty || shareId.isEmpty) {
@@ -1122,17 +1125,20 @@ class TianyiConnector extends CloudConnector {
     await _batch('SHARE_SAVE', files, target: target, share: s);
   });
 
-  Future<DownloadSpec> _personalDownload(
+  Future<DownloadSpec> _fileDownload(
     CloudFile file, {
     String familyId = '',
+    BrowseSession? share,
   }) async {
     final result = await _api(
       familyId.isEmpty
           ? 'open/file/getFileDownloadUrl'
           : 'open/family/file/getFileDownloadUrl',
+      shareCookie: share == null ? '' : _shareCookie(share),
       params: {
         'fileId': file.id,
         if (familyId.isEmpty) 'dt': 1,
+        if (share != null) 'shareId': share.meta('shareId'),
         if (familyId.isNotEmpty) ...{'familyId': familyId, 'type': 1},
       },
     );
@@ -1178,16 +1184,27 @@ class TianyiConnector extends CloudConnector {
           _family(s);
           return OperationProgress.step(
             OperationStage.downloadLink,
-            () => _personalDownload(f, familyId: s.familyId),
+            () => _fileDownload(f, familyId: s.familyId),
           );
         }
         if (s.mode == BrowseMode.personal) {
           return OperationProgress.step(
             OperationStage.downloadLink,
-            () => _personalDownload(f),
+            () => _fileDownload(f),
           );
         }
         _share(s);
+        try {
+          // The official share endpoint uses the original file ID and does
+          // not consume the receiving account's storage. Only an explicit
+          // size restriction falls back to the existing transfer flow.
+          return await OperationProgress.step(
+            OperationStage.downloadLink,
+            () => _fileDownload(f, share: s),
+          );
+        } on _TianyiFileTooLarge {
+          _checkpoint();
+        }
         final personal = await openPersonal(c!);
         final name = 'AsterLink临时转存_${newId()}';
         late DownloadCleanup cleanup;
@@ -1248,7 +1265,7 @@ class TianyiConnector extends CloudConnector {
         );
         return (await OperationProgress.step(
           OperationStage.downloadLink,
-          () => _personalDownload(actual),
+          () => _fileDownload(actual),
         )).copyWith(fileName: f.name, cleanup: cleanup);
       });
 
@@ -1303,4 +1320,8 @@ class _TianyiSession {
 
 class _TianyiSessionExpired extends AccountLoginRequired {
   const _TianyiSessionExpired() : super('天翼登录已失效，请重新登录');
+}
+
+class _TianyiFileTooLarge extends AppException {
+  const _TianyiFileTooLarge() : super('天翼限制此文件通过网页直链下载，请使用官方客户端下载');
 }

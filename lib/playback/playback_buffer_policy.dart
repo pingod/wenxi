@@ -1,37 +1,53 @@
 import 'dart:math' as math;
+import '../domain/playback.dart';
 
 /// Rebalances packet and Range caches without increasing their combined budget.
 /// Connection choices are ceilings; congestion reduces active concurrency.
 class PlaybackBufferPolicy {
   PlaybackBufferPolicy({required int connectionLimit})
-    : limit = connectionLimit.clamp(1, 32),
-      connections = math.min(4, connectionLimit.clamp(1, 32));
+    : limit = connectionLimit.clamp(
+        PlaybackPreferences.minConnections,
+        PlaybackPreferences.maxConnections,
+      ),
+      connections = math.min(
+        4,
+        connectionLimit.clamp(
+          PlaybackPreferences.minConnections,
+          PlaybackPreferences.maxConnections,
+        ),
+      );
 
   static const mib = 1024 * 1024;
-  static const totalBytes = 58 * mib;
-  static const backBytes = 2 * mib;
+  static const totalBytes = 96 * mib;
+  static const backBytes = 4 * mib;
+  static const forwardSeconds = 90;
+  static const readaheadSeconds = 90;
   int limit, connections;
-  int forwardBytes = 8 * mib;
+  int forwardBytes = 16 * mib;
   double bytesPerSecond = 0;
   Duration? _sampleAt, _holdUntil;
-  int _received = 0, _failures = 0, _healthySamples = 0;
-  double _previousThroughput = 0;
+  int _received = 0, _failures = 0;
+  int? _lastStatus;
 
   void setLimit(int value) {
-    limit = value.clamp(1, 32);
+    limit = value.clamp(
+      PlaybackPreferences.minConnections,
+      PlaybackPreferences.maxConnections,
+    );
     connections = math.min(connections, limit);
-    _healthySamples = 0;
   }
 
   int forwardTarget({
     required int size,
     required Duration duration,
     required double rate,
+    int seconds = forwardSeconds,
   }) {
     if (size <= 0 || duration <= Duration.zero) return forwardBytes;
     final average = size / (duration.inMilliseconds / 1000);
     final target =
-        (average * 8 * rate.clamp(.25, 4) / mib).ceil().clamp(8, 32) * mib;
+        (average * seconds * rate.clamp(.25, 4) / mib).ceil().clamp(16, 48) *
+        mib;
     // Only grow the packet cache within a session: mpv may keep old packets
     // briefly after a reduction, so immediately giving those bytes to the
     // proxy would exceed the combined memory budget.
@@ -39,6 +55,12 @@ class PlaybackBufferPolicy {
   }
 
   int proxyBytesFor(int forward) => totalBytes - backBytes - forward;
+
+  /// A short initial reserve, then a larger reserve after real underruns.
+  /// The caller excludes seeks and user pauses from the rebuffer count. mpv's
+  /// threshold is in media seconds, so preserve the reserve at faster speeds.
+  double resumeSeconds({required int rebufferCount, required double rate}) =>
+      (6 + 2 * rebufferCount.clamp(0, 3)) * rate.clamp(.25, 4);
 
   int observe({
     required Duration elapsed,
@@ -53,43 +75,34 @@ class PlaybackBufferPolicy {
     final previous = _sampleAt;
     final delta = receivedBytes - _received;
     final failed = failures > _failures;
+    final throttled = {429, 503}.contains(status) && status != _lastStatus;
     _sampleAt = elapsed;
     _received = receivedBytes;
     _failures = failures;
-    if (previous == null || elapsed <= previous) return connections;
-    final seconds = (elapsed - previous).inMilliseconds / 1000;
-    if (seconds <= 0) return connections;
-    final speed = math.max(0, delta) / seconds;
-    bytesPerSecond = bytesPerSecond == 0
-        ? speed
-        : bytesPerSecond * .65 + speed * .35;
-    if (!playing) {
-      _healthySamples = 0;
-      return connections;
+    _lastStatus = status;
+    if (previous != null && elapsed > previous) {
+      final seconds = (elapsed - previous).inMicroseconds / 1000000;
+      final speed = math.max(0, delta) / seconds;
+      bytesPerSecond = bytesPerSecond == 0
+          ? speed
+          : bytesPerSecond * .65 + speed * .35;
     }
-    if (failed || ({429, 503}.contains(status) && activeRequests > 0)) {
+    if (!playing) return connections;
+    if (failed || throttled && activeRequests > 0) {
       connections = math.max(1, connections ~/ 2);
       _holdUntil = elapsed + const Duration(seconds: 12);
-      _healthySamples = 0;
-    } else if (_holdUntil == null || elapsed >= _holdUntil!) {
-      if ((buffering || bufferedSeconds < 4) &&
+    } else if (previous != null &&
+        elapsed > previous &&
+        (_holdUntil == null || elapsed >= _holdUntil!)) {
+      // Grow before the cache is nearly empty. A flat receive rate is normal
+      // for a rate-limited drive, not evidence of congestion. Once buffered,
+      // native backpressure stops reads without discarding useful connections.
+      if ((buffering || bufferedSeconds < 30) &&
           activeRequests >= connections &&
           delta > 0) {
         connections = math.min(limit, connections + 2);
-        _healthySamples = 0;
-      } else if (bufferedSeconds >= 8 && delta > 0 && activeRequests > 0) {
-        _healthySamples++;
-        if (_healthySamples >= 3 &&
-            connections > 2 &&
-            speed <= _previousThroughput * 1.1) {
-          connections--;
-          _healthySamples = 0;
-        }
-      } else {
-        _healthySamples = 0;
       }
     }
-    _previousThroughput = speed;
     return connections;
   }
 }

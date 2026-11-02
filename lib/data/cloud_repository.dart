@@ -5,9 +5,13 @@ import '../diagnostics/app_log.dart';
 import '../download/download_request.dart';
 import '../domain/models.dart';
 import '../domain/baidu_share_route.dart';
+import '../domain/public_share_route.dart';
 import '../domain/uploads.dart';
 import '../domain/auth.dart';
 import '../domain/downloads.dart';
+import '../domain/uc_video_download.dart';
+import '../domain/download_retries.dart';
+import '../domain/github_acceleration.dart';
 import 'state_store.dart';
 import 'http.dart';
 import 'http_retry.dart';
@@ -15,6 +19,7 @@ import 'cleanup_outbox.dart';
 import 'providers/baidu.dart';
 import 'providers/baidu_public_parser.dart';
 import 'providers/baidu_public_password.dart';
+import 'parser_rules/hub.dart';
 import 'providers/ctfile.dart';
 import 'providers/feijipan.dart';
 import 'providers/pikpak.dart';
@@ -46,14 +51,29 @@ class CloudRepository {
     this.preparationRetries,
     this.retryWait,
     this.directShareDownloadEnabled,
+    GitHubAcceleration Function()? githubAcceleration,
+    ParserRuleHub? parserHub,
     DateTime Function()? clock,
   }) : http = transport is RetryingJsonHttp
            ? transport
            : RetryingJsonHttp(transport) {
     final devices = XunleiDevices(vault);
-    publicPasswords = BaiduPublicPasswords(http, store: vault, clock: clock);
+    publicPasswords = BaiduPublicPasswords(
+      http,
+      store: vault,
+      clock: clock,
+      cleanups: cleanups,
+    );
+    publicParser = BaiduPublicParser(
+      http,
+      passwords: publicPasswords,
+      hub: parserHub,
+    );
     connectors = {
-      CloudPlatform.github: GitHubConnector(http),
+      CloudPlatform.github: GitHubConnector(
+        http,
+        acceleration: githubAcceleration,
+      ),
       CloudPlatform.pikpak: PikPakConnector(
         http,
         vault,
@@ -65,7 +85,7 @@ class CloudRepository {
         http,
         store: vault,
         stageCleanup: _stageCleanup,
-        publicParser: BaiduPublicParser(http, passwords: publicPasswords),
+        publicParser: publicParser,
       ),
       CloudPlatform.quark: QuarkConnector(
         http,
@@ -174,48 +194,85 @@ class CloudRepository {
               ).hasMatch(action.str('name')),
           '临时目录标识无效',
         );
+
+        // A delete request can reach the provider while its response is lost.
+        // Treat a subsequent not-found result as success, but keep failures
+        // for folders that still exist so a renamed or moved folder is never
+        // silently discarded.
+        Future<void> deleteOrAcceptMissing(
+          Future<void> Function() action,
+        ) async {
+          try {
+            await action();
+          } catch (error, stack) {
+            try {
+              final current = (await connector(platform).list(
+                session,
+                session.rootId,
+                account,
+              )).where((file) => file.id == id).firstOrNull;
+              if (current == null) return;
+            } catch (_) {
+              // Preserve the original deletion failure when verification is
+              // unavailable due to a transient network or account error.
+            }
+            Error.throwWithStackTrace(error, stack);
+          }
+        }
+
         if (platform == CloudPlatform.xunlei) {
           // Renew credentials at cleanup time; a download may outlive its tokens.
-          await (connector(platform) as XunleiConnector).deleteTemporaryFolder(
-            id,
-            credential(platform),
+          await deleteOrAcceptMissing(
+            () => (connector(platform) as XunleiConnector)
+                .deleteTemporaryFolder(id, credential(platform)),
           );
           return;
         }
         if (platform == CloudPlatform.pikpak) {
-          await (connector(platform) as PikPakConnector).deleteTemporaryFolder(
-            id,
-            action.str('name'),
-            credential(platform),
+          await deleteOrAcceptMissing(
+            () =>
+                (connector(platform) as PikPakConnector).deleteTemporaryFolder(
+                  id,
+                  action.str('name'),
+                  credential(platform),
+                ),
           );
           return;
         }
         if (platform == CloudPlatform.aliyun) {
-          await (connector(platform) as AliyunConnector).deleteTemporaryFolder(
-            session,
-            id,
-            action.str('name'),
-            credential(platform),
+          await deleteOrAcceptMissing(
+            () =>
+                (connector(platform) as AliyunConnector).deleteTemporaryFolder(
+                  session,
+                  id,
+                  action.str('name'),
+                  credential(platform),
+                ),
           );
           return;
         }
         if (platform == CloudPlatform.guangya) {
-          await (connector(platform) as GuangyaConnector).deleteTemporaryFolder(
-            session,
-            id,
-            action.str('name'),
-            credential(platform),
+          await deleteOrAcceptMissing(
+            () =>
+                (connector(platform) as GuangyaConnector).deleteTemporaryFolder(
+                  session,
+                  id,
+                  action.str('name'),
+                  credential(platform),
+                ),
           );
           return;
         }
-        await connector(platform).delete(session, [
-          CloudFile(
-            id: id,
-            name: action.str('name'),
-            isDirectory: true,
-            parentId: session.rootId,
-          ),
-        ], account);
+        await deleteOrAcceptMissing(
+          () => connector(platform).delete(session, [
+            CloudFile(
+              id: id,
+              name: action.str('name'),
+              isDirectory: true,
+              parentId: session.rootId,
+            ),
+          ], account),
+        );
       });
     };
   }
@@ -223,6 +280,7 @@ class CloudRepository {
   final CredentialStore vault;
   final CleanupOutbox cleanups;
   late final BaiduPublicPasswords publicPasswords;
+  late final BaiduPublicParser publicParser;
   final void Function(CloudPlatform)? checkAccess;
   final int Function()? preparationRetries;
   final Future<void> Function(Duration)? retryWait;
@@ -375,6 +433,8 @@ class CloudRepository {
   Future<BrowseSession> share(
     ParsedLink link, {
     BaiduShareRoute baiduRoute = BaiduShareRoute.publicParser,
+    String? parserSiteId,
+    String? parserPasswordGrant,
   }) async {
     final p = link.platform;
     require(p != null, '此链接不是支持的网盘分享');
@@ -385,8 +445,20 @@ class CloudRepository {
       final provider = connector(p);
       final result = await OperationProgress.step(
         OperationStage.verifyShare,
-        () => provider is BaiduConnector
-            ? provider.openShare(link, account, route: baiduRoute)
+        () => p != CloudPlatform.baidu && parserSiteId != null
+            ? publicParser.openShare(
+                link,
+                parserSiteId: parserSiteId,
+                passwordGrant: parserPasswordGrant,
+              )
+            : provider is BaiduConnector
+            ? provider.openShare(
+                link,
+                account,
+                route: baiduRoute,
+                parserSiteId: parserSiteId,
+                parserPasswordGrant: parserPasswordGrant,
+              )
             : provider.openShare(link, account),
       );
       ensureAvailable(p);
@@ -405,6 +477,18 @@ class CloudRepository {
     return result;
   }
 
+  Future<void> ensureParserPassword(BrowseSession session) async {
+    if (!PublicShareRoute.uses(session)) return;
+    final provider = connector(session.platform);
+    if (session.platform == CloudPlatform.baidu) {
+      if (provider is BaiduConnector) {
+        await provider.ensurePublicPassword(session);
+      }
+    } else {
+      await publicParser.ensurePassword(session);
+    }
+  }
+
   Future<List<CloudFile>> list(BrowseSession session, String parent) =>
       withSession(session, () async {
         ensureAvailable(session.platform);
@@ -413,7 +497,11 @@ class CloudRepository {
             : vault.credential(session.platform);
         final result = await OperationProgress.step(
           OperationStage.readFiles,
-          () => connector(session.platform).list(session, parent, account),
+          () =>
+              session.platform != CloudPlatform.baidu &&
+                  PublicShareRoute.uses(session)
+              ? publicParser.list(session, parent)
+              : connector(session.platform).list(session, parent, account),
         );
         ensureAvailable(session.platform);
         require(
@@ -427,6 +515,44 @@ class CloudRepository {
       session.platform == CloudPlatform.baidu
       ? file.token.ifEmpty(file.id)
       : file.id;
+
+  Future<void> saveShare(
+    BrowseSession session,
+    List<CloudFile> files,
+    String target,
+  ) => withSession(session, () async {
+    final provider = connector(session.platform),
+        account = credential(session.platform);
+    if (!PublicShareRoute.uses(session) ||
+        session.platform == CloudPlatform.baidu) {
+      return provider.saveShare(session, files, target, account);
+    }
+    final link = session.sourceLink;
+    require(link != null, '原分享信息缺失，请重新解析');
+    final native = await provider.openShare(link!, account);
+    final parents = <String, List<CloudFile>>{};
+    final selected = <CloudFile>[];
+    for (final file in files) {
+      final parent = file.parentId == session.rootId
+          ? native.rootId
+          : file.parentId;
+      final entries = parents[parent] ??= await provider.list(
+        native,
+        parent,
+        account,
+      );
+      final fresh = entries
+          .where((f) => f.id == file.id && f.isDirectory == file.isDirectory)
+          .firstOrNull;
+      require(
+        fresh != null && (file.size <= 0 || fresh.size == file.size),
+        '分享文件已变化，请切换常规解析后再转存',
+      );
+      selected.add(fresh!);
+    }
+    RequestScope.checkpoint();
+    await provider.saveShare(native, selected, target, account);
+  });
 
   Future<CloudFile> createFolder(
     BrowseSession session,
@@ -505,8 +631,8 @@ class CloudRepository {
           url: '',
           fileName: file.name,
           expectedSize: session.platform.exactFileSize ? file.size : 0,
-          profile: BaiduShareRoute.usesPublicParser(session)
-              ? BaiduShareRoute.publicDownloadProfile
+          profile: PublicShareRoute.uses(session)
+              ? PublicShareRoute.profile(session.platform)
               : null,
           checksumType: file.hashType,
           checksumValue: file.hashValue,
@@ -524,19 +650,34 @@ class CloudRepository {
   Future<DownloadSpec> preparePlayback(BrowseSession session, CloudFile file) =>
       _prepare(session, file, playback: true);
 
+  Future<DownloadSpec> prepareUcPlayable(
+    BrowseSession session,
+    CloudFile file,
+  ) => _prepare(session, file, playback: false, ucPlayable: true);
+
   Future<DownloadSpec> _prepare(
     BrowseSession session,
     CloudFile file, {
     required bool playback,
+    bool ucPlayable = false,
+    UcVideoDownload? ucVideo,
   }) => withSession(
     session,
-    () => _prepareBound(bindSession(session), file, playback: playback),
+    () => _prepareBound(
+      bindSession(session),
+      file,
+      playback: playback,
+      ucPlayable: ucPlayable,
+      ucVideo: ucVideo,
+    ),
   );
 
   Future<DownloadSpec> _prepareBound(
     BrowseSession session,
     CloudFile file, {
     required bool playback,
+    bool ucPlayable = false,
+    UcVideoDownload? ucVideo,
   }) async {
     ensureAvailable(session.platform);
     RequestScope.checkpoint();
@@ -551,9 +692,26 @@ class CloudRepository {
       () => runZoned(() async {
         try {
           final provider = connector(session.platform);
-          final result = await (playback
+          require(!ucPlayable || provider is UcConnector, '可播放版本下载仅支持 UC 网盘');
+          final result = await (ucPlayable
+              ? (provider as UcConnector).downloadPlayable(
+                  session,
+                  file,
+                  c,
+                  resolution: ucVideo?.resolution,
+                )
+              : session.platform != CloudPlatform.baidu &&
+                    PublicShareRoute.uses(session)
+              ? publicParser.download(session, file)
+              : playback
               ? provider.playback(session, file, c)
               : provider.download(session, file, c));
+          if (ucVideo != null) {
+            require(
+              ucVideo.sameAs(UcVideoDownload.fromSpec(result)!),
+              'UC 可播放版本的画质或大小已变化，无法续传，请重新创建下载任务',
+            );
+          }
           try {
             ensureAvailable(session.platform);
           } catch (_) {
@@ -568,10 +726,20 @@ class CloudRepository {
             await cleanups.ready(result.cleanup);
             throw const AppException('账号已变化，请重新打开文件列表');
           }
+          if (session.platform == CloudPlatform.uc && result.guestDownload ||
+              session.platform == CloudPlatform.quark &&
+                  result.cleanup == null) {
+            // Recovery can succeed without a temporary transfer after an
+            // account attempt staged one. Retry any remaining cleanup safely.
+            for (final cleanup in staged) {
+              await cleanups.ready(cleanup);
+            }
+          }
           cleanups.retain(result.cleanup);
           return result.copyWith(
             source: {
               ...DownloadOrigin(session, file, revision).toJson(),
+              if (ucPlayable) 'ucVideo': result.source!['ucVideo'],
               if (provider is BaiduConnector &&
                   result.source?['baiduTransfer'] != null)
                 'baiduTransfer': result.source!['baiduTransfer'],
@@ -616,7 +784,10 @@ class CloudRepository {
     }
 
     final scope = ReadRetryScope(
-      retries: context?.retries ?? preparationRetries?.call() ?? 3,
+      retries:
+          context?.retries ??
+          preparationRetries?.call() ??
+          defaultDownloadRetries,
       checkpoint: checkpoint,
       wait: retryWait ?? RequestScope.wait,
       onRetry: (attempt) async {
@@ -701,7 +872,18 @@ class CloudRepository {
             }
           }
           final restored = await restoreOrigin(origin);
-          return (await prepare(restored.session, restored.file)).copyWith(
+          final ucVideo = UcVideoDownload.fromSpec(previous);
+          require(
+            ucVideo == null || origin.session.platform == CloudPlatform.uc,
+            '下载来源与视频画质信息不一致',
+          );
+          return (await _prepare(
+            restored.session,
+            restored.file,
+            playback: false,
+            ucPlayable: ucVideo != null,
+            ucVideo: ucVideo,
+          )).copyWith(
             fileName: previous.fileName,
             relativePath: previous.relativePath,
           );
@@ -762,6 +944,10 @@ class CloudRepository {
       session = await share(
         link!,
         baiduRoute: BaiduShareRoute.fromSession(origin.session),
+        parserSiteId: origin.session.meta('parserSiteId').isEmpty
+            ? null
+            : origin.session.meta('parserSiteId'),
+        parserPasswordGrant: origin.session.meta('parserPasswordGrant'),
       );
     } else {
       session = await reopenSpace(origin.session);
@@ -784,7 +970,10 @@ class CloudRepository {
           platform == CloudPlatform.quark &&
               error.message.trimLeft().startsWith('文件没有被分享') ||
           platform == CloudPlatform.xunlei &&
-              error is XunleiShareParentUnavailable;
+              error is XunleiShareParentUnavailable ||
+          platform == CloudPlatform.guangya &&
+              error is GuangyaApiException &&
+              error.code == '143';
       final isRoot =
           parent == session.rootId ||
           platform == CloudPlatform.quark &&
@@ -799,9 +988,7 @@ class CloudRepository {
       }
       files = rootFiles;
       DiagnosticLog.event(
-        platform == CloudPlatform.quark
-            ? 'quark.share_parent_recovered'
-            : 'xunlei.share_parent_recovered',
+        '${platform.name}.share_parent_recovered',
         fields: {
           'ref': DiagnosticLog.reference(
             DownloadRequestContext.current?.id ?? origin.file.id,

@@ -32,17 +32,23 @@ class _Queue extends ChangeNotifier {
         flushes++;
         await pendingFlush?.future;
       },
-      shutdown: () async {
-        requests++;
-        if (fail) throw StateError('fake permission denial');
-      },
+      shutdown: () => _request(DownloadCompletionAction.shutdown),
+      hibernate: () => _request(DownloadCompletionAction.hibernate),
     );
   }
   late final DownloadShutdown shutdown;
   List<DownloadTask> tasks = [];
   bool busy = false, fail = false;
   int requests = 0, flushes = 0;
-  Completer<void>? pendingFlush;
+  final requestedActions = <DownloadCompletionAction>[];
+  Completer<void>? pendingFlush, pendingRequest;
+
+  Future<void> _request(DownloadCompletionAction action) async {
+    requests++;
+    requestedActions.add(action);
+    if (fail) throw StateError('fake permission denial');
+    await pendingRequest?.future;
+  }
 
   void update(List<DownloadTask> next, {bool busy = false}) {
     tasks = next;
@@ -204,6 +210,183 @@ void main() {
       expect(unsupported.shutdown.enabled, isFalse);
       unsupported.dispose();
     });
+  });
+
+  test(
+    'Selecting hibernation does not arm completed history or future sessions',
+    () {
+      fakeAsync((time) {
+        final queue = _Queue();
+        queue.update([_task('history', completed)]);
+        queue.shutdown.setAction(DownloadCompletionAction.hibernate);
+        expect(queue.shutdown.enabled, isFalse);
+        queue.shutdown.setEnabled(true);
+        time.elapse(const Duration(minutes: 5));
+        expect(queue.requestedActions, isEmpty);
+        expect(queue.shutdown.countingDown, isFalse);
+        queue.dispose();
+        final next = _Queue();
+        expect(next.shutdown.enabled, isFalse);
+        expect(next.shutdown.action, DownloadCompletionAction.shutdown);
+        next.dispose();
+      });
+    },
+  );
+
+  test(
+    'Hibernation waits for saved files and idle transfers, then runs once',
+    () {
+      fakeAsync((time) {
+        final queue = _Queue();
+        queue.shutdown.setAction(DownloadCompletionAction.hibernate);
+        queue.update([_task('a', running), _task('b', DownloadStatus.paused)]);
+        queue.shutdown.setEnabled(true);
+        queue.update([
+          _task('a', completed),
+          _task('b', DownloadStatus.failed),
+        ]);
+        time.elapse(const Duration(minutes: 2));
+        expect(queue.requestedActions, isEmpty);
+        queue.update([
+          _task('a', completed),
+          _task('b', completed, saved: false),
+        ]);
+        time.elapse(const Duration(minutes: 2));
+        expect(queue.requestedActions, isEmpty);
+        queue.update([
+          _task('a', completed),
+          _task('b', completed),
+        ], busy: true);
+        expect(queue.shutdown.countingDown, isFalse);
+        queue.update([_task('a', completed), _task('b', completed)]);
+        expect(queue.shutdown.detail, contains('60 秒后休眠'));
+        time.elapse(const Duration(seconds: 59));
+        expect(queue.requestedActions, isEmpty);
+        time.elapse(const Duration(seconds: 1));
+        expect(queue.flushes, 1);
+        expect(queue.requestedActions, [DownloadCompletionAction.hibernate]);
+        expect(queue.shutdown.detail, '已请求系统休眠');
+        expect(queue.shutdown.enabled, isFalse);
+        time.elapse(const Duration(minutes: 5));
+        expect(queue.requests, 1);
+        queue.dispose();
+      });
+    },
+  );
+
+  for (final action in DownloadCompletionAction.values) {
+    test('Changing to ${action.name} starts its own full countdown', () {
+      fakeAsync((time) {
+        final queue = _Queue();
+        queue.shutdown.setAction(
+          action == DownloadCompletionAction.hibernate
+              ? DownloadCompletionAction.shutdown
+              : DownloadCompletionAction.hibernate,
+        );
+        queue.update([_task('a', running)]);
+        queue.shutdown.setEnabled(true);
+        queue.update([_task('a', completed)]);
+        time.elapse(const Duration(seconds: 55));
+        queue.shutdown.setAction(action);
+        expect(queue.shutdown.remainingSeconds, 60);
+        time.elapse(const Duration(seconds: 59));
+        expect(queue.requestedActions, isEmpty);
+        time.elapse(const Duration(seconds: 1));
+        expect(queue.requestedActions, [action]);
+        queue.dispose();
+      });
+    });
+  }
+
+  test('Changing action during state flush cancels the old power request', () {
+    fakeAsync((time) {
+      final queue = _Queue()..pendingFlush = Completer<void>();
+      queue.update([_task('a', running)]);
+      queue.shutdown.setEnabled(true);
+      queue.update([_task('a', completed)]);
+      time.elapse(const Duration(seconds: 60));
+      expect(queue.flushes, 1);
+      queue.shutdown.setAction(DownloadCompletionAction.hibernate);
+      queue.pendingFlush!.complete();
+      time.flushMicrotasks();
+      expect(queue.requestedActions, isEmpty);
+      time.elapse(const Duration(seconds: 60));
+      expect(queue.flushes, 2);
+      expect(queue.requestedActions, [DownloadCompletionAction.hibernate]);
+      queue.dispose();
+    });
+  });
+
+  test(
+    'Hibernation denial disarms the action without shutting down or retrying',
+    () {
+      fakeAsync((time) {
+        final queue = _Queue()..fail = true;
+        queue.shutdown.setAction(DownloadCompletionAction.hibernate);
+        queue.update([_task('a', running)]);
+        queue.shutdown.setEnabled(true);
+        queue.update([_task('a', completed)]);
+        time.elapse(const Duration(seconds: 60));
+        expect(queue.requestedActions, [DownloadCompletionAction.hibernate]);
+        expect(queue.shutdown.detail, contains('休眠未成功'));
+        expect(queue.shutdown.detail, contains('已启用休眠'));
+        expect(queue.shutdown.enabled, isFalse);
+        expect(queue.shutdown.executing, isFalse);
+        queue.update([_task('a', completed)]);
+        time.elapse(const Duration(minutes: 5));
+        expect(queue.requests, 1);
+        queue.dispose();
+      });
+    },
+  );
+
+  test('An executing power request cannot change action or rearm', () {
+    fakeAsync((time) {
+      final queue = _Queue()..pendingRequest = Completer<void>();
+      queue.shutdown.setAction(DownloadCompletionAction.hibernate);
+      queue.update([_task('a', running)]);
+      queue.shutdown.setEnabled(true);
+      queue.update([_task('a', completed)]);
+      time.elapse(const Duration(seconds: 60));
+      expect(queue.shutdown.executing, isTrue);
+      queue.shutdown.setAction(DownloadCompletionAction.shutdown);
+      queue.shutdown.setEnabled(true);
+      expect(queue.shutdown.action, DownloadCompletionAction.hibernate);
+      expect(queue.shutdown.enabled, isFalse);
+      queue.pendingRequest!.complete();
+      time.flushMicrotasks();
+      time.elapse(const Duration(minutes: 5));
+      expect(queue.requestedActions, [DownloadCompletionAction.hibernate]);
+      expect(queue.shutdown.executing, isFalse);
+      queue.dispose();
+    });
+  });
+
+  testWidgets('Countdown follows hibernation selection and can be cancelled', (
+    tester,
+  ) async {
+    final queue = _Queue();
+    await tester.pumpWidget(
+      MaterialApp(home: Scaffold(body: DownloadShutdownPrompt(queue.shutdown))),
+    );
+    queue.update([_task('a', running)]);
+    queue.shutdown.setEnabled(true);
+    queue.update([_task('a', completed)]);
+    await tester.pumpAndSettle();
+    expect(find.text('下载完成，即将关机'), findsOneWidget);
+    queue.shutdown.setAction(DownloadCompletionAction.hibernate);
+    await tester.pumpAndSettle();
+    expect(find.text('下载完成，即将休眠'), findsOneWidget);
+    expect(find.textContaining('秒后进入休眠'), findsOneWidget);
+    expect(find.text('取消关机'), findsNothing);
+    await tester.tap(find.text('取消休眠'));
+    await tester.pumpAndSettle();
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(queue.shutdown.enabled, isFalse);
+    await tester.pump(const Duration(seconds: 90));
+    expect(queue.requestedActions, isEmpty);
+    await tester.pumpWidget(const SizedBox());
+    queue.dispose();
   });
 
   testWidgets('Countdown overlays other pages, cancellation keeps that page', (

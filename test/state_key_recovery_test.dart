@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/core/crypto_box.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/backup.dart';
+import 'package:asterlink/data/http.dart';
 import 'package:asterlink/data/startup_recovery.dart';
 import 'package:asterlink/data/state_key.dart';
 import 'package:asterlink/data/state_store.dart';
@@ -133,6 +134,26 @@ void main() {
   ).str('namespace');
 
   test(
+    'cancelling export during encryption never opens the save destination',
+    () async {
+      final encrypted = await local('state-v1.enc').readAsBytes();
+      final scope = RequestScope();
+      var saveCalled = false;
+      final export = scope.run(
+        () => BackupRepository(store).exportTo(password, (_) async {
+          saveCalled = true;
+          return true;
+        }),
+      );
+      scope.cancel();
+      await expectLater(export, throwsA(isA<AppException>()));
+      expect(saveCalled, isFalse);
+      expect(await local('state-v1.enc').readAsBytes(), encrypted);
+      expect(await local(LocalStateKey.recoveryName).exists(), isFalse);
+    },
+  );
+
+  test(
     'first launch persists credentials across repeated reopen without import',
     () async {
       final originalKey = storage.records[primary];
@@ -253,6 +274,154 @@ void main() {
         Vault(store).secret('flutter.gopeed.key'),
         'existing-engine-secret',
       );
+    },
+  );
+
+  test(
+    'successful export protects later edits without importing a backup',
+    () async {
+      final repository = BackupRepository(store);
+      final originalState = await local('state-v1.enc').readAsBytes();
+      final originalRecords = Map<String, String>.from(storage.records);
+      Uint8List? exported;
+      expect(await recovery().canUnlock(), isFalse);
+      expect(
+        await repository.exportTo(password, (bytes) async {
+          exported = bytes;
+          return true;
+        }),
+        isTrue,
+      );
+      expect(exported, isNotNull);
+      expect(await recovery().canUnlock(), isTrue);
+      expect(await local('state-v1.enc').readAsBytes(), originalState);
+      expect(storage.records, originalRecords);
+      final envelope = await local(LocalStateKey.recoveryName).readAsString();
+      expect(envelope, isNot(contains(password)));
+      expect(envelope, isNot(contains(originalRecords[primary]!)));
+      await store.put('tasks', [
+        {'id': 'created-after-export', 'done': 7654321},
+      ]);
+      await Vault(store).putCredential(
+        CloudPlatform.uc,
+        Credential('导出后新增', {'primary': 'cookie=after-export-fixture'}),
+      );
+      final latest = jsonEncode(store.data);
+      final latestState = await local('state-v1.enc').readAsBytes();
+      storage.records.clear();
+      await expectLater(reopen(), throwsA(isA<StateRecoveryRequired>()));
+      await recovery().unlock(password);
+      await reopen();
+      expect(jsonEncode(store.data), latest);
+      expect(await local('state-v1.enc').readAsBytes(), latestState);
+    },
+  );
+
+  test(
+    'cancelled or failed export cannot replace the recovery password',
+    () async {
+      final repository = BackupRepository(store);
+      expect(await repository.exportTo(password, (_) async => false), isFalse);
+      expect(await recovery().canUnlock(), isFalse);
+      await repository.exportTo(password, (_) async => true);
+      final envelope = await local(LocalStateKey.recoveryName).readAsBytes();
+      expect(
+        await repository.exportTo('cancelled-password', (_) async => false),
+        isFalse,
+      );
+      await expectLater(
+        repository.exportTo('failed-password', (_) async {
+          throw const FileSystemException('Fixture destination unavailable');
+        }),
+        throwsA(isA<FileSystemException>()),
+      );
+      expect(await local(LocalStateKey.recoveryName).readAsBytes(), envelope);
+      storage.records.clear();
+      await recovery().unlock(password);
+      await reopen();
+      expect(store.data.str('engineStorageGeneration'), 'existing-engine');
+    },
+  );
+
+  test(
+    'protection write failure preserves the prior password and saved backup',
+    () async {
+      final repository = BackupRepository(store);
+      await repository.exportTo(password, (_) async => true);
+      final envelope = await local(LocalStateKey.recoveryName).readAsBytes();
+      final state = await local('state-v1.enc').readAsBytes();
+      await Directory('${local(LocalStateKey.recoveryName).path}.tmp').create();
+      Uint8List? exported;
+      await expectLater(
+        repository.exportTo('next-password', (bytes) async {
+          exported = bytes;
+          return true;
+        }),
+        throwsA(
+          isA<AppException>().having(
+            (e) => e.message,
+            'message',
+            contains('备份文件已导出'),
+          ),
+        ),
+      );
+      final portable = StateStore.memory();
+      try {
+        await BackupRepository(portable).restore(exported!, 'next-password');
+      } finally {
+        portable.dispose();
+      }
+      expect(await local(LocalStateKey.recoveryName).readAsBytes(), envelope);
+      expect(await local('state-v1.enc').readAsBytes(), state);
+    },
+  );
+
+  test(
+    'unlocked process can establish recovery after system storage fails',
+    () async {
+      storage.denyWrites = true;
+      storage.blocked.add('legacy');
+      final originalState = await local('state-v1.enc').readAsBytes();
+      expect(
+        await BackupRepository(store).exportTo(password, (_) async => true),
+        isTrue,
+      );
+      expect(await local('state-v1.enc').readAsBytes(), originalState);
+      await expectLater(reopen(), throwsA(isA<StateRecoveryRequired>()));
+      storage.denyWrites = false;
+      await recovery().unlock(password);
+      await reopen();
+      expect(store.data.str('engineStorageGeneration'), 'existing-engine');
+    },
+  );
+
+  test(
+    'first-launch export persists an empty snapshot before enabling recovery',
+    () async {
+      final emptyDirectory = await Directory.systemTemp.createTemp(
+        'state-export-empty-',
+      );
+      final emptyStorage = _DeviceStorage({});
+      final empty = await StateStore.open(
+        emptyDirectory,
+        storage: emptyStorage,
+      );
+      try {
+        expect(
+          await File('${emptyDirectory.path}/state-v1.enc').exists(),
+          isFalse,
+        );
+        await BackupRepository(empty).exportTo(password, (_) async => true);
+        final reopened = await StateStore.open(
+          emptyDirectory,
+          storage: emptyStorage.restart(),
+        );
+        expect(reopened.data, empty.data);
+        reopened.dispose();
+      } finally {
+        empty.dispose();
+        await emptyDirectory.delete(recursive: true);
+      }
     },
   );
 

@@ -47,12 +47,26 @@ void main() {
         ('https://pan.baidu.com/s/1AbCd?pwd=%61%31B2', 'a1B2'),
         ('https://www.123pan.com/s/Abc-Def#q123', 'q123'),
         ('https://drive.uc.cn/s/Abcd#pwd=u321', 'u321'),
+        ('https://pan.quark.cn/s/Abcd?code=q123', 'q123'),
         ('https://yun.139.com/shareweb/#/w/i/Abc_ID?passcode=m123', 'm123'),
       ]) {
         expect(LinkParser.parse('$url 提取码：wrong').single.passcode, code);
       }
     },
   );
+  test('Tianyi share code is not an embedded extraction password', () {
+    final share = LinkParser.parse(
+      'https://cloud.189.cn/web/share?code=Ab1234',
+    ).single;
+    expect(share.platform, CloudPlatform.tianyi);
+    expect(share.shareId, 'Ab1234');
+    expect(share.passcode, isNull);
+
+    final protected = LinkParser.parse(
+      'https://cloud.189.cn/web/share?code=Ab1234&accessCode=aB12',
+    ).single;
+    expect(protected.passcode, 'aB12');
+  });
   test('Lanzou labels allow 1 to 12 characters; other clouds require four', () {
     for (final code in ['A', '123', 'a1B2', 'Ab1234567890']) {
       expect(

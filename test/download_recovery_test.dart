@@ -118,7 +118,7 @@ void main() {
         .create(recursive: true)
         .then((directory) => directory.createTemp('case-'));
     store = StateStore.memory({
-      'settings': {'retries': 3},
+      'settings': {'retries': 3, 'downloadRetryPolicy': 1},
     });
     files = FakeFiles(Directory(p.join(root.path, 'saved')));
   });
@@ -350,7 +350,7 @@ void main() {
       });
       final dio = Dio(BaseOptions(validateStatus: (_) => true));
       final native = DesktopGopeedTransport(
-        executable: File('native/bin/asterlink_gopeed.exe').absolute.path,
+        executable: gopeedTestExecutable(),
       );
       final current = makeManager(
         TransferHttp(client: dio),
@@ -411,7 +411,7 @@ void main() {
         } catch (_) {}
       });
       final native = DesktopGopeedTransport(
-        executable: File('native/bin/asterlink_gopeed.exe').absolute.path,
+        executable: gopeedTestExecutable(),
       );
       final current = makeEngine(native);
       Future<void> begin(String id) => current.begin({
@@ -444,9 +444,11 @@ void main() {
             .pause('first')
             .then((_) => pauseFirstFinished = true);
         try {
-          await Future.wait([slowPause, firstSnapshot, firstPause]).timeout(
-            const Duration(seconds: 3),
-          );
+          await Future.wait([
+            slowPause,
+            firstSnapshot,
+            firstPause,
+          ]).timeout(const Duration(seconds: 3));
           expect(release.isCompleted, isFalse);
           expect(pauseSlowFinished, isTrue);
           expect(snapshotFinished, isTrue);

@@ -122,8 +122,9 @@ class PlaybackController extends ChangeNotifier {
     RequestScope scope,
   )?
   readSubtitle;
-  List<PlaybackSubtitle> get availableSubtitles =>
-      sortSubtitles(current.name, subtitlesFor?.call(current) ?? const []);
+  List<PlaybackSubtitle> get availableSubtitles => sortSubtitles(current.name, {
+    ...(subtitlesFor?.call(current) ?? const []),
+  });
   String? get cloudSubtitleId => _selection?.cloudSubtitleId;
   bool subtitleLoading = false;
   RequestScope? _subtitleScope;

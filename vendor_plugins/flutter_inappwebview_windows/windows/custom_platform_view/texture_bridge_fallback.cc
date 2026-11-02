@@ -1,9 +1,11 @@
 #include "texture_bridge_fallback.h"
 
 #include <iostream>
+#include <new>
 
 #include "util/direct3d11.interop.h"
 #include "util/swizzle.h"
+#include "../utils/log.h"
 
 namespace flutter_inappwebview_plugin
 {
@@ -18,17 +20,20 @@ namespace flutter_inappwebview_plugin
     const std::lock_guard<std::mutex> lock(buffer_mutex_);
   }
 
-  void TextureBridgeFallback::ProcessFrame(
+  bool TextureBridgeFallback::ProcessFrame(
     winrt::com_ptr<ID3D11Texture2D> src_texture)
   {
+    const std::lock_guard<std::mutex> context_lock(graphics_context_->context_mutex());
     D3D11_TEXTURE2D_DESC desc;
     src_texture->GetDesc(&desc);
 
     const auto width = desc.Width;
     const auto height = desc.Height;
 
-    bool is_exact_size;
-    EnsureStagingTexture(width, height, is_exact_size);
+    bool is_exact_size = false;
+    if (!EnsureStagingTexture(width, height, is_exact_size)) {
+      return false;
+    }
 
     auto device_context = graphics_context_->d3d_device_context();
     auto staging_texture = staging_texture_.get();
@@ -49,17 +54,27 @@ namespace flutter_inappwebview_plugin
     }
 
     D3D11_MAPPED_SUBRESOURCE mappedResource;
-    if (!SUCCEEDED(device_context->Map(staging_texture, 0, D3D11_MAP_READ, 0,
+    if (!succeededOrLog(device_context->Map(staging_texture, 0, D3D11_MAP_READ, 0,
       &mappedResource))) {
-      return;
+      return false;
     }
 
     {
       const std::lock_guard<std::mutex> lock(buffer_mutex_);
       if (!pixel_buffer_ || pixel_buffer_->width != width ||
         pixel_buffer_->height != height) {
+        const auto size = static_cast<size_t>(width) * height * 4;
+        auto backing_pixel_buffer = std::unique_ptr<uint8_t[]>(new (std::nothrow) uint8_t[size]);
+        if (!backing_pixel_buffer) {
+          device_context->Unmap(staging_texture, 0);
+          return false;
+        }
         if (!pixel_buffer_) {
-          pixel_buffer_ = std::make_unique<FlutterDesktopPixelBuffer>();
+          pixel_buffer_.reset(new (std::nothrow) FlutterDesktopPixelBuffer{});
+          if (!pixel_buffer_) {
+            device_context->Unmap(staging_texture, 0);
+            return false;
+          }
           pixel_buffer_->release_context = &buffer_mutex_;
           // Gets invoked after the FlutterDesktopPixelBuffer's
           // backing buffer has been uploaded.
@@ -72,8 +87,7 @@ namespace flutter_inappwebview_plugin
         }
         pixel_buffer_->width = width;
         pixel_buffer_->height = height;
-        const auto size = width * height * 4;
-        backing_pixel_buffer_.reset(new uint8_t[size]);
+        backing_pixel_buffer_ = std::move(backing_pixel_buffer);
         pixel_buffer_->buffer = backing_pixel_buffer_.get();
       }
 
@@ -84,12 +98,18 @@ namespace flutter_inappwebview_plugin
     }
 
     device_context->Unmap(staging_texture, 0);
+    return true;
   }
 
-  void TextureBridgeFallback::EnsureStagingTexture(uint32_t width,
+  bool TextureBridgeFallback::EnsureStagingTexture(uint32_t width,
     uint32_t height,
     bool& is_exact_size)
   {
+    is_exact_size = false;
+    if (width == 0 || height == 0) {
+      return false;
+    }
+
     // Only recreate an existing texture if it's too small.
     if (!staging_texture_ || staging_texture_size_.width < width ||
       staging_texture_size_.height < height) {
@@ -106,18 +126,20 @@ namespace flutter_inappwebview_plugin
       dstDesc.SampleDesc.Quality = 0;
       dstDesc.Usage = D3D11_USAGE_STAGING;
 
-      staging_texture_ = nullptr;
-      if (!SUCCEEDED(graphics_context_->d3d_device()->CreateTexture2D(
-        &dstDesc, nullptr, staging_texture_.put()))) {
+      winrt::com_ptr<ID3D11Texture2D> staging_texture;
+      if (!succeededOrLog(graphics_context_->d3d_device()->CreateTexture2D(
+        &dstDesc, nullptr, staging_texture.put()))) {
         std::cerr << "Creating dst texture failed" << std::endl;
-        return;
+        return false;
       }
 
+      staging_texture_ = std::move(staging_texture);
       staging_texture_size_ = { width, height };
     }
 
     is_exact_size = staging_texture_size_.width == width &&
       staging_texture_size_.height == height;
+    return true;
   }
 
   const FlutterDesktopPixelBuffer* TextureBridgeFallback::CopyPixelBuffer(
@@ -129,8 +151,8 @@ namespace flutter_inappwebview_plugin
       return nullptr;
     }
 
-    if (last_frame_) {
-      ProcessFrame(last_frame_);
+    if (last_frame_ && !ProcessFrame(last_frame_)) {
+      return nullptr;
     }
 
     auto buffer = pixel_buffer_.get();

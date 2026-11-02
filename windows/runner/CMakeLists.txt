@@ -12,6 +12,8 @@ add_executable(${BINARY_NAME} WIN32
   "download_power_bridge.cpp"
   "player_image_bridge.cpp"
   "external_download_bridge.cpp"
+  "native_diagnostics.cpp"
+  "diagnostic_bridge.cpp"
   "main.cpp"
   "utils.cpp"
   "win32_window.cpp"
@@ -23,6 +25,11 @@ add_executable(${BINARY_NAME} WIN32
 # Apply the standard set of build settings. This can be removed for applications
 # that need different build settings.
 apply_standard_settings(${BINARY_NAME})
+# Filesystem/diagnostic failures must return a normal error, including in
+# Release. Disabling STL exceptions would terminate before our boundary catches.
+get_target_property(RUNNER_DEFINITIONS ${BINARY_NAME} COMPILE_DEFINITIONS)
+list(REMOVE_ITEM RUNNER_DEFINITIONS "_HAS_EXCEPTIONS=0")
+set_property(TARGET ${BINARY_NAME} PROPERTY COMPILE_DEFINITIONS "${RUNNER_DEFINITIONS}")
 target_compile_options(${BINARY_NAME} PRIVATE /utf-8)
 
 # Add preprocessor definitions for the build version.
@@ -39,6 +46,7 @@ target_compile_definitions(${BINARY_NAME} PRIVATE "NOMINMAX")
 # dependencies here.
 target_link_libraries(${BINARY_NAME} PRIVATE flutter flutter_wrapper_app)
 target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib")
+target_link_libraries(${BINARY_NAME} PRIVATE "wevtapi.lib" "shell32.lib" "ole32.lib")
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 
 # Run the Flutter tool portions of the build. This must not be removed.

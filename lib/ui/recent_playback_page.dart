@@ -11,6 +11,8 @@ import '../platform/file_access.dart';
 import '../playback/playback_controller.dart';
 import '../playback/recent_playback.dart';
 import 'common.dart';
+import 'app_context_menu.dart';
+import 'app_popup_menu.dart';
 import 'baidu_download_prompt.dart';
 import 'player_page.dart';
 import 'uc_tv_authorization_page.dart';
@@ -189,6 +191,55 @@ class _RecentPlaybackPageState extends State<RecentPlaybackPage>
   );
 
   Widget _tile(
+    BuildContext context,
+    PlaybackRecord record, {
+    FileAvailability? availability,
+  }) {
+    return AppContextMenu<String>(
+      key: ValueKey(record.key),
+      identity: record.key,
+      actions: () =>
+          recentPlayback(widget.services).any((r) => r.key == record.key)
+          ? [
+              AppMenuAction(
+                value: 'open',
+                label: '继续播放',
+                icon: CupertinoIcons.play_rectangle,
+                enabled:
+                    !_opening &&
+                    record.source != null &&
+                    availability != FileAvailability.missing &&
+                    availability != FileAvailability.inaccessible,
+              ),
+              const AppMenuAction(
+                value: 'copy-name',
+                label: '复制名称',
+                icon: CupertinoIcons.doc_on_doc,
+              ),
+              const AppMenuAction(
+                value: 'remove',
+                label: '移除记录',
+                icon: CupertinoIcons.trash,
+                destructive: true,
+              ),
+            ]
+          : [],
+      onSelected: (action) async {
+        switch (action) {
+          case 'open':
+            await _open(record);
+          case 'copy-name':
+            await widget.services.copyText(record.name);
+            if (context.mounted) message(context, '名称已复制');
+          case 'remove':
+            await PlaybackStore(widget.services.store).remove(record.key);
+        }
+      },
+      child: _tileContent(context, record, availability: availability),
+    );
+  }
+
+  Widget _tileContent(
     BuildContext context,
     PlaybackRecord record, {
     FileAvailability? availability,

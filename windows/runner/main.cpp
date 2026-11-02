@@ -5,6 +5,7 @@
 #include "flutter_window.h"
 #include "utils.h"
 #include "external_download_request.h"
+#include "native_diagnostics.h"
 
 int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
                       _In_ wchar_t *command_line, _In_ int show_command) {
@@ -25,7 +26,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
       if (!existing || !::SendMessageTimeoutW(existing, WM_COPYDATA, 0,
           reinterpret_cast<LPARAM>(&data), SMTO_ABORTIFHUNG | SMTO_BLOCK,
           3000, &accepted) || accepted == 0) {
-        ::MessageBoxW(nullptr, L"下载链接暂未送达，请等待文析助手启动完成后重试。",
+        ::MessageBoxW(nullptr, L"外部链接暂未送达，请等待文析助手启动完成后重试。",
                       L"文析助手", MB_OK | MB_ICONINFORMATION);
       }
     }
@@ -45,6 +46,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   // Initialize COM, so that it is available for use in the library and/or
   // plugins.
   ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  NativeDiagnostics::Instance().Initialize();
 
   flutter::DartProject project(L"data");
 
@@ -57,6 +59,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   Win32Window::Point origin(10, 10);
   Win32Window::Size size(1280, 720);
   if (!window.Create(L"\u6587\u6790\u52a9\u624b", origin, size)) {
+    NativeDiagnostics::Instance().Record("windows.window_create_failed", 0, 0, 0);
     return EXIT_FAILURE;
   }
   window.SetQuitOnClose(true);
@@ -71,6 +74,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   // Tear down the view while the derived window and COM are still available.
   window.Destroy();
   ::CoUninitialize();
+  NativeDiagnostics::Instance().Shutdown();
   if (single_instance != nullptr) ::CloseHandle(single_instance);
   return EXIT_SUCCESS;
 }

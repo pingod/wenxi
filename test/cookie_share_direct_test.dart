@@ -204,13 +204,13 @@ void main() {
             final connector = platform == CloudPlatform.quark
                 ? QuarkConnector(http, store: vault)
                 : UcConnector(http, store: vault);
-            final future = connector.download(
+            final future = connector.tryShareDownload(
               recoverableShare,
               file,
               accountMode == 'none' ? null : owner,
             );
             if (accountMode == 'working') {
-              expect((await future).cleanup, isNull);
+              expect((await future)!.cleanup, isNull);
             } else {
               await expectLater(
                 future,
@@ -263,7 +263,7 @@ void main() {
               ? QuarkConnector(http)
               : UcConnector(http);
           await expectLater(
-            connector.download(recoverableShare, file, owner),
+            connector.tryShareDownload(recoverableShare, file, owner),
             throwsA(isA<AppException>()),
           );
           expect(http.calls, hasLength(3));
@@ -305,7 +305,7 @@ void main() {
         final connector = platform == CloudPlatform.quark
             ? QuarkConnector(http, store: vault)
             : UcConnector(http, store: vault);
-        final spec = await connector.download(share, file, owner);
+        final spec = (await connector.tryShareDownload(share, file, owner))!;
         expect(spec.cleanup, isNull);
         expect(spec.expectedSize, 400);
         expect(spec.headers['Cookie'], '__pugs=guest');
@@ -385,7 +385,7 @@ void main() {
         final connector = platform == CloudPlatform.quark
             ? QuarkConnector(http, store: vault)
             : UcConnector(http, store: vault);
-        final spec = await connector.download(share, file, owner);
+        final spec = (await connector.tryShareDownload(share, file, owner))!;
         expect(spec.cleanup, isNull);
         expect(spec.headers['Cookie'], contains('__puus=renewed'));
         expect(vault.credential(platform)!.updatedAt, owner.updatedAt);
@@ -402,7 +402,15 @@ void main() {
             : UcConnector(http);
         await expectLater(
           connector.download(share, file, null),
-          throwsA(isA<AccountLoginRequired>()),
+          throwsA(
+            isA<AccountLoginRequired>().having(
+              (error) => error.message,
+              'message',
+              platform == CloudPlatform.quark
+                  ? '夸克游客不正常超过50MB文件下载，请登录夸克网盘再试'
+                  : '${platform.shortName}此文件不支持游客下载，请登录后重试',
+            ),
+          ),
         );
         expect(http.calls, hasLength(1));
       },
@@ -438,7 +446,7 @@ void main() {
             ? QuarkConnector(http)
             : UcConnector(http);
         await expectLater(
-          connector.download(share, file, owner),
+          connector.tryShareDownload(share, file, owner),
           throwsA(isA<AppException>()),
         );
         expect(http.calls, hasLength(1));

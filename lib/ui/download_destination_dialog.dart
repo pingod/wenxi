@@ -7,6 +7,7 @@ Future<DownloadDestinationChoice?> chooseDownloadDestinationScope(
   BuildContext context, {
   required String? destination,
   required int unfinished,
+  bool directDownloads = false,
 }) => showDialog<DownloadDestinationChoice>(
   context: context,
   builder: (context) => SimpleDialog(
@@ -32,15 +33,19 @@ Future<DownloadDestinationChoice?> chooseDownloadDestinationScope(
         contentPadding: const EdgeInsets.symmetric(horizontal: 24),
         leading: const Icon(CupertinoIcons.folder_badge_plus),
         title: const Text('同步未完成任务'),
-        subtitle: Text('同时更改 $unfinished 个未完成任务的保存目录'),
+        subtitle: Text(
+          directDownloads ? '尚未创建目标文件的任务改用新目录' : '同时更改 $unfinished 个未完成任务的保存目录',
+        ),
         onTap: () =>
             Navigator.pop(context, DownloadDestinationChoice.unfinished),
       ),
-      const Padding(
-        padding: EdgeInsets.fromLTRB(24, 12, 24, 4),
+      Padding(
+        padding: const EdgeInsets.fromLTRB(24, 12, 24, 4),
         child: Text(
-          '同步时会暂停未完成任务并保留断点，请在传输管理中继续。已有缓存保留在原位置，完成后文件保存到新目录。',
-          style: TextStyle(fontSize: 13, height: 1.5),
+          directDownloads
+              ? '已开始写入的文件继续保存在原目录。同步时会暂停未完成任务并保留断点，请在传输管理中继续。'
+              : '同步时会暂停未完成任务并保留断点，请在传输管理中继续。已有缓存保留在原位置，完成后文件保存到新目录。',
+          style: const TextStyle(fontSize: 13, height: 1.5),
         ),
       ),
       Padding(

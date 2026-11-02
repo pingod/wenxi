@@ -4,6 +4,7 @@ import '../app_services.dart';
 import '../data/state_store.dart';
 import '../domain/models.dart';
 import 'app_popup_menu.dart';
+import 'app_context_menu.dart';
 import 'account_cookie.dart';
 import 'account_info_page.dart';
 import 'common.dart';
@@ -21,6 +22,11 @@ class CloudAccountsPage extends StatelessWidget {
     String action,
   ) async {
     switch (action) {
+      case 'switch':
+        await busy(
+          context,
+          () => services.switchCloudAccount(account.platform, account.id),
+        );
       case 'copyLogin':
         await copyCloudAccountLoginInfo(
           context,
@@ -122,120 +128,172 @@ class CloudAccountsPage extends StatelessWidget {
                 ),
               ),
             for (final account in services.vault.profiles(p))
-              Padding(
-                padding: const EdgeInsets.only(bottom: 8),
-                child: Material(
-                  color: account.active
-                      ? themeAccent(context).withValues(alpha: .07)
-                      : Theme.of(context).colorScheme.surface,
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    side: BorderSide(color: border(context)),
-                  ),
-                  clipBehavior: Clip.antiAlias,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      ListTile(
-                        key: ValueKey('account-${account.id}'),
-                        leading: Icon(
-                          account.active
-                              ? CupertinoIcons.checkmark_circle_fill
-                              : CupertinoIcons.person_crop_circle,
-                          color: account.active
-                              ? themeAccent(context)
-                              : secondary(context),
+              AppContextMenu<String>(
+                key: ValueKey('account-context-${account.id}'),
+                identity: (p, account.id),
+                actions: () =>
+                    services.vault.profiles(p).any((a) => a.id == account.id)
+                    ? [
+                        AppMenuAction(
+                          value: 'switch',
+                          label: account.active ? '当前使用的账号' : '切换到此账号',
+                          icon: CupertinoIcons.person_crop_circle,
+                          enabled: !account.active,
                         ),
-                        title: Text(
-                          account.name,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
+                        const AppMenuAction(
+                          value: 'info',
+                          label: '账号配置',
+                          icon: CupertinoIcons.slider_horizontal_3,
                         ),
-                        subtitle: Text(
-                          [
-                            if (account.customName.isNotEmpty &&
-                                account.nickname.isNotEmpty)
-                              '网盘昵称：${account.nickname}',
-                            account.active ? '当前使用' : '点击切换到此账号',
-                          ].join('\n'),
+                        AppMenuAction(
+                          value: 'copyLogin',
+                          label: savedAccountLoginInfo(
+                            services.vault,
+                            p,
+                            account.id,
+                          ).copyLabel,
+                          icon: CupertinoIcons.doc_on_doc,
                         ),
-                        onTap: account.active
-                            ? null
-                            : () async {
-                                await busy(
-                                  context,
-                                  () => services.switchCloudAccount(
+                        const AppMenuAction(
+                          value: 'rename',
+                          label: '自定义账号名称',
+                          icon: CupertinoIcons.pencil,
+                        ),
+                        const AppMenuAction(
+                          value: 'login',
+                          label: '重新登录',
+                          icon: CupertinoIcons.arrow_clockwise,
+                        ),
+                        if (p == CloudPlatform.uc)
+                          const AppMenuAction(
+                            value: 'tv',
+                            label: 'TV 播放授权',
+                            icon: CupertinoIcons.tv,
+                          ),
+                        const AppMenuAction(
+                          value: 'remove',
+                          label: '移除账号',
+                          icon: CupertinoIcons.trash,
+                          destructive: true,
+                        ),
+                      ]
+                    : [],
+                onSelected: (action) => _action(context, account, action),
+                child: Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Material(
+                    color: account.active
+                        ? themeAccent(context).withValues(alpha: .07)
+                        : Theme.of(context).colorScheme.surface,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      side: BorderSide(color: border(context)),
+                    ),
+                    clipBehavior: Clip.antiAlias,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        ListTile(
+                          key: ValueKey('account-${account.id}'),
+                          leading: Icon(
+                            account.active
+                                ? CupertinoIcons.checkmark_circle_fill
+                                : CupertinoIcons.person_crop_circle,
+                            color: account.active
+                                ? themeAccent(context)
+                                : secondary(context),
+                          ),
+                          title: Text(
+                            account.name,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          subtitle: Text(
+                            [
+                              if (account.customName.isNotEmpty &&
+                                  account.nickname.isNotEmpty)
+                                '网盘昵称：${account.nickname}',
+                              account.active ? '当前使用' : '点击切换到此账号',
+                            ].join('\n'),
+                          ),
+                          onTap: account.active
+                              ? null
+                              : () async {
+                                  await busy(
+                                    context,
+                                    () => services.switchCloudAccount(
+                                      p,
+                                      account.id,
+                                    ),
+                                  );
+                                },
+                          trailing: AppPopupMenuButton<String>(
+                            tooltip: '${account.name}的账号操作',
+                            icon: CupertinoIcons.ellipsis,
+                            onSelected: (action) =>
+                                _action(context, account, action),
+                            actions: [
+                              const AppMenuAction(
+                                value: 'rename',
+                                label: '自定义名称',
+                                icon: CupertinoIcons.pencil,
+                              ),
+                              const AppMenuAction(
+                                value: 'login',
+                                label: '重新登录',
+                                icon: CupertinoIcons.arrow_clockwise,
+                              ),
+                              if (p == CloudPlatform.uc)
+                                const AppMenuAction(
+                                  value: 'tv',
+                                  label: 'TV 播放授权',
+                                  icon: CupertinoIcons.tv,
+                                ),
+                              const AppMenuAction(
+                                value: 'remove',
+                                label: '移除账号',
+                                icon: CupertinoIcons.trash,
+                              ),
+                            ],
+                          ),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
+                          child: Wrap(
+                            spacing: 8,
+                            runSpacing: 4,
+                            children: [
+                              FilledButton.tonalIcon(
+                                key: ValueKey('account-copy-${account.id}'),
+                                onPressed: () =>
+                                    _action(context, account, 'copyLogin'),
+                                icon: const Icon(
+                                  CupertinoIcons.doc_on_doc,
+                                  size: 16,
+                                ),
+                                label: Text(
+                                  savedAccountLoginInfo(
+                                    services.vault,
                                     p,
                                     account.id,
-                                  ),
-                                );
-                              },
-                        trailing: AppPopupMenuButton<String>(
-                          tooltip: '${account.name}的账号操作',
-                          icon: CupertinoIcons.ellipsis,
-                          onSelected: (action) =>
-                              _action(context, account, action),
-                          actions: [
-                            const AppMenuAction(
-                              value: 'rename',
-                              label: '自定义名称',
-                              icon: CupertinoIcons.pencil,
-                            ),
-                            const AppMenuAction(
-                              value: 'login',
-                              label: '重新登录',
-                              icon: CupertinoIcons.arrow_clockwise,
-                            ),
-                            if (p == CloudPlatform.uc)
-                              const AppMenuAction(
-                                value: 'tv',
-                                label: 'TV 播放授权',
-                                icon: CupertinoIcons.tv,
+                                  ).copyLabel,
+                                ),
                               ),
-                            const AppMenuAction(
-                              value: 'remove',
-                              label: '移除账号',
-                              icon: CupertinoIcons.trash,
-                            ),
-                          ],
+                              TextButton.icon(
+                                key: ValueKey('account-info-${account.id}'),
+                                onPressed: () =>
+                                    _action(context, account, 'info'),
+                                icon: const Icon(
+                                  CupertinoIcons.slider_horizontal_3,
+                                  size: 16,
+                                ),
+                                label: const Text('账号配置'),
+                              ),
+                            ],
+                          ),
                         ),
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
-                        child: Wrap(
-                          spacing: 8,
-                          runSpacing: 4,
-                          children: [
-                            FilledButton.tonalIcon(
-                              key: ValueKey('account-copy-${account.id}'),
-                              onPressed: () =>
-                                  _action(context, account, 'copyLogin'),
-                              icon: const Icon(
-                                CupertinoIcons.doc_on_doc,
-                                size: 16,
-                              ),
-                              label: Text(
-                                savedAccountLoginInfo(
-                                  services.vault,
-                                  p,
-                                  account.id,
-                                ).copyLabel,
-                              ),
-                            ),
-                            TextButton.icon(
-                              key: ValueKey('account-info-${account.id}'),
-                              onPressed: () =>
-                                  _action(context, account, 'info'),
-                              icon: const Icon(
-                                CupertinoIcons.slider_horizontal_3,
-                                size: 16,
-                              ),
-                              label: const Text('账号配置'),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
                 ),
               ),

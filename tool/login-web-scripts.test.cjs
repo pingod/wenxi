@@ -251,6 +251,103 @@ function storageScene({local = {}, session = {}, cookie = '', origin = 'https://
   return {localStorage, sessionStorage, run: script => vm.runInNewContext(script, context)};
 }
 
+test('PikPak captures the current client-scoped SDK storage and browser device', () => {
+  const key = 'credentials_YUMx5nI8ZU8Ap8pm';
+  const device = '0123456789abcdef0123456789abcdef';
+  const pair = {sub: 'current-user', access_token: 'current-access-0123456789', refresh_token: 'current-refresh-0123456789', expires_at: '2099-01-01'};
+  for (const stored of [pair, {credentials: pair}, {data: JSON.stringify(pair)}, JSON.stringify(pair)]) {
+    const page = storageScene({origin: 'https://mypikpak.com', local: {
+      [key]: JSON.stringify(stored), deviceid: 'div101.' + device + 'signature',
+      captcha_YUMx5nI8ZU8Ap8pm: JSON.stringify({action: 'GET:/drive/v1/about', captcha_token: 'current-captcha-0123456789', expires_at: '2099-01-01'}),
+    }});
+    const result = JSON.parse(page.run(scripts.pikpak.read));
+    assert.equal(result.client_id, 'YUMx5nI8ZU8Ap8pm');
+    assert.equal(result.access_token, pair.access_token);
+    assert.equal(result.refresh_token, pair.refresh_token);
+    assert.equal(result.device_id, device);
+    assert.equal(result.sub, 'current-user');
+    assert.equal(result.captcha_token, 'current-captcha-0123456789');
+  }
+});
+
+test('PikPak follows current_sub and rejects stale or unidentified accounts', () => {
+  const key = 'credentials_YUMx5nI8ZU8Ap8pm';
+  const current = {sub: 'new-user', access_token: 'new-access-0123456789', refresh_token: 'new-refresh-0123456789'};
+  const stale = {sub: 'old-user', access_token: 'old-access-0123456789'};
+  for (const selector of ['new-user', JSON.stringify('new-user')]) {
+    const page = storageScene({local: {current_sub: selector, [key]: JSON.stringify(stale), [key + '@new-user']: JSON.stringify(current)}});
+    assert.equal(JSON.parse(page.run(scripts.pikpak.read)).sub, 'new-user');
+  }
+  for (const value of ['null', '[]', '{broken', JSON.stringify(stale), JSON.stringify({access_token: current.access_token})]) {
+    const page = storageScene({local: {current_sub: 'new-user', [key]: JSON.stringify(stale), [key + '@new-user']: value}});
+    assert.equal(page.run(scripts.pikpak.read), '');
+  }
+  const onlyStaleScoped = storageScene({local: {[key + '@old-user']: JSON.stringify(stale)}});
+  assert.equal(onlyStaleScoped.run(scripts.pikpak.read), '');
+  const numericSub = '12345678901234567890';
+  const numericDevice = '12345678901234567890123456789012';
+  const numeric = storageScene({local: {
+    current_sub: numericSub, deviceid: numericDevice,
+    [key + '@' + numericSub]: JSON.stringify({sub: numericSub, access_token: 'current-access-0123456789'}),
+  }});
+  const captured = JSON.parse(numeric.run(scripts.pikpak.read));
+  assert.equal(captured.sub, numericSub);
+  assert.equal(captured.device_id, numericDevice);
+});
+
+test('PikPak supports sessionStorage and old storage without mixing accounts or clients', () => {
+  const key = 'credentials_YUMx5nI8ZU8Ap8pm';
+  for (const legacy of ['credentials', 'credentials@new-user', 'token', key]) {
+    const page = storageScene({local: {[key]: JSON.stringify({sub: 'old-user', access_token: 'old-access'})}, session: {
+      current_sub: 'new-user', [legacy]: JSON.stringify({sub: 'new-user', accessToken: 'new-access-0123456789', refreshToken: 'new-refresh-0123456789'}),
+      _deviceid: JSON.stringify('abcdef0123456789abcdef0123456789'),
+    }});
+    const result = JSON.parse(page.run(scripts.pikpak.read));
+    assert.equal(result.sub, 'new-user');
+    assert.equal(result.device_id, 'abcdef0123456789abcdef0123456789');
+  }
+  const wrongClient = storageScene({local: {[key]: JSON.stringify({client_id: 'different-client', access_token: 'other-access-0123456789'})}});
+  assert.equal(wrongClient.run(scripts.pikpak.read), '');
+  const otherClientKey = storageScene({local: {credentials_otherclient: JSON.stringify({access_token: 'other-access-0123456789'})}});
+  assert.equal(otherClientKey.run(scripts.pikpak.read), '');
+});
+
+test('PikPak ignores expired or mismatching captcha metadata', () => {
+  const key = 'credentials_YUMx5nI8ZU8Ap8pm';
+  for (const captcha of [
+    '{broken', 'null', JSON.stringify({captcha_token: 'expired', expires_at: '2000-01-01'}),
+    JSON.stringify({sub: 'different-user', captcha_token: 'wrong', expires_at: '2099-01-01'}),
+  ]) {
+    const page = storageScene({local: {
+      [key]: JSON.stringify({sub: 'current-user', access_token: 'current-access-0123456789'}),
+      captcha_YUMx5nI8ZU8Ap8pm: captcha,
+    }});
+    assert.equal(JSON.parse(page.run(scripts.pikpak.read)).captcha_token, undefined);
+  }
+});
+
+test('PikPak clears old credentials once per login while preserving device and preferences', () => {
+  const key = 'credentials_YUMx5nI8ZU8Ap8pm';
+  for (const origin of ['https://mypikpak.com', 'https://www.mypikpak.com']) {
+    const page = storageScene({origin, local: {
+      [key]: 'old', [key + '@old']: 'old', current_sub: 'old', credentials: 'old', 'credentials@old': 'old', token: 'old',
+      captcha_YUMx5nI8ZU8Ap8pm: 'old', oauth_sign_in_YUMx5nI8ZU8Ap8pm: 'old',
+      deviceid: 'preserved-device', locale: 'zh-CN', credentials_otherclient: 'preserve',
+    }, session: {[key]: 'old'}});
+    assert.equal(page.run(scripts.pikpak.prepare), 'cleared');
+    assert.deepEqual(Object.keys(page.localStorage), ['deviceid', 'locale', 'credentials_otherclient']);
+    assert.equal(page.sessionStorage.getItem(key), null);
+    page.localStorage.setItem(key, JSON.stringify({access_token: 'new-access-0123456789'}));
+    assert.equal(page.run(scripts.pikpak.prepare), 'ready');
+    assert.equal(JSON.parse(page.run(scripts.pikpak.read)).access_token, 'new-access-0123456789');
+    assert.equal(page.run(scripts.pikpak.nextSession), 'cleared');
+    assert.equal(page.run(scripts.pikpak.read), '');
+  }
+  const untrusted = storageScene({origin: 'https://mypikpak.com.invalid', local: {[key]: 'preserve'}});
+  assert.equal(untrusted.run(scripts.pikpak.prepare), 'untrusted');
+  assert.equal(untrusted.localStorage.getItem(key), 'preserve');
+});
+
 test('ILanzou reads the current disk-pc-vuex key used by the official desktop client', {skip: !scripts.ilanzou}, () => {
   const page = storageScene({local: {'disk-pc-vuex': JSON.stringify({common: {
     appToken: 'fixture-token:with+/=&reserved', uuid: 'fixture-device', private: 'ignore',
@@ -307,6 +404,32 @@ test('Xunlei clears all previous account tokens once per login session', () => {
   assert.equal(JSON.parse(page.run(scripts.xunlei.read)).access_token, 'new');
   assert.equal(page.run(scripts.xunlei.nextSession), 'cleared');
   assert.equal(page.run(scripts.xunlei.read), '');
+});
+
+test('Xunlei resets the account center once and preserves the new provider callback', () => {
+  const key = 'credentials_XW5SkOhLDjnOZP7J';
+  const oauth = 'oauth_sign_in_XW5SkOhLDjnOZP7J';
+  const page = storageScene({origin: 'https://i.xunlei.com', local: {
+    [key]: 'old', [key + '@old']: 'old-account', current_sub: 'old',
+    captcha_XW5SkOhLDjnOZP7J: 'old-captcha', [oauth]: 'old-provider-state',
+    deviceid: 'preserve-device', unrelated: 'preserve',
+  }, session: {[key]: 'old-session-account'}});
+  assert.equal(page.run(scripts.xunlei.prepare), 'cleared');
+  assert.deepEqual(Object.keys(page.localStorage), ['deviceid', 'unrelated']);
+  assert.equal(page.sessionStorage.getItem(key), null);
+  page.localStorage.setItem(oauth, 'new-provider-state');
+  page.localStorage.setItem(key, 'new-account');
+  assert.equal(page.run(scripts.xunlei.prepare), 'ready');
+  assert.equal(page.localStorage.getItem(oauth), 'new-provider-state');
+  assert.equal(page.localStorage.getItem(key), 'new-account');
+  assert.equal(page.run(scripts.xunlei.nextSession), 'cleared');
+  assert.equal(page.localStorage.getItem(oauth), null);
+  assert.equal(page.localStorage.getItem(key), null);
+  for (const origin of ['https://account.xiaomi.com', 'https://i.xunlei.com.attacker.invalid']) {
+    const external = storageScene({origin, local: {[key]: 'preserve'}});
+    assert.equal(external.run(scripts.xunlei.prepare), 'untrusted');
+    assert.equal(external.localStorage.getItem(key), 'preserve');
+  }
 });
 
 test('ILanzou prefers the current store and still accepts the legacy vuex key', {skip: !scripts.ilanzou}, () => {

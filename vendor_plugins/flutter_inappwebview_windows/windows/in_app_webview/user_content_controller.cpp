@@ -4,6 +4,7 @@
 #include "../utils/log.h"
 #include "../utils/string.h"
 #include "../utils/vector.h"
+#include "../utils/webview_json.h"
 #include "in_app_webview.h"
 #include "user_content_controller.h"
 
@@ -21,36 +22,38 @@ namespace flutter_inappwebview_plugin
       return;
     }
 
-    wil::com_ptr<ICoreWebView2DevToolsProtocolEventReceiver> executionContextCreated;
-    if (succeededOrLog(webView_->webView->GetDevToolsProtocolEventReceiver(L"Runtime.executionContextCreated", &executionContextCreated))) {
-      auto hr = executionContextCreated->add_DevToolsProtocolEventReceived(
+    if (executionContextReceiver_) {
+      executionContextReceiver_->remove_DevToolsProtocolEventReceived(executionContextToken_);
+      executionContextReceiver_ = nullptr;
+    }
+    const auto lifetime = std::weak_ptr<int>(lifetime_);
+    if (succeededOrLog(webView_->webView->GetDevToolsProtocolEventReceiver(L"Runtime.executionContextCreated", &executionContextReceiver_))) {
+      auto hr = executionContextReceiver_->add_DevToolsProtocolEventReceived(
         Callback<ICoreWebView2DevToolsProtocolEventReceivedEventHandler>(
-          [this](
+          [this, lifetime](
             ICoreWebView2* sender,
             ICoreWebView2DevToolsProtocolEventReceivedEventArgs* args) -> HRESULT
           {
+            if (lifetime.expired() || !webView_ || !args) {
+              return S_OK;
+            }
             wil::unique_cotaskmem_string json;
-            if (succeededOrLog(args->get_ParameterObjectAsJson(&json))) {
-              nlohmann::json context = nlohmann::json::parse(wide_to_utf8(json.get()))["context"];
-              auto id = context["id"].get<int>();
-              auto name = context["name"].get<std::string>();
-              nlohmann::json auxData = context["auxData"];
-              auto isDefault = auxData["isDefault"].get<bool>();
-              auto frameId = auxData["frameId"].get<std::string>();
-              if (string_equals(webView_->pageFrameId(), frameId)) {
-                if (isDefault) {
-                  contentWorlds_.insert_or_assign(ContentWorld::page()->name, id);
+            if (succeededOrLog(args->get_ParameterObjectAsJson(&json)) && json) {
+              const auto context = readWebViewExecutionContext(parseWebViewJson(wide_to_utf8(json.get())));
+              if (context && string_equals(webView_->pageFrameId(), context->frameId)) {
+                if (context->isDefault) {
+                  contentWorlds_.insert_or_assign(ContentWorld::page()->name, context->id);
                 }
                 else {
-                  contentWorlds_.insert_or_assign(name, id);
-                  addPluginScriptsIfRequired(std::make_shared<ContentWorld>(name));
+                  contentWorlds_.insert_or_assign(context->name, context->id);
+                  addPluginScriptsIfRequired(std::make_shared<ContentWorld>(context->name));
                 }
               }
             }
 
             return S_OK;
           })
-        .Get(), nullptr);
+        .Get(), &executionContextToken_);
 
       failedLog(hr);
     }
@@ -314,11 +317,19 @@ namespace flutter_inappwebview_plugin
         {"worldName", worldName}
       };
       auto hr = webView_->webView->CallDevToolsProtocolMethod(L"Page.createIsolatedWorld", utf8_to_wide(parameters.dump()).c_str(), Callback<ICoreWebView2CallDevToolsProtocolMethodCompletedHandler>(
-        [this, completionHandler, worldName](HRESULT errorCode, LPCWSTR returnObjectAsJson)
+        [this, lifetime = std::weak_ptr<int>(lifetime_), completionHandler, worldName](HRESULT errorCode, LPCWSTR returnObjectAsJson)
         {
-          if (succeededOrLog(errorCode) && completionHandler) {
-            auto id = nlohmann::json::parse(wide_to_utf8(returnObjectAsJson))["executionContextId"].get<int>();
-            addPluginScriptsIfRequired(std::make_shared<ContentWorld>(worldName));
+          int id = -1;
+          if (!lifetime.expired() && succeededOrLog(errorCode) && returnObjectAsJson) {
+            const auto data = parseWebViewJson(wide_to_utf8(returnObjectAsJson));
+            if (data.is_object() && data.contains("executionContextId") &&
+              data["executionContextId"].is_number_integer() && data["executionContextId"] >= 0 &&
+              data["executionContextId"] <= (std::numeric_limits<int>::max)()) {
+              id = data["executionContextId"].get<int>();
+              addPluginScriptsIfRequired(std::make_shared<ContentWorld>(worldName));
+            }
+          }
+          if (completionHandler) {
             completionHandler(id);
           }
           return S_OK;
@@ -339,6 +350,7 @@ namespace flutter_inappwebview_plugin
       if (completionHandler) {
         completionHandler(userScript->id);
       }
+      return;
     }
 
     std::string source = userScript->source;
@@ -360,9 +372,11 @@ namespace flutter_inappwebview_plugin
     auto hr = webView_->webView->CallDevToolsProtocolMethod(L"Page.addScriptToEvaluateOnNewDocument", utf8_to_wide(parameters.dump()).c_str(), Callback<ICoreWebView2CallDevToolsProtocolMethodCompletedHandler>(
       [userScript, completionHandler](HRESULT errorCode, LPCWSTR returnObjectAsJson)
       {
-        if (succeededOrLog(errorCode)) {
-          nlohmann::json json = nlohmann::json::parse(wide_to_utf8(returnObjectAsJson));
-          userScript->id = json["identifier"].get<std::string>();
+        if (succeededOrLog(errorCode) && returnObjectAsJson) {
+          const auto json = parseWebViewJson(wide_to_utf8(returnObjectAsJson));
+          if (json.is_object() && json.contains("identifier") && json["identifier"].is_string()) {
+            userScript->id = json["identifier"].get<std::string>();
+          }
         }
         if (completionHandler) {
           completionHandler(userScript->id);
@@ -424,6 +438,11 @@ namespace flutter_inappwebview_plugin
   UserContentController::~UserContentController()
   {
     debugLog("dealloc UserContentController");
+    lifetime_.reset();
+    if (executionContextReceiver_) {
+      executionContextReceiver_->remove_DevToolsProtocolEventReceived(executionContextToken_);
+      executionContextReceiver_ = nullptr;
+    }
     removeAllUserOnlyScripts();
     removeAllPluginScripts();
     contentWorlds_.clear();

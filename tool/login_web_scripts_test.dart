@@ -39,6 +39,7 @@ void main() {
               CloudPlatform.ilanzou,
               CloudPlatform.wopan,
               CloudPlatform.xunlei,
+              CloudPlatform.pikpak,
             ])
               platform.name: {
                 'read': WebLoginTarget.targets[platform]!.readStorageScript,

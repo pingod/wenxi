@@ -49,7 +49,7 @@ class FakePlaybackBackend extends PlaybackBackend {
   Duration? openedStart;
   bool closed = false, failClose = false;
   int plays = 0, pauses = 0, closes = 0;
-  int connections = 8, segmentSizeMiB = 3;
+  int connections = 8, segmentSizeMiB = 4;
   bool hardwareAcceleration = true, failHardwareOpen = false, failOpen = false;
   bool sourceFailure = false;
   bool screenshotSupported = false, nativeSubtitles = false;

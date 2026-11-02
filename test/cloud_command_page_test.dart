@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/app_services.dart';
 import 'package:asterlink/core/json.dart';
@@ -54,6 +55,7 @@ void main() {
   late AppServices services;
   late FakeHttp http;
   late Map<CloudPlatform, _Files> connectors;
+  String? copiedText;
 
   Future<void> render(
     WidgetTester tester, {
@@ -110,6 +112,22 @@ void main() {
 
   void scenario(String name, Future<void> Function(WidgetTester) body) {
     testWidgets(name, (tester) async {
+      copiedText = null;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          if (call.method == 'Clipboard.setData') {
+            copiedText = (call.arguments as Map)['text'] as String?;
+          }
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
       try {
         await body(tester);
       } finally {
@@ -157,7 +175,7 @@ void main() {
 
   for (final p in CloudCommandResolver.platforms) {
     scenario(
-      '${p.key} resolves directly into a preloaded share and preserves the returned code',
+      '${p.key} accepts new token formats and opens a preloaded share with its code',
       (tester) async {
         await render(tester);
         await tap(tester, find.byKey(ValueKey('command-provider-${p.key}')));
@@ -169,12 +187,12 @@ void main() {
           });
           await tester.enterText(
             find.byKey(const Key('command-input')),
-            '中文分享口令',
+            '新格式 @token_123- ${'a' * 80}',
           );
         } else {
           await tester.enterText(
             find.byKey(const Key('command-input')),
-            p == CloudPlatform.quark ? '咐置松君杂货铺叩苓' : '~U_Cfc773YARWW~',
+            p == CloudPlatform.quark ? '新格式+_令牌/123' : '輸如果你不识解開',
           );
         }
         await tap(tester, find.byKey(const Key('command-start')));
@@ -193,6 +211,10 @@ void main() {
               .str('passcode'),
           expectedCode,
         );
+        final saved = services.commandHistory.all.single;
+        expect(saved.platform, p);
+        expect(saved.link.passcode, expectedCode);
+        expect(saved.title, '口令分享文件');
         await tester.pageBack();
         await tester.pumpAndSettle();
         expect(find.byType(CloudCommandPage), findsOneWidget);
@@ -281,7 +303,143 @@ void main() {
       expect(find.byType(BrowserPage), findsNothing);
       expect(connectors[CloudPlatform.quark]!.opened, isEmpty);
       expect(services.store.data.list('history'), isEmpty);
+      expect(services.commandHistory.all, isEmpty);
       expect(find.text('解析已取消，口令已保留'), findsOneWidget);
+    },
+  );
+
+  scenario(
+    'Command history restores the exact text and provider without parsing on copy or use',
+    (tester) async {
+      const original = '  輸如果你不识解開 + %2B e\u0301 👩🏽‍💻\n';
+      await render(tester);
+      await tester.enterText(find.byKey(const Key('command-input')), '夸克草稿');
+      await tap(tester, find.byKey(const Key('command-provider-Uc')));
+      await tester.enterText(find.byKey(const Key('command-input')), original);
+      await tap(tester, find.byKey(const Key('command-start')));
+      expect(find.byType(BrowserPage), findsOneWidget);
+      final saved = services.commandHistory.all.single;
+      expect(saved.text, original);
+      expect(saved.itemCount, 1);
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      await tap(tester, find.byKey(const Key('command-provider-Quark')));
+      await tap(tester, find.byKey(const Key('command-history')));
+      await tap(tester, find.byTooltip('复制口令'));
+      expect(copiedText, original);
+      expect(find.byKey(const Key('command-history-sheet')), findsOneWidget);
+      expect(http.calls, hasLength(1));
+      await tap(tester, find.text('口令分享文件'));
+      expect(find.byKey(const Key('command-history-sheet')), findsNothing);
+      expect(
+        tester
+            .widget<TextField>(find.byKey(const Key('command-input')))
+            .controller!
+            .text,
+        original,
+      );
+      expect(services.store.data.str('commandParsePlatform'), 'Uc');
+      expect(http.calls, hasLength(1));
+      await tap(tester, find.byKey(const Key('command-provider-Quark')));
+      expect(
+        tester
+            .widget<TextField>(find.byKey(const Key('command-input')))
+            .controller!
+            .text,
+        '夸克草稿',
+      );
+      await tap(tester, find.byKey(const Key('command-provider-Uc')));
+      await tap(tester, find.byKey(const Key('command-start')));
+      expect(http.calls, hasLength(2));
+      expect(services.commandHistory.all.single.id, saved.id);
+      expect(services.commandHistory.all.single.text, original);
+    },
+  );
+
+  scenario(
+    'Command history deletes one entry and confirms before clearing the rest',
+    (tester) async {
+      await render(tester);
+      for (final text in ['第一条原口令', '第二条原口令']) {
+        await services.remember(
+          ParsedLink(
+            source: 'https://pan.quark.cn/s/fixture',
+            url: 'https://pan.quark.cn/s/fixture',
+            kind: LinkKind.cloudShare,
+            platform: CloudPlatform.quark,
+          ),
+          commandText: text,
+          title: text,
+        );
+      }
+      await tap(tester, find.byKey(const Key('command-history')));
+      await tap(tester, find.byTooltip('删除这条口令').first);
+      expect(services.commandHistory.all.single.text, '第一条原口令');
+      await tap(tester, find.text('清空'));
+      await tap(tester, find.text('取消'));
+      expect(services.commandHistory.all, hasLength(1));
+      await tap(tester, find.text('清空'));
+      await tap(tester, find.text('确定'));
+      expect(services.commandHistory.all, isEmpty);
+      expect(find.text('暂无口令历史'), findsOneWidget);
+      expect(services.store.data.list('history'), hasLength(1));
+      expect(http.calls, isEmpty);
+    },
+  );
+
+  scenario('Failed or rejected commits do not add command history', (
+    tester,
+  ) async {
+    await render(
+      tester,
+      resolve: (_, _) async => throw const AppException('口令已失效'),
+    );
+    await tester.enterText(find.byKey(const Key('command-input')), '失败的口令');
+    await tap(tester, find.byKey(const Key('command-start')));
+    expect(find.text('口令已失效'), findsOneWidget);
+    expect(services.commandHistory.all, isEmpty);
+    await services.remember(
+      ParsedLink(
+        source: 'https://pan.quark.cn/s/test',
+        url: 'https://pan.quark.cn/s/test',
+        kind: LinkKind.cloudShare,
+        platform: CloudPlatform.quark,
+      ),
+      commandText: '不可提交的口令',
+      canCommit: () => false,
+    );
+    expect(services.commandHistory.all, isEmpty);
+    expect(services.store.data.list('history'), isEmpty);
+  });
+
+  scenario(
+    'Closing a command page before the resolver finishes cannot record history',
+    (tester) async {
+      final result = Completer<ParsedLink>();
+      await render(tester, resolve: (_, _) => result.future);
+      await tester.enterText(find.byKey(const Key('command-input')), '尚未完成的口令');
+      await tester.ensureVisible(find.byKey(const Key('command-start')));
+      await tester.tap(find.byKey(const Key('command-start')));
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(
+        tester
+            .widget<IconButton>(find.byKey(const Key('command-history')))
+            .onPressed,
+        isNull,
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+      result.complete(
+        ParsedLink(
+          source: 'https://pan.quark.cn/s/late',
+          url: 'https://pan.quark.cn/s/late',
+          kind: LinkKind.cloudShare,
+          platform: CloudPlatform.quark,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(services.commandHistory.all, isEmpty);
+      expect(services.store.data.list('history'), isEmpty);
+      expect(connectors[CloudPlatform.quark]!.opened, isEmpty);
     },
   );
 
@@ -306,6 +464,10 @@ void main() {
       );
       await tap(tester, find.byKey(const Key('command-start')));
       expect(find.byType(BrowserPage), findsOneWidget);
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      await tap(tester, find.byKey(const Key('command-history')));
+      expect(find.byTooltip('复制口令').hitTestable(), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
   }

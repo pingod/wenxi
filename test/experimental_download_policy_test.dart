@@ -11,7 +11,7 @@ import 'support.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   test(
-    'UC guest priority migrates once and later respects an explicit choice',
+    'UC guest recovery setting migrates once and preserves an explicit choice',
     () {
       expect(const AppSettings().ucGuestDirectDownload, isTrue);
       expect(
@@ -199,7 +199,7 @@ void main() {
       },
     );
     test(
-      '${platform.key} default guest priority applies only to UC when signed in',
+      '${platform.key} direct helper keeps its platform guest setting',
       () async {
         final http = transport();
         final services = servicesFor(http, {});

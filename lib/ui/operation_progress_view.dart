@@ -173,6 +173,11 @@ String _stepLabel(OperationStep step) {
     OperationStepStatus.failed => '${step.stage.label} · 未完成',
     OperationStepStatus.cancelled => '${step.stage.label} · 已取消',
   };
+  if (step.stage == OperationStage.parserQueue &&
+      step.queuePosition != null &&
+      step.status == OperationStepStatus.running) {
+    return '$label · 排队位置 ${step.queuePosition}';
+  }
   return step.stage == OperationStage.readFiles && step.itemsRead != null
       ? '$label · 已读取 ${step.itemsRead} 项'
       : label;

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'mobile_data_download_guard.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import '../core/json.dart';
@@ -325,6 +326,14 @@ class DownloadOverlay extends ChangeNotifier {
 
   Future<void> action(Json arguments) async {
     if (_closed) return;
+    try {
+      await _action(arguments);
+    } on DownloadConfirmationCancelled {
+      // The foreground confirmation was dismissed; keep tasks paused.
+    }
+  }
+
+  Future<void> _action(Json arguments) async {
     final id = arguments.str('id');
     switch (arguments.str('action')) {
       case 'pause':

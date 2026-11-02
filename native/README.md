@@ -2,6 +2,8 @@
 
 本工程沿用原 AsterLink 已修复的 Gopeed **1.8.1** HTTP/HTTPS 与 BitTorrent 内核。Dart 负责队列、来源刷新、校验、HLS 与文件导出；Android 通过 gomobile/JNI 调用，Windows 通过专用 helper 的标准输入/输出调用。
 
+2026-10-24 / 1.7.0 Linux 桌面：新增 `cmd/asterlink/space_unix.go`，用 `statfs` 的 `Bavail × Bsize` 返回下载目录所在卷的可用空间；其余请求处理、协议帧、BT 流和状态存储与 Windows helper 完全相同。helper 以 `CGO_ENABLED=0` 构建，BT 的 uTP 分支自动使用纯 Go 实现，因此不需要 C 工具链。新增 `tool/build-native-linux.sh` 生成 `native/bin/asterlink_gopeed`，Linux CMake 会把它装进运行目录。Dart 侧只按平台选择可执行文件名称。
+
 2026-10-05 / 1.1.0：百度预览下载保持单连接，每次顺序请求最多 8 MiB，避免大文件整段 Range 被服务器拒绝（403）。下载仍保留原文件名、完整内容和断点进度；旧多分段记录也按单连接续传。校验每次响应的范围与长度，截断响应按已写入位置重试，范围变化时停止写入。普通百度下载线路及其他网盘沿用各自策略，没有新增依赖。
 
 2026-09-26 / 1.0.0：修复光鸭 CDN 对 `Range: bytes=0-0` 返回 HTTP 200、长度 1，导致大文件被误判为一字节的问题。Dart 探测和 Gopeed 内核在遇到这种响应时用前两个字节复核，保留原文件大小及分段校验；真正的一字节文件与空文件仍可下载。没有新增依赖。
@@ -50,6 +52,24 @@ package-gopeed-runtime.ps1 为各 ABI 补齐 NDK 的 libc++_shared.so，在临�
 ```powershell
 go test -tags nosqlite -ldflags=-checklinkname=0 ./bind/asterlink -count=1 -timeout=120s
 # 上一行在 native/gopeed 中执行；下一行在 Flutter 工程根目录执行
+flutter test --no-pub test/native_integration_test.dart
+```
+
+## Linux helper
+
+```bash
+./tool/build-native-linux.sh                  # 输出 native/bin/asterlink_gopeed
+./tool/build-linux.sh                         # 编译完整 Linux 运行目录
+```
+
+linux/CMakeLists.txt 会把 helper 复制到 `build/linux/x64/release/bundle/`，Dart 侧按 `asterlink_gopeed` 名称启动它。构建固定 `CGO_ENABLED=0`，因此只需要 Go，不需要 C/C++ 工具链；跨架构可用 `GOARCH=arm64 ./tool/build-native-linux.sh`。
+
+本地验证：
+
+```bash
+cd native/gopeed
+CGO_ENABLED=0 go test -mod=vendor -tags nosqlite -ldflags=-checklinkname=0 ./bind/asterlink -count=1 -timeout=120s
+cd ../..
 flutter test --no-pub test/native_integration_test.dart
 ```
 

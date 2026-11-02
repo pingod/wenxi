@@ -17,9 +17,12 @@ import 'package:asterlink/platform/file_access.dart';
 import 'support.dart';
 
 class _ProbeHttp extends TransferHttp {
+  final probeHeaders = <Map<String, String>>[];
   @override
-  Future<Probe> probe(String url, Map<String, String> h) async =>
-      const Probe(RemoteIdentity(4, '"v1"', null), false);
+  Future<Probe> probe(String url, Map<String, String> h) async {
+    probeHeaders.add({...h});
+    return const Probe(RemoteIdentity(4, '"v1"', null), false);
+  }
 }
 
 class _BatchFiles extends FakeFiles {
@@ -560,6 +563,51 @@ void main() {
     },
   );
   test(
+    'UC Cookie reaches probes and the native engine again after pause and resume',
+    () async {
+      final transfer = manager.http as _ProbeHttp;
+      native.finish = false;
+      await manager.initialize();
+      const cookie = '__pus=fixture-owner; __puus=fixture-session';
+      final id = await manager.enqueue(
+        const DownloadSpec(
+          url: 'https://dl.uc.cn/file.bin',
+          fileName: 'file.bin',
+          expectedSize: 4,
+          headers: {'Cookie': cookie},
+          source: {'platform': 'UC'},
+        ),
+      );
+      await until(() => native.begins.isNotEmpty);
+      await manager.pause(id);
+      final saved = DownloadTask.fromJson(store.data.list('tasks').single);
+      expect(saved.spec.headers['Cookie'], cookie);
+      native.finish = true;
+      await manager.resume(id);
+      await until(
+        () =>
+            manager.task(id)!.status == DownloadStatus.completed &&
+            manager.activeCount == 0,
+      );
+      expect(transfer.probeHeaders, hasLength(2));
+      expect(
+        transfer.probeHeaders.map((h) => h['Cookie']),
+        everyElement(cookie),
+      );
+      expect(native.begins, hasLength(2));
+      for (final begin in native.begins) {
+        expect(begin.obj('headers')['Cookie'], cookie);
+        expect(begin.obj('headers')['If-Range'], '"v1"');
+      }
+      expect(await File(manager.task(id)!.savedPath!).readAsBytes(), [
+        1,
+        2,
+        3,
+        4,
+      ]);
+    },
+  );
+  test(
     'The native connection profile follows the download source route',
     () async {
       await manager.initialize();
@@ -689,6 +737,59 @@ void main() {
     expect(native.begins.length, 1);
     expect(manager.activeCount, 0);
   });
+
+  test(
+    'Custom concurrency starts more than three tasks and applies live changes',
+    () async {
+      native.finish = false;
+      await store.put('settings', {'concurrent': 5});
+      await manager.initialize();
+      await manager.enqueueAll([
+        for (var i = 0; i < 8; i++)
+          DownloadSpec(
+            url: 'https://example.com/concurrent-$i',
+            fileName: '$i.zip',
+          ),
+      ]);
+      await until(() => native.writers.length == 5);
+      expect(native.begins, hasLength(5));
+      expect(
+        manager.tasks.where((task) => task.status == DownloadStatus.pending),
+        hasLength(3),
+      );
+
+      await store.put('settings', {'concurrent': 2});
+      await manager.settingsChanged();
+      expect(native.writers, hasLength(2));
+      expect(
+        manager.tasks.where((task) => task.status == DownloadStatus.paused),
+        hasLength(3),
+      );
+      expect(native.begins, hasLength(5));
+
+      await store.put('settings', {'concurrent': 4});
+      await manager.settingsChanged();
+      await until(() => native.writers.length == 4);
+      expect(native.begins, hasLength(7));
+      expect(
+        manager.tasks.where((task) => task.status == DownloadStatus.pending),
+        hasLength(1),
+      );
+      expect(
+        manager.tasks.where((task) => task.status == DownloadStatus.paused),
+        hasLength(3),
+      );
+
+      await manager.pause(native.writers.first);
+      await until(
+        () => native.begins.length == 8 && native.writers.length == 4,
+      );
+      expect(
+        manager.tasks.where((task) => task.status == DownloadStatus.pending),
+        isEmpty,
+      );
+    },
+  );
 
   for (final action in [
     DownloadBatchAction.pause,

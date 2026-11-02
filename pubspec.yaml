@@ -1,7 +1,7 @@
 name: asterlink
 description: 文析助手，支持网盘解析、下载和 BT 在线播放。
 publish_to: none
-version: 1.7.0+170
+version: 2.0.0+200
 
 environment:
   sdk: '>=3.11.0 <4.0.0'
@@ -15,17 +15,23 @@ dependencies:
   flutter_svg: 2.3.0
   qr_flutter: 4.1.0
   dio: 5.11.1
+  ffi: 2.2.0
   html: 0.15.7
   flutter_markdown_plus: 1.0.12
   markdown: 7.3.1
+  re_highlight: 0.0.3
+  enough_convert: 1.7.1
   crypto: 3.0.7
   archive: 4.2.0
   pointycastle: 4.0.0
+  asterlink_js:
+    path: vendor_plugins/asterlink_js
   path: 1.9.1
   path_provider: 2.1.6
   flutter_inappwebview: 6.1.5
   flutter_secure_storage: 11.1.1
   file_selector: 1.1.0
+  desktop_drop: 0.8.4
   media_kit: 1.2.6
   media_kit_video: 2.0.1
   media_kit_libs_video: 1.0.7
@@ -52,6 +58,8 @@ flutter:
     - assets/licenses/
     - assets/support/appreciation-code.png
 dependency_overrides:
+  desktop_drop:
+    path: vendor_plugins/desktop_drop
   file_selector_android:
     path: vendor_plugins/file_selector_android
   media_kit:

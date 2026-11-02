@@ -194,9 +194,59 @@ https://github.com/example/files
     );
     expect(
       AppSettings.fromJson({'concurrent': 500, 'threads': 0}).concurrent,
-      3,
+      32,
     );
-    expect(AppSettings.fromJson({'retries': 10}).retries, 3);
+    expect(AppSettings.fromJson({'retries': 10}).retries, 10);
+  });
+  test(
+    'Retry defaults migrate once and saved task budgets survive restore',
+    () {
+      expect(const AppSettings().retries, 64);
+      expect(AppSettings.fromJson({}).retries, 64);
+      final upgraded = AppSettings.fromJson({'retries': 3});
+      expect(upgraded.retries, 64);
+      for (final retries in [0, 1, 2, 3, 10, 64]) {
+        final chosen = upgraded.update({'retries': retries});
+        expect(AppSettings.fromJson(chosen.toJson()).retries, retries);
+      }
+      expect(AppSettings.fromJson({'retries': 2}).retries, 2);
+      expect(AppSettings.fromJson({'retries': -1}).retries, 0);
+      expect(AppSettings.fromJson({'retries': 999}).retries, 64);
+      const task = DownloadTask(
+        id: 'retry-budget',
+        spec: DownloadSpec(
+          url: 'https://example.com/file',
+          fileName: 'file.bin',
+        ),
+        createdAt: 1,
+      );
+      expect(DownloadTask.fromJson(task.toJson()).retries, 64);
+      expect(
+        DownloadTask.fromJson({...task.toJson(), 'retries': 3}).retries,
+        3,
+      );
+      expect(
+        DownloadTask.fromJson({...task.toJson(), 'retries': 99}).retries,
+        64,
+      );
+    },
+  );
+  test('Font size and custom concurrency survive settings serialization', () {
+    final defaults = AppSettings.fromJson({});
+    expect(defaults.fontScalePercent, 100);
+    expect(defaults.concurrent, 3);
+    final restored = AppSettings.fromJson(
+      const AppSettings(fontScalePercent: 135, concurrent: 17).toJson(),
+    ).update({'threads': 12});
+    expect(restored.fontScalePercent, 135);
+    expect(restored.concurrent, 17);
+    expect(restored.threads, 12);
+    expect(AppSettings.fromJson({'fontScalePercent': 0}).fontScalePercent, 80);
+    expect(
+      AppSettings.fromJson({'fontScalePercent': 999}).fontScalePercent,
+      180,
+    );
+    expect(AppSettings.fromJson({'concurrent': 0}).concurrent, 1);
   });
   test('Resume requires strong identity and matching length', () {
     const first = RemoteIdentity(100, '"a"', 'yesterday');

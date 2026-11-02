@@ -29,6 +29,7 @@ class WebLoginDiagnostics {
     Map<String, Object?> fields = const {},
     Object? error,
     StackTrace? stack,
+    bool flush = false,
   }) {
     if (_closed) return;
     (_log ?? DiagnosticLog.active)?.record(
@@ -36,6 +37,7 @@ class WebLoginDiagnostics {
       level: level,
       error: error,
       stack: stack,
+      flush: flush,
       fields: {
         'platform': platform.key,
         'flow': flow,

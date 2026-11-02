@@ -36,10 +36,11 @@ if ((Test-Path -LiteralPath $installerPath) -and -not $Force) {
 }
 
 $requiredFiles = @(
-    'asterlink.exe', 'asterlink_gopeed.exe', 'flutter_windows.dll', 'libmpv-2.dll',
+    'asterlink.exe', 'asterlink_gopeed.exe', 'asterlink_js.dll', 'flutter_windows.dll', 'libmpv-2.dll',
     'WebView2Loader.dll', 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll',
     'data\app.so', 'data\icudtl.dat', 'data\flutter_assets\AssetManifest.bin',
-    'data\flutter_assets\assets\licenses\THIRD_PARTY_NOTICES.md'
+    'data\flutter_assets\assets\licenses\THIRD_PARTY_NOTICES.md',
+    'data\flutter_assets\assets\licenses\QuickJS-NG-LICENSE.txt'
 )
 foreach ($relativePath in $requiredFiles) {
     if (-not (Test-Path -LiteralPath (Join-Path $runtimePath $relativePath) -PathType Leaf)) {

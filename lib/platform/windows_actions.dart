@@ -1,11 +1,12 @@
 import 'dart:io';
 import 'package:path/path.dart' as p;
 import '../core/json.dart';
+import 'desktop_actions.dart';
 
 typedef WindowsCommand =
     Future<void> Function(String executable, List<String> arguments);
 
-class WindowsActions {
+class WindowsActions implements DesktopActions {
   WindowsActions({
     required this.supported,
     WindowsCommand? start,
@@ -13,9 +14,11 @@ class WindowsActions {
   }) : _start = start ?? _startDetached,
        _run = run ?? _runChecked;
 
+  @override
   final bool supported;
   final WindowsCommand _start, _run;
 
+  @override
   Future<void> revealFile(String path) async {
     require(supported, '当前平台不支持打开资源管理器');
     require(p.isAbsolute(path), '无法定位文件，请重新检查下载文件');
@@ -28,11 +31,20 @@ class WindowsActions {
     ]);
   }
 
+  @override
   Future<void> shutdown() async {
     require(supported, '当前平台不支持下载完成后关机');
     // Windows implies /f when /t is positive. The cancellable countdown lives
     // in the app, so this request never forces other applications to close.
     await _run('shutdown.exe', const ['/s', '/t', '0']);
+  }
+
+  @override
+  Future<void> hibernate() async {
+    require(supported, '当前平台不支持下载完成后休眠');
+    // /h requests hibernation without forcing applications to close. Keep the
+    // cancellable countdown in the app, just as for shutdown.
+    await _run('shutdown.exe', const ['/h']);
   }
 
   static Future<void> _startDetached(
@@ -47,6 +59,11 @@ class WindowsActions {
     List<String> arguments,
   ) async {
     final result = await Process.run(executable, arguments);
-    require(result.exitCode == 0, '系统未接受关机请求，请检查权限后重试');
+    require(
+      result.exitCode == 0,
+      arguments.contains('/h')
+          ? '系统未接受休眠请求，请检查是否已启用休眠及当前权限后重试'
+          : '系统未接受关机请求，请检查权限后重试',
+    );
   }
 }

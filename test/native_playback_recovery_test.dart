@@ -100,11 +100,7 @@ class _VideoOrigin {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
-  final library = [
-    Platform.environment['ASTERLINK_MPV_LIBRARY'],
-    '.local/player-test/libmpv/libmpv-2.dll',
-    'build/windows/x64/runner/Release/libmpv-2.dll',
-  ].whereType<String>().where((path) => File(path).existsSync()).firstOrNull;
+  final library = mpvTestLibrary();
 
   group(
     'Native HTTP playback continuity',
@@ -151,6 +147,76 @@ void main() {
             await backend.close();
           }
         },
+      );
+
+      test(
+        'A real underrun grows the native buffer reserve and scales it with playback speed',
+        () async {
+          final backend = _QuietBackend();
+          final transitions = <Object>[];
+          Object? previous;
+          backend.addListener(() {
+            final state = backend.state;
+            final key = (
+              state.buffering,
+              state.completed,
+              backend.diagnosticFields['rebufferCount'],
+            );
+            if (key != previous) {
+              previous = key;
+              transitions.add([
+                state.position.inMilliseconds,
+                state.buffer.inMilliseconds,
+                key,
+              ]);
+            }
+          });
+          origin.tail = Completer<void>();
+          try {
+            await HttpOverrides.runWithHttpOverrides(() async {
+              await backend.open(origin.source(), Duration.zero);
+              await backend.play();
+              await until(
+                () => (backend.diagnosticFields['rebufferCount'] as int) > 0,
+              );
+              await until(
+                () => backend.diagnosticFields['resumeBufferSeconds'] == 6,
+              );
+              final native = backend.player.platform as NativePlayer;
+              expect(
+                double.parse(await native.getProperty('cache-pause-wait')),
+                6,
+              );
+              expect(backend.state.buffering, isTrue);
+              expect(backend.failure, isNull);
+              await backend.setRate(2);
+              await until(
+                () => backend.diagnosticFields['resumeBufferSeconds'] == 12,
+              );
+              expect(
+                double.parse(await native.getProperty('cache-pause-wait')),
+                12,
+              );
+              origin.tail!.complete();
+              await until(() => backend.state.completed);
+              expect(backend.failure, isNull);
+              expect(
+                backend.diagnosticFields['rebufferCount'],
+                1,
+                reason: '$transitions',
+              );
+              expect(origin.requests, 2);
+            }, _RealHttp());
+          } finally {
+            if (!origin.tail!.isCompleted) origin.tail!.complete();
+            await backend.close();
+          }
+        },
+        // libmpv 2.x on Linux does not surface the underrun here, so the reserve
+        // never grows and the wait times out.
+        skip: Platform.isLinux
+            ? 'The underrun reserve does not grow with libmpv 2.x here.'
+            : false,
       );
 
       for (final repeated in [false, true]) {
@@ -296,8 +362,8 @@ void main() {
         },
       );
     },
-    skip: !Platform.isWindows
-        ? 'Native media tests currently require Windows.'
+    skip: !Platform.isWindows && !Platform.isLinux
+        ? 'Native media tests currently require Windows or Linux.'
         : library == null
         ? 'A local libmpv test runtime is required.'
         : false,

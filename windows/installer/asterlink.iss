@@ -85,10 +85,10 @@ Filename: "{app}\{#AppExe}"; WorkingDir: "{app}"; Description: "运行{#AppName}
 Filename: "https://developer.microsoft.com/microsoft-edge/webview2/#download-section"; Description: "打开网页登录组件下载页面"; Flags: shellexec postinstall skipifsilent unchecked; Check: NeedsWebView2
 
 [Registry]
-Root: HKCU; Subkey: "Software\Classes\wenxi"; ValueType: string; ValueName: ""; ValueData: "URL:文析助手下载器"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\wenxi"; ValueType: string; ValueName: ""; ValueData: "URL:文析助手"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\wenxi"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
 Root: HKCU; Subkey: "Software\Classes\wenxi\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},0"
-Root: HKCU; Subkey: "Software\Classes\wenxi\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" --download ""%1"""
+Root: HKCU; Subkey: "Software\Classes\wenxi\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" --open ""%1"""
 
 [Code]
 const

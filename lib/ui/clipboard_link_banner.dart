@@ -19,36 +19,40 @@ class ClipboardLinkBanner extends StatelessWidget {
     child: Material(
       color: themeAccent(context).withValues(alpha: .08),
       borderRadius: BorderRadius.circular(12),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(14, 10, 4, 10),
-        child: Row(
-          children: [
-            Icon(
-              CupertinoIcons.doc_on_clipboard,
-              size: 20,
-              color: themeAccent(context),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Wrap(
-                crossAxisAlignment: WrapCrossAlignment.center,
-                spacing: 12,
-                runSpacing: 2,
-                children: [
-                  Text(
-                    '剪贴板发现${suggestion.label}',
-                    style: const TextStyle(fontSize: 13),
-                  ),
-                  TextButton(onPressed: onUse, child: const Text('填入解析')),
-                ],
+      child: InkWell(
+        onTap: onUse,
+        borderRadius: BorderRadius.circular(12),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 10, 4, 10),
+          child: Row(
+            children: [
+              Icon(
+                CupertinoIcons.doc_on_clipboard,
+                size: 20,
+                color: themeAccent(context),
               ),
-            ),
-            IconButton(
-              tooltip: '忽略此链接',
-              onPressed: onDismiss,
-              icon: const Icon(CupertinoIcons.xmark, size: 16),
-            ),
-          ],
+              const SizedBox(width: 10),
+              Expanded(
+                child: Wrap(
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  spacing: 12,
+                  runSpacing: 2,
+                  children: [
+                    Text(
+                      '剪贴板发现${suggestion.label}',
+                      style: const TextStyle(fontSize: 13),
+                    ),
+                    TextButton(onPressed: onUse, child: const Text('立即解析')),
+                  ],
+                ),
+              ),
+              IconButton(
+                tooltip: '忽略此链接',
+                onPressed: onDismiss,
+                icon: const Icon(CupertinoIcons.xmark, size: 16),
+              ),
+            ],
+          ),
         ),
       ),
     ),

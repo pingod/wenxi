@@ -281,6 +281,7 @@ class UcTvService {
           current.field('tv_access_token'),
           fid,
           file,
+          currentCookie: () => _grant(current).primary,
         );
         _grant(current);
         DiagnosticLog.event(

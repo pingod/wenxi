@@ -1,6 +1,6 @@
 # 编译
 
-工具：Flutter 3.41.4 / Dart 3.11.1、Go 1.24.7。Android 需要 JDK 21、SDK 36 和 NDK 28.2.13676358；Windows 需要 Visual Studio 2022 C++ 桌面开发工具链。安装器使用 Inno Setup 6.7.3。
+工具：Flutter 3.41.4 / Dart 3.11.1、Go 1.24.7。Android 需要 JDK 21、SDK 36 和 NDK 28.2.13676358；Windows 需要 Visual Studio 2022 C++ 桌面开发工具链；Linux 使用 GTK 3、clang、cmake 和 ninja，详见 [Linux 编译说明](BUILDING-LINUX.md)。安装器使用 Inno Setup 6.7.3。
 
 在项目根目录执行：
 
@@ -13,6 +13,14 @@ flutter pub get
 # Windows 安装器
 .\tool\build-windows-installer.ps1
 ```
+
+Linux 使用对应的 shell 入口，产物是完整的运行目录：
+
+```bash
+./tool/build-linux.sh
+```
+
+
 
 缺少原生库时脚本会自动从源码构建。Android 可安装的正式包需要自己的签名，格式参考 `keystore.properties.example`。
 
@@ -35,6 +43,7 @@ flutter pub get
 | Android APK | `build/app/outputs/flutter-apk/app-release.apk` |
 | Windows 运行目录 | `build/windows/x64/runner/Release/` |
 | Windows 安装器 | `build/windows/installer/` |
+| Linux 运行目录 | `build/linux/x64/release/bundle/` |
 
 便携使用时保留完整运行目录，不能只复制 EXE。
 

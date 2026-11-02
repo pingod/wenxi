@@ -91,7 +91,7 @@ class UpdateConnector extends CloudConnector {
 
 class UpdateInstaller extends AppUpdateInstaller {
   UpdateInstaller(String platform)
-    : super(platform: platform, windows: WindowsActions(supported: false));
+    : super(platform: platform, desktop: WindowsActions(supported: false));
   int preparations = 0, opens = 0;
   Completer<void>? pending;
   Object? failure;

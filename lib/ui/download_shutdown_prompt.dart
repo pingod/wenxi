@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import '../download/download_shutdown.dart';
 
@@ -51,19 +52,68 @@ class _DownloadShutdownPromptState extends State<DownloadShutdownPrompt> {
         builder: (context) => AnimatedBuilder(
           animation: controller,
           builder: (context, _) => AlertDialog(
+            icon: Icon(
+              controller.action == DownloadCompletionAction.hibernate
+                  ? CupertinoIcons.moon
+                  : CupertinoIcons.power,
+              size: 28,
+              color: Theme.of(context).colorScheme.primary,
+            ),
             scrollable: true,
             insetPadding: const EdgeInsets.symmetric(
               horizontal: 16,
               vertical: 12,
             ),
-            title: const Text('下载完成，即将关机'),
-            content: Text(
-              '文件已全部保存，将在 ${controller.remainingSeconds ?? 0} 秒后关闭电脑。\n请保存其他应用中的工作。',
+            title: Text('下载完成，即将${controller.action.label}'),
+            content: SizedBox(
+              width: 340,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    '${controller.remainingSeconds ?? 0}',
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.displaySmall?.copyWith(
+                      fontWeight: FontWeight.w600,
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    controller.action == DownloadCompletionAction.hibernate
+                        ? '秒后进入休眠'
+                        : '秒后关闭电脑',
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.bodyMedium,
+                  ),
+                  const SizedBox(height: 16),
+                  LinearProgressIndicator(
+                    value:
+                        ((controller.remainingSeconds ?? 0) /
+                                controller.countdownSeconds)
+                            .clamp(0.0, 1.0),
+                    minHeight: 4,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    controller.action == DownloadCompletionAction.hibernate
+                        ? '全部文件已保存，唤醒后可继续当前工作。'
+                        : '全部文件已保存，请保存其他应用中的工作。',
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.bodyMedium,
+                  ),
+                ],
+              ),
             ),
             actions: [
-              FilledButton(
-                onPressed: () => controller.setEnabled(false),
-                child: const Text('取消关机'),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton(
+                  onPressed: () => controller.setEnabled(false),
+                  child: Text('取消${controller.action.label}'),
+                ),
               ),
             ],
           ),

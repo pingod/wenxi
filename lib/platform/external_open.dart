@@ -35,34 +35,54 @@ class ExternalOpenRequest {
     if (value.containsKey('launchUri')) {
       try {
         final launch = value.str('launchUri');
-        require(launch.length <= 16384, '外部下载地址过长');
+        require(
+          launch.length <= 16384 &&
+              !RegExp(r'[\x00-\x20\x7f]').hasMatch(launch) &&
+              !RegExp(r'%(?![0-9a-fA-F]{2})').hasMatch(launch),
+          '外部链接格式无效',
+        );
         final uri = Uri.parse(launch);
-        String target = launch, name = '';
+        String target = launch, name = '', password = '';
+        var resolve = false;
         if (uri.scheme == 'wenxi') {
+          resolve = uri.host == 'resolve';
           require(
-            uri.host == 'download' &&
+            (resolve || uri.host == 'download') &&
                 (uri.path.isEmpty || uri.path == '/') &&
                 uri.userInfo.isEmpty &&
                 !uri.hasPort &&
                 !uri.hasFragment &&
                 uri.queryParametersAll['url']?.length == 1 &&
-                (uri.queryParametersAll['name']?.length ?? 0) <= 1,
-            '外部下载调用格式无效',
+                (uri.queryParametersAll['name']?.length ?? 0) <= 1 &&
+                (uri.queryParametersAll['pwd']?.length ?? 0) <= 1,
+            '外部链接调用格式无效',
           );
           target = uri.queryParameters['url']!;
           name = uri.queryParameters['name'] ?? '';
+          password = uri.queryParameters['pwd'] ?? '';
+        }
+        if (resolve) {
+          target = LinkParser.normalize(target);
+          require(
+            password.isEmpty ||
+                RegExp(r'^[A-Za-z0-9]{1,12}$').hasMatch(password),
+            '提取码格式无效',
+          );
         }
         value = {
           'id': value.str('id'),
-          'kind': 'download',
-          'uri': target,
+          'kind': resolve ? 'share' : 'download',
+          if (resolve)
+            'text': '$target${password.isEmpty ? '' : '\n提取码：$password'}'
+          else
+            'uri': target,
           'name': name,
         };
       } on Object {
         value = {
           'id': value.str('id'),
           'kind': 'error',
-          'message': '外部下载调用格式无效',
+          'message': '外部链接调用格式无效',
         };
       }
     }

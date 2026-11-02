@@ -41,6 +41,22 @@ class _FileTimeConnector extends BrowserTestConnector {
   ];
 }
 
+class _EpisodeNameConnector extends BrowserTestConnector {
+  _EpisodeNameConnector() : super(CloudPlatform.tianyi);
+
+  @override
+  Future<List<CloudFile>> list(
+    BrowseSession session,
+    String parentId,
+    Credential? credential,
+  ) async => [
+    for (final episode in [19, 1, 10, 11, 2, 9])
+      CloudFile(id: 'episode-$episode', name: '第$episode集.mp4'),
+    const CloudFile(id: 'season-2', name: '第2季', isDirectory: true),
+    const CloudFile(id: 'season-1', name: '第1季', isDirectory: true),
+  ];
+}
+
 class _WaitingDownloadConnector extends BrowserTestConnector {
   _WaitingDownloadConnector([super.drive = CloudPlatform.tianyi]);
   int preparing = 0;
@@ -287,6 +303,46 @@ void main() {
     }
     expect(tester.takeException(), isNull);
   });
+
+  for (final view in ['list', 'grid']) {
+    browserTest('Name $view sort compares episode numbers in both directions', (
+      tester,
+    ) async {
+      final value = await fixture(tester, view: view);
+      value.services.cloud.connectors[CloudPlatform.tianyi] =
+          _EpisodeNameConnector();
+      await value.render(tester, size: const Size(1100, 1200));
+
+      void expectOrder(List<String> names) {
+        for (var i = 1; i < names.length; i++) {
+          final before = tester.getTopLeft(find.text(names[i - 1]));
+          final after = tester.getTopLeft(find.text(names[i]));
+          expect(
+            before.dy < after.dy ||
+                before.dy == after.dy && before.dx < after.dx,
+            isTrue,
+            reason: '${names[i - 1]} should precede ${names[i]} in $view view',
+          );
+        }
+      }
+
+      expectOrder([
+        '第1季',
+        '第2季',
+        for (final episode in [1, 2, 9, 10, 11, 19]) '第$episode集.mp4',
+      ]);
+      await tester.tap(find.byTooltip('排序'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('名称'));
+      await tester.pumpAndSettle();
+      expectOrder([
+        '第2季',
+        '第1季',
+        for (final episode in [19, 11, 10, 9, 2, 1]) '第$episode集.mp4',
+      ]);
+      expect(tester.takeException(), isNull);
+    });
+  }
 
   browserTest(
     'Batch download returns to browsing while links prepare in independent queue rows',

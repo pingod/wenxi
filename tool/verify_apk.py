@@ -138,12 +138,15 @@ def inspect(args):
         abis = {PurePosixPath(info.filename).parts[1] for info in entries}
         check(abis == {'arm64-v8a'}, f'Unexpected ABIs: {abis}')
         names = {PurePosixPath(info.filename).name for info in entries}
-        check({'libgojni.so', 'libc++_shared.so', 'libflutter.so', 'libapp.so', 'libmpv.so', 'libumeng-spy.so'} <= names,
+        check({'libgojni.so', 'libc++_shared.so', 'libflutter.so', 'libapp.so', 'libmpv.so', 'libumeng-spy.so',
+               'libasterlink_js.so'} <= names,
             'A required native library is missing')
         for info in entries:
             parts = PurePosixPath(info.filename).parts
             check(len(parts) == 3 and '..' not in parts, 'Invalid native entry path')
             data = apk.read(info)
+            if parts[2] == 'libgojni.so':
+                check(b'sourceNetworkPolicy' in data, 'Gopeed source network policy capability is missing')
             check(data[:6] == b'\x7fELF\x02\x01', 'Native library is not little-endian ELF64')
             phoff = struct.unpack_from('<Q', data, 32)[0]
             phentsize, phnum = struct.unpack_from('<HH', data, 54)
@@ -186,7 +189,8 @@ def inspect(args):
             check(name in dex, f'Missing analytics class: {name.decode()}')
         check(b'Ldev/flutter/plugins/integration_test/' not in dex, 'Test plugin included in release')
         for asset in ('icons/app.png', 'icons/quark.png', 'licenses/Gopeed-LICENSE.txt',
-                      'licenses/OpenList-LICENSE.txt', 'licenses/AsterLink-LICENSE.txt', 'licenses/android-ndk-NOTICE.txt'):
+                      'licenses/OpenList-LICENSE.txt', 'licenses/AsterLink-LICENSE.txt', 'licenses/android-ndk-NOTICE.txt',
+                      'licenses/QuickJS-NG-LICENSE.txt'):
             check('assets/flutter_assets/assets/' + asset in apk.namelist(), f'Missing asset: {asset}')
     apk_file = Path(args.apk)
     report = {'kind': 'static-apk-inspection', 'passed': True, 'file': apk_file.name,

@@ -4,6 +4,7 @@ package bt
 
 import (
 	"context"
+	"github.com/GopeedLab/gopeed/internal/outputfile"
 	"github.com/anacrolix/torrent/storage"
 	"io"
 	"os"
@@ -126,7 +127,7 @@ func (fts *fileTorrentImpl) setTorrentDir(dir string) {
 func CreateNativeZeroLengthFile(name string) error {
 	os.MkdirAll(filepath.Dir(name), 0o777)
 	var f io.Closer
-	f, err := os.Create(name)
+	f, err := outputfile.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o666)
 	if err != nil {
 		return err
 	}
@@ -140,7 +141,7 @@ type fileTorrentImplIO struct {
 
 // Returns EOF on short or missing file.
 func (fst *fileTorrentImplIO) readFileAt(file file, b []byte, off int64) (n int, err error) {
-	f, err := os.Open(file.path)
+	f, err := outputfile.Open(file.path)
 	if os.IsNotExist(err) {
 		// File missing is treated the same as a short file.
 		err = io.EOF
@@ -188,7 +189,7 @@ func (fst fileTorrentImplIO) WriteAt(p []byte, off int64) (n int, err error) {
 		name := fst.fts.files[i].path
 		os.MkdirAll(filepath.Dir(name), 0o777)
 		var f *os.File
-		f, err = os.OpenFile(name, os.O_WRONLY|os.O_CREATE, 0o666)
+		f, err = outputfile.OpenFile(name, os.O_WRONLY|os.O_CREATE, 0o666)
 		if err != nil {
 			return false
 		}

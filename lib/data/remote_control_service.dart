@@ -148,6 +148,7 @@ class RemoteControlService extends ChangeNotifier {
       announcement: cached.announcement,
       aboutDescription: cached.aboutDescription,
       helpUrl: cached.helpUrl,
+      parserHubUrl: cached.parserHubUrl,
       clouds: {
         for (final entry in cached.clouds.entries)
           entry.key:

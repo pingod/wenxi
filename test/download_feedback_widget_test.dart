@@ -82,6 +82,9 @@ void main() {
             await tester.pumpAndSettle();
             final snack = tester.widget<SnackBar>(find.byType(SnackBar));
             expect(snack.behavior, SnackBarBehavior.floating);
+            expect(snack.margin!.resolve(TextDirection.ltr).bottom, 28);
+            final button = tester.getRect(find.text('已添加 3 个下载任务'));
+            expect(button.bottom, lessThan(size.height - 28));
             expect(
               snack.backgroundColor,
               appTheme(brightness).colorScheme.surface,

@@ -7,6 +7,7 @@ import 'package:asterlink/app_services.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/playback_store.dart';
 import 'package:asterlink/data/state_store.dart';
+import 'package:asterlink/domain/links.dart';
 import 'package:asterlink/platform/external_open.dart';
 import 'package:asterlink/platform/native_engine.dart';
 import 'package:asterlink/playback/external_playback.dart';
@@ -37,6 +38,89 @@ void main() {
     expect(parsed.headers, isEmpty);
     expect(request({'launchUri': url}).downloadUrl, url);
   });
+
+  test(
+    'web resolve links preserve the complete URL and a separate password',
+    () {
+      const url = 'https://pan.quark.cn/s/abc123?token=a%2Bb%26c#/files';
+      final launch = Uri(
+        scheme: 'wenxi',
+        host: 'resolve',
+        queryParameters: {'url': url, 'pwd': 'a1B2'},
+      ).toString();
+      final parsed = request({'launchUri': launch});
+      expect(parsed.kind, ExternalOpenKind.share);
+      expect(parsed.sharedText, '$url\n提取码：a1B2');
+      expect(parsed.downloadUrl, isNull);
+      final link = LinkParser.parse(parsed.sharedText).single;
+      expect(link.url, url);
+      expect(link.passcode, 'a1B2');
+      final embedded = request({
+        'launchUri': Uri(
+          scheme: 'wenxi',
+          host: 'resolve',
+          queryParameters: {
+            'url': 'https://pan.quark.cn/s/abc123?pwd=1234',
+            'pwd': '5678',
+          },
+        ).toString(),
+      });
+      expect(LinkParser.parse(embedded.sharedText).single.passcode, '1234');
+    },
+  );
+
+  test('resolve protocol rejects ambiguous and invalid requests', () {
+    for (final value in [
+      'wenxi://resolve?url=file%3A%2F%2F%2FC%3A%2Fprivate.txt',
+      'wenxi://resolve?url=javascript%3Aalert(1)',
+      'wenxi://resolve?url=https%3A%2F%2Fpan.quark.cn%2Fs%2Fabc&url=https%3A%2F%2Fother.test',
+      'wenxi://resolve?url=https%3A%2F%2Fpan.quark.cn%2Fs%2Fabc&pwd=1234&pwd=5678',
+      'wenxi://resolve?url=https%3A%2F%2Fuser%3Asecret%40pan.quark.cn%2Fs%2Fabc',
+      'wenxi://resolve?url=https%3A%2F%2Fpan.quark.cn%2Fs%2Fabc&pwd=12%0a34',
+      'wenxi://resolve?url=https%3A%2F%2Fpan.quark.cn%2Fs%2Fabc%ZZ',
+      'wenxi://resolve/subpath?url=https%3A%2F%2Fpan.quark.cn%2Fs%2Fabc',
+      'wenxi://resolve?url=https%3A%2F%2Fpan.quark.cn%2Fs%2Fabc#fragment',
+      'wenxi://resolve?url=',
+      'wenxi://resolve:1234?url=https%3A%2F%2Fpan.quark.cn%2Fs%2Fabc',
+    ]) {
+      expect(
+        request({'launchUri': value}).kind,
+        ExternalOpenKind.error,
+        reason: value,
+      );
+    }
+  });
+
+  test(
+    'registered cloud families stay in share parsing rather than plain downloads',
+    () {
+      for (final url in [
+        'https://pan.quark.cn/s/abc123?pwd=1234',
+        'https://drive.uc.cn/s/abc123',
+        'https://pan.baidu.com/share/init?surl=abc123',
+        'https://www.alipan.com/s/abcdEFGH123',
+        'https://cloud.189.cn/web/share?code=abc123',
+        'https://yun.139.com/shareweb/#/w/i/abc123',
+        'https://pan.wo.cn/s/abc123',
+        'https://www.guangyapan.com/s/abc123',
+        'https://pan.xunlei.com/s/abc123',
+        'https://115cdn.com/s/abc123',
+        'https://www.123865.com/s/abc123',
+        'https://wws.lanzout.com/iabc123',
+        'https://url95.ctfile.com/f/123-456',
+        'https://www.feijipan.com/#/s/abc123',
+        'https://mypikpak.com/s/abc123',
+      ]) {
+        final value = request({'kind': 'share', 'text': url});
+        expect(
+          LinkParser.parse(value.sharedText).single.isCloudShare,
+          isTrue,
+          reason: url,
+        );
+        expect(value.downloadUrl, isNull, reason: url);
+      }
+    },
+  );
 
   test(
     'Windows protocol rejects local paths, other actions and duplicate URLs',

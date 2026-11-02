@@ -224,9 +224,15 @@ class BaiduConnector extends CloudConnector {
     ParsedLink link,
     Credential? credential, {
     BaiduShareRoute route = BaiduShareRoute.account,
+    String? parserSiteId,
+    String? parserPasswordGrant,
   }) async {
     if (route == BaiduShareRoute.publicParser) {
-      return _publicParser.openShare(link);
+      return _publicParser.openShare(
+        link,
+        parserSiteId: parserSiteId,
+        passwordGrant: parserPasswordGrant,
+      );
     }
     final id = link.shareId;
     require(id?.isNotEmpty == true, '百度分享链接缺少短链接 ID');
@@ -259,6 +265,9 @@ class BaiduConnector extends CloudConnector {
       sourceLink: link,
     );
   }
+
+  Future<void> ensurePublicPassword(BrowseSession session) =>
+      _publicParser.ensurePassword(session);
 
   @override
   Future<BrowseSession> openPersonal(Credential credential) async {

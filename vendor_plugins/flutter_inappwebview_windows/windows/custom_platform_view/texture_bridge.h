@@ -4,8 +4,10 @@
 #include <wrl.h>
 
 #include <chrono>
+#include <atomic>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 
@@ -67,6 +69,7 @@ namespace flutter_inappwebview_plugin
 
     EventRegistrationToken on_closed_token_ = {};
     EventRegistrationToken on_frame_arrived_token_ = {};
+    std::shared_ptr<int> capture_lifetime_;
 
     virtual void StopInternal();
     void OnFrameArrived();

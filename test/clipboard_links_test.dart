@@ -7,6 +7,22 @@ import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/platform/clipboard_links.dart';
 
 void main() {
+  test('Tianyi official copied links preserve access codes through replay', () {
+    final suggestion = ClipboardLinkSuggestion.fromText(
+      'https://cloud.189.cn/web/share?code=TestShare123（访问码：a1B2）',
+    );
+    expect(suggestion, isNotNull);
+    final link = suggestion!.links.single;
+    expect(link.kind, LinkKind.cloudShare);
+    expect(link.platform, CloudPlatform.tianyi);
+    expect(link.shareId, 'TestShare123');
+    expect(link.passcode, 'a1B2');
+    expect(
+      ClipboardLinkSuggestion.fromText(suggestion.text)!.fingerprint,
+      suggestion.fingerprint,
+    );
+  });
+
   test('New cloud formats keep IDs and codes through clipboard replay', () {
     const text =
         'private note\n'

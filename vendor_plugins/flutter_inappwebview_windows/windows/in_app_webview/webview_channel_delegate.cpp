@@ -7,6 +7,7 @@
 #include "../utils/string.h"
 #include "in_app_webview.h"
 #include "webview_channel_delegate.h"
+#include "../utils/javascript_reply.h"
 
 namespace flutter_inappwebview_plugin
 {
@@ -47,14 +48,6 @@ namespace flutter_inappwebview_plugin
         }
         auto handledByClient = std::get<bool>(*value);
         return handledByClient;
-      };
-  }
-
-  WebViewChannelDelegate::PermissionRequestCallback::PermissionRequestCallback()
-  {
-    decodeResult = [](const flutter::EncodableValue* value)
-      {
-        return std::make_shared<PermissionResponse>(std::get<flutter::EncodableMap>(*value));
       };
   }
 
@@ -147,25 +140,31 @@ namespace flutter_inappwebview_plugin
     }
     else if (string_equals(methodName, "evaluateJavascript")) {
       auto result_ = std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>(std::move(result));
+      auto reply = std::make_shared<JavaScriptReply>([result_](std::string value) {
+        result_->Success(value);
+      });
 
       auto source = get_fl_map_value<std::string>(arguments, "source");
       auto contentWorldMap = get_optional_fl_map_value<flutter::EncodableMap>(arguments, "contentWorld");
       std::shared_ptr<ContentWorld> contentWorld = contentWorldMap.has_value() ? std::make_shared<ContentWorld>(contentWorldMap.value()) : ContentWorld::page();
-      webView->evaluateJavascript(source, std::move(contentWorld), [result_ = std::move(result_)](const std::string& value)
+      webView->evaluateJavascript(source, std::move(contentWorld), [reply](const std::string& value)
         {
-          result_->Success(value);
+          reply->complete(value);
         });
     }
     else if (string_equals(methodName, "callAsyncJavaScript")) {
       auto result_ = std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>(std::move(result));
+      auto reply = std::make_shared<JavaScriptReply>([result_](std::string value) {
+        result_->Success(value);
+      });
 
       auto functionBody = get_fl_map_value<std::string>(arguments, "functionBody");
       auto argumentsAsJson = get_fl_map_value<std::string>(arguments, "arguments");
       auto contentWorldMap = get_optional_fl_map_value<flutter::EncodableMap>(arguments, "contentWorld");
       std::shared_ptr<ContentWorld> contentWorld = contentWorldMap.has_value() ? std::make_shared<ContentWorld>(contentWorldMap.value()) : ContentWorld::page();
-      webView->callAsyncJavaScript(functionBody, argumentsAsJson, std::move(contentWorld), [result_ = std::move(result_)](const std::string& value)
+      webView->callAsyncJavaScript(functionBody, argumentsAsJson, std::move(contentWorld), [reply](const std::string& value)
         {
-          result_->Success(value);
+          reply->complete(value);
         });
     }
     else if (string_equals(methodName, "getCopyBackForwardList")) {
@@ -448,6 +447,16 @@ namespace flutter_inappwebview_plugin
 
     auto arguments = std::make_unique<flutter::EncodableValue>();
     channel->InvokeMethod("onCloseWindow", std::move(arguments));
+  }
+
+  void WebViewChannelDelegate::onRenderProcessGone(bool didCrash) const
+  {
+    if (!channel) return;
+    auto arguments = std::make_unique<flutter::EncodableValue>(flutter::EncodableMap{
+      {"didCrash", didCrash},
+      {"rendererPriorityAtExit", flutter::EncodableValue()}
+      });
+    channel->InvokeMethod("onRenderProcessGone", std::move(arguments));
   }
 
   void WebViewChannelDelegate::onPermissionRequest(const std::string& origin, const std::vector<int64_t>& resources, std::unique_ptr<PermissionRequestCallback> callback) const

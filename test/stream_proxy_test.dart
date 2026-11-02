@@ -25,6 +25,7 @@ class _Origin {
   int faults = 0;
   int Function(int start, int end, int attempt)? statusFor;
   Future<void>? firstRangeBarrier;
+  Future<void> Function(int start, int end)? rangeBarrier;
   int? firstPacketBytes;
   Future<void>? bodyRemainderBarrier;
   Duration delay = const Duration(milliseconds: 10);
@@ -48,6 +49,7 @@ class _Origin {
         authorizations.add(request.headers.value('authorization'));
         proxyAuthorizations.add(request.headers.value('proxy-authorization'));
         await Future<void>.delayed(delay);
+        await rangeBarrier?.call(start, end);
         if (start == 0 && end > 1023) await firstRangeBarrier;
         final status =
             statusFor?.call(
@@ -866,16 +868,160 @@ void main() {
   );
 
   test(
-    'The byte budget includes in-flight segments even at 32 configured connections',
+    'A slow leading range does not leave free connections idle before the cache is full',
     () async {
       await proxy.close();
       proxy = PlaybackStreamProxy(
         DownloadSpec(url: origin.uri.toString(), fileName: 'movie.mkv'),
-        connections: 32,
+        connections: 2,
+        chunkBytes: 8192,
+        maxCacheBytes: 65536,
+        warmupBytes: 0,
+      );
+      expect(await proxy.start(), isTrue);
+      final gate = Completer<void>();
+      origin.firstRangeBarrier = gate.future;
+      final transfer = read(0, origin.bytes.length - 1);
+      try {
+        await until(() => proxy.diagnosticFields['completedSegments'] == 7);
+        expect(proxy.activeRequests, 1);
+        expect(proxy.bufferedBytes, 65536);
+        expect(origin.peak, lessThanOrEqualTo(2));
+        final filled = origin.calls.length;
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        expect(origin.calls.length, filled);
+        gate.complete();
+        expect(await transfer, origin.bytes);
+        final ranges = origin.calls.where((range) => range.$2 > 1023).toList();
+        expect(ranges, hasLength(origin.bytes.length ~/ 8192));
+        expect(ranges.toSet(), hasLength(ranges.length));
+        expect(proxy.bufferedBytes, lessThanOrEqualTo(65536));
+      } finally {
+        if (!gate.isCompleted) gate.complete();
+        await transfer;
+      }
+    },
+  );
+
+  test(
+    'Increasing connections dispatches new ranges while the current bodies are still arriving',
+    () async {
+      await proxy.close();
+      proxy = PlaybackStreamProxy(
+        DownloadSpec(url: origin.uri.toString(), fileName: 'movie.mkv'),
+        connections: 2,
+        chunkBytes: 8192,
+        maxCacheBytes: 65536,
+        warmupBytes: 0,
+      );
+      expect(await proxy.start(), isTrue);
+      final gate = Completer<void>();
+      origin.firstPacketBytes = 1024;
+      origin.bodyRemainderBarrier = gate.future;
+      final transfer = read(131072, 450559);
+      try {
+        await until(() => proxy.activeRequests == 2);
+        proxy.connections = 4;
+        await until(() => origin.peak == 4);
+        expect(proxy.activeRequests, 4);
+        expect(proxy.diagnosticFields['completedSegments'], 0);
+        expect(proxy.bufferedBytes, lessThanOrEqualTo(65536));
+        gate.complete();
+        expect(await transfer, origin.bytes.sublist(131072, 450560));
+      } finally {
+        if (!gate.isCompleted) gate.complete();
+        await transfer;
+      }
+    },
+  );
+
+  test(
+    'Reducing concurrency keeps partially downloaded ranges for later consumption',
+    () async {
+      await proxy.close();
+      proxy = PlaybackStreamProxy(
+        DownloadSpec(url: origin.uri.toString(), fileName: 'movie.mkv'),
+        connections: 4,
+        chunkBytes: 8192,
+        maxCacheBytes: 65536,
+        warmupBytes: 0,
+      );
+      expect(await proxy.start(), isTrue);
+      final gate = Completer<void>();
+      origin.firstPacketBytes = 1024;
+      origin.bodyRemainderBarrier = gate.future;
+      final transfer = read(0, origin.bytes.length - 1);
+      try {
+        await until(() => proxy.receivedBytes >= 4 * 1024);
+        proxy.connections = 1;
+        gate.complete();
+        expect(await transfer, origin.bytes);
+        final ranges = origin.calls.where((range) => range.$2 > 1023).toList();
+        expect(ranges.toSet(), hasLength(ranges.length));
+        expect(proxy.bufferedBytes, lessThanOrEqualTo(65536));
+      } finally {
+        if (!gate.isCompleted) gate.complete();
+        await transfer;
+      }
+    },
+  );
+
+  test(
+    'Cache resizing preserves data when blocked and keeps nearby ready ranges when it succeeds',
+    () async {
+      await proxy.close();
+      proxy = PlaybackStreamProxy(
+        DownloadSpec(url: origin.uri.toString(), fileName: 'movie.mkv'),
+        connections: 4,
+        chunkBytes: 8192,
+        maxCacheBytes: 65536,
+        warmupBytes: 0,
+      );
+      expect(await proxy.start(), isTrue);
+      final gate = Completer<void>();
+      origin.rangeBarrier = (start, end) async {
+        if (start == 0 && end > 1023 || start == 8192) await gate.future;
+      };
+      final transfer = read(0, origin.bytes.length - 1);
+      try {
+        await until(() => proxy.diagnosticFields['completedSegments'] == 6);
+        expect(proxy.bufferedBytes, 65536);
+        expect(proxy.resizeCache(8192), isFalse);
+        expect(proxy.maxCacheBytes, 65536);
+        expect(proxy.cachedBytes, 6 * 8192);
+        expect(proxy.resizeCache(32768), isTrue);
+        expect(proxy.bufferedBytes, 32768);
+        gate.complete();
+        expect(await transfer, origin.bytes);
+        // The two nearest completed ranges were retained during repartition.
+        for (final start in [16384, 24576]) {
+          expect(
+            origin.calls.where((range) => range == (start, start + 8191)),
+            hasLength(1),
+          );
+        }
+        expect(proxy.bufferedBytes, lessThanOrEqualTo(32768));
+      } finally {
+        if (!gate.isCompleted) gate.complete();
+        await transfer;
+      }
+    },
+  );
+
+  test(
+    'The byte budget includes in-flight segments even at 128 configured connections',
+    () async {
+      await proxy.close();
+      proxy = PlaybackStreamProxy(
+        DownloadSpec(url: origin.uri.toString(), fileName: 'movie.mkv'),
+        connections: 128,
         chunkBytes: 8192,
         maxCacheBytes: 32768,
         warmupBytes: 0,
       );
+      expect(proxy.connections, 128);
+      proxy.connections = 96;
+      expect(proxy.connections, 96);
       expect(await proxy.start(), isTrue);
       var peakBytes = 0;
       final timer = Timer.periodic(const Duration(milliseconds: 1), (_) {
@@ -887,6 +1033,34 @@ void main() {
       expect(peakBytes, greaterThan(0));
       expect(peakBytes, lessThanOrEqualTo(32768));
       expect(origin.peak, lessThanOrEqualTo(4));
+    },
+  );
+
+  test(
+    'High connection limits dispatch beyond 32 when the byte budget allows',
+    () async {
+      await proxy.close();
+      proxy = PlaybackStreamProxy(
+        DownloadSpec(url: origin.uri.toString(), fileName: 'movie.mkv'),
+        connections: 128,
+        chunkBytes: 8192,
+        maxCacheBytes: 64 * 8192,
+        warmupBytes: 0,
+      );
+      expect(await proxy.start(), isTrue);
+      final gate = Completer<void>();
+      origin.rangeBarrier = (start, end) async {
+        if (end > 1023) await gate.future;
+      };
+      final transfer = read(0, origin.bytes.length - 1);
+      try {
+        await until(() => origin.active > 32);
+        expect(origin.peak, greaterThan(32));
+        expect(proxy.bufferedBytes, lessThanOrEqualTo(64 * 8192));
+      } finally {
+        gate.complete();
+        expect(await transfer, origin.bytes);
+      }
     },
   );
 

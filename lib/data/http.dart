@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:dio/dio.dart';
 import '../core/json.dart';
+import '../platform/windows_system_proxy.dart';
+import 'system_proxy_http_adapter.dart';
 
 class RequestScope {
   final token = CancelToken();
@@ -85,14 +87,16 @@ class HttpRequestFailure extends AppException {
   final int? status;
 
   factory HttpRequestFailure.network(DioException error) => HttpRequestFailure(
-    switch (error.type) {
-      DioExceptionType.connectionTimeout ||
-      DioExceptionType.receiveTimeout ||
-      DioExceptionType.sendTimeout => '连接超时，请稍后重试',
-      DioExceptionType.badCertificate => '服务器证书校验失败',
-      DioExceptionType.cancel => '请求已取消',
-      _ => '网络连接失败，请检查网络后重试',
-    },
+    error.error is WindowsProxyException
+        ? (error.error as WindowsProxyException).message
+        : switch (error.type) {
+            DioExceptionType.connectionTimeout ||
+            DioExceptionType.receiveTimeout ||
+            DioExceptionType.sendTimeout => '连接超时，请稍后重试',
+            DioExceptionType.badCertificate => '服务器证书校验失败',
+            DioExceptionType.cancel => '请求已取消',
+            _ => '网络连接失败，请检查网络后重试',
+          },
     kind: error.type.name,
     requestNotSent:
         error.error is HandshakeException ||
@@ -288,7 +292,13 @@ class DioJsonHttp extends JsonHttp {
               receiveTimeout: const Duration(seconds: 45),
               validateStatus: (_) => true,
             ),
-          );
+          ) {
+    if (client == null && Platform.isWindows) {
+      dio.httpClientAdapter = SystemProxyHttpClientAdapter(
+        resolve: WindowsSystemProxy().resolve,
+      );
+    }
+  }
   final Dio dio;
   @override
   Future<HttpResult> peek(

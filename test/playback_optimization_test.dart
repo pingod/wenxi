@@ -396,6 +396,102 @@ void main() {
   );
 
   test(
+    'Normal bitrate playback reserves a minute within the shared memory budget',
+    () {
+      final policy = PlaybackBufferPolicy(connectionLimit: 8);
+      // 2 Mibit/s: 90 seconds need about 22 MiB, within the expanded cache.
+      final forward = policy.forwardTarget(
+        size: 900 * PlaybackBufferPolicy.mib,
+        duration: const Duration(hours: 1),
+        rate: 1,
+      );
+      expect(forward, greaterThanOrEqualTo(16 * PlaybackBufferPolicy.mib));
+      expect(forward, lessThanOrEqualTo(48 * PlaybackBufferPolicy.mib));
+      expect(
+        forward +
+            policy.proxyBytesFor(forward) +
+            PlaybackBufferPolicy.backBytes,
+        PlaybackBufferPolicy.totalBytes,
+      );
+    },
+  );
+
+  test('Limited sources ramp before underrun and keep steady connections', () {
+    final policy = PlaybackBufferPolicy(connectionLimit: 8);
+    for (var second = 0; second <= 30; second += 2) {
+      policy.observe(
+        elapsed: Duration(seconds: second),
+        receivedBytes: second * 512 * 1024,
+        failures: 0,
+        status: 206,
+        activeRequests: policy.connections,
+        bufferedSeconds: second < 6 ? 12 : 35,
+        buffering: false,
+        playing: true,
+      );
+      if (second >= 4) expect(policy.connections, 8);
+    }
+  });
+
+  test(
+    'High connection limits ramp beyond 32 and respect runtime reductions',
+    () {
+      final policy = PlaybackBufferPolicy(connectionLimit: 128);
+      expect(policy.limit, 128);
+      for (var second = 0; second <= 124; second += 2) {
+        policy.observe(
+          elapsed: Duration(seconds: second),
+          receivedBytes: second * 512 * 1024,
+          failures: 0,
+          status: 206,
+          activeRequests: policy.connections,
+          bufferedSeconds: 1,
+          buffering: true,
+          playing: true,
+        );
+      }
+      expect(policy.connections, 128);
+      policy.setLimit(96);
+      expect(policy.limit, 96);
+      expect(policy.connections, 96);
+      policy.setLimit(999);
+      expect(policy.limit, 512);
+      policy.setLimit(0);
+      expect(policy.connections, 1);
+    },
+  );
+
+  test('One throttled response cannot repeatedly halve concurrency', () {
+    final policy = PlaybackBufferPolicy(connectionLimit: 8);
+    for (var second = 0; second <= 10; second += 2) {
+      policy.observe(
+        elapsed: Duration(seconds: second),
+        receivedBytes: second * 8192,
+        failures: 1,
+        status: 429,
+        activeRequests: policy.connections,
+        bufferedSeconds: 0,
+        buffering: true,
+        playing: true,
+      );
+      expect(policy.connections, 2);
+    }
+  });
+
+  test(
+    'Repeated underruns build a bounded reserve measured at playback speed',
+    () {
+      final policy = PlaybackBufferPolicy(connectionLimit: 8);
+      expect(policy.resumeSeconds(rebufferCount: 0, rate: 1), 6);
+      expect(policy.resumeSeconds(rebufferCount: 1, rate: 1), 8);
+      expect(policy.resumeSeconds(rebufferCount: 2, rate: 1), 10);
+      expect(policy.resumeSeconds(rebufferCount: 20, rate: 1), 12);
+      expect(policy.resumeSeconds(rebufferCount: 1, rate: 2), 16);
+      expect(policy.resumeSeconds(rebufferCount: 20, rate: 4), 48);
+    },
+  );
+
+  test(
     'Congestion reduces concurrency and recovery respects the user ceiling',
     () {
       final policy = PlaybackBufferPolicy(connectionLimit: 4);

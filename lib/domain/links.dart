@@ -1,16 +1,18 @@
 import '../core/json.dart';
 import 'models.dart';
 import 'github.dart';
+import 'aliyun_share.dart';
+import 'link_obfuscation.dart';
 
 class LinkParser {
-  static const _tail = r'''[^\s<>"'，。；！、【】《》「」\u3000\u200b]+''';
+  static const _tail = r'''[^\s<>"'，。；！、【】《》「」“”‘’\u3000\u200b]+''';
   static final _urls = RegExp('https?://$_tail', caseSensitive: false);
   static final _knownHosts = {
     ...CloudPlatform.values.expand((p) => p.hosts),
     ...UnsupportedCloudPlatform.values.expand((p) => p.hosts),
   }.map(RegExp.escape).join('|');
   static final _bare = RegExp(
-    '(?<![A-Za-z0-9./_@-])(?:${CloudPlatform.subdomainHostPattern}(?:$_knownHosts)|${CloudPlatform.lanzouHostPattern}|${CloudPlatform.pan123HostPattern})/$_tail',
+    '(?<![A-Za-z0-9./_@%删-])(?:${CloudPlatform.subdomainHostPattern}(?:$_knownHosts)|${CloudPlatform.lanzouHostPattern}|${CloudPlatform.pan123HostPattern})/$_tail',
     caseSensitive: false,
   );
   static final _magnets = RegExp(
@@ -39,7 +41,7 @@ class LinkParser {
   static final _punctuation = RegExp('[。，,；;！!)）\\]】}》"\'\u3000]+\$');
 
   static String normalize(String input) {
-    var value = input.trim();
+    var value = LinkObfuscation.cleanUrl(input.trim());
     require(value.isNotEmpty, '请输入链接');
     require(!RegExp(r'[\x00-\x20\x7f]').hasMatch(value), '链接包含空格或控制字符');
     if (!RegExp(r'^[A-Za-z][A-Za-z0-9+.-]*://').hasMatch(value)) {
@@ -60,7 +62,10 @@ class LinkParser {
     return '${prefix[1]!.toLowerCase()}://${prefix[2]!.toLowerCase()}${value.substring(prefix.end)}';
   }
 
-  static List<ParsedLink> parse(String text) {
+  static List<ParsedLink> parse(String text) =>
+      _parse(LinkObfuscation.cleanText(text), text);
+
+  static List<ParsedLink> _parse(String text, String sourceText) {
     final matches = [
       ..._urls.allMatches(text),
       ..._bare.allMatches(text),
@@ -88,6 +93,7 @@ class LinkParser {
         final platform = CloudPlatform.fromHost(uri.host);
         if ((platform == CloudPlatform.github ||
                 platform == CloudPlatform.ctfile ||
+                platform == CloudPlatform.aliyun ||
                 platform == CloudPlatform.feijipan) &&
             raw.contains('](')) {
           raw = raw.substring(0, raw.indexOf(']('));
@@ -116,7 +122,9 @@ class LinkParser {
           if (proseStart != null && proseStart < raw.length) {
             raw = raw.substring(0, proseStart).replaceFirst(_punctuation, '');
             if (platform == CloudPlatform.ctfile ||
-                platform == CloudPlatform.feijipan) {
+                platform == CloudPlatform.feijipan ||
+                platform == CloudPlatform.aliyun ||
+                platform == CloudPlatform.tianyi) {
               raw = raw.replaceFirst(RegExp(r'[(（]+$'), '');
             }
             url = normalize(raw);
@@ -160,7 +168,7 @@ class LinkParser {
         RegExp(
           r'^[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z]{2,}(?::\d+)?(?:/[^\s]*)?$',
         ).hasMatch(text.trim())) {
-      return parse('https://${text.trim()}');
+      return _parse('https://${text.trim()}', sourceText);
     }
     final codes = _code
         .allMatches(text)
@@ -231,7 +239,7 @@ class LinkParser {
           (link) => ParsedLink(
             id: link.id,
             source: result.length == 1
-                ? text
+                ? sourceText
                 : '${link.url}${link.passcode == null ? '' : '\n提取码：${link.passcode}'}',
             url: link.url,
             kind: link.kind,
@@ -446,7 +454,7 @@ class LinkParser {
       CloudPlatform.pan115 => _pathId(parts, r'/s/([A-Za-z0-9]+)'),
       CloudPlatform.xunlei => _pathId(parts, r'/s/([A-Za-z0-9_-]+)'),
       CloudPlatform.guangya => _pathId(parts, r'/s/([A-Za-z0-9_-]+)'),
-      CloudPlatform.aliyun => _pathId(parts, r'/s/([A-Za-z0-9]+)'),
+      CloudPlatform.aliyun => AliyunShareLink.parse(uri)?.id,
       CloudPlatform.ilanzou => _pathId(parts, r'/s/([A-Za-z0-9_-]+)'),
       CloudPlatform.weiyun =>
         uri.host == 'share.weiyun.com'

@@ -7,6 +7,7 @@ import (
 	"github.com/GopeedLab/gopeed/internal/controller"
 	"github.com/GopeedLab/gopeed/internal/fetcher"
 	"github.com/GopeedLab/gopeed/internal/logger"
+	"github.com/GopeedLab/gopeed/internal/outputfile"
 	"github.com/GopeedLab/gopeed/pkg/base"
 	"github.com/GopeedLab/gopeed/pkg/protocol/http"
 	"github.com/GopeedLab/gopeed/pkg/util"
@@ -154,6 +155,12 @@ func (d *Downloader) Setup() error {
 			initTask(task)
 			if task.Status != base.DownloadStatusDone && task.Status != base.DownloadStatusError {
 				task.Status = base.DownloadStatusPause
+			}
+			if task.Meta.Req != nil && task.Meta.Req.Labels[outputfile.KeyLabel] != "" {
+				// Document handles belong to the previous process. Only an
+				// explicit begin with a new lease may access a direct output;
+				// the normal completed-torrent uploader must stay stopped.
+				task.Uploading = false
 			}
 		}
 	}

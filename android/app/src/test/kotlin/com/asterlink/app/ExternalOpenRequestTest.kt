@@ -79,6 +79,29 @@ class ExternalOpenRequestTest {
         assertNull(parser.parse(Intent(Intent.ACTION_MAIN)))
     }
 
+    @Test fun textSelectionAndCloudAliasesUseTheShareParser() {
+        val text = "https://pan.baidu.com/s/1example 提取码：a1B2"
+        val selected = Intent(Intent.ACTION_PROCESS_TEXT).setType("text/plain")
+            .putExtra(Intent.EXTRA_PROCESS_TEXT, text)
+        assertEquals("share", parser.parse(selected)!!["kind"])
+        assertEquals(text, parser.parse(selected)!!["text"])
+        assertEquals("error", parser.parse(Intent(Intent.ACTION_PROCESS_TEXT))!!["kind"])
+        assertEquals("error", parser.parse(Intent(Intent.ACTION_PROCESS_TEXT)
+            .putExtra(Intent.EXTRA_PROCESS_TEXT, "x".repeat(65537)))!!["kind"])
+        val cloud = view("https://pan.quark.cn/s/abc123?pwd=1234", false)
+            .setComponent(ComponentName(context.packageName, "com.asterlink.app.link.QuarkEntry"))
+        val result = parser.parse(cloud)!!
+        assertEquals("share", result["kind"])
+        assertEquals(cloud.dataString, result["text"])
+    }
+
+    @Test fun customProtocolIsPassedOnceToTheSharedDartDecoder() {
+        val url = "wenxi://resolve?url=https%3A%2F%2Fpan.quark.cn%2Fs%2Fabc%3Ftoken%3Da%252Bb&pwd=1234"
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+            .setComponent(ComponentName(context.packageName, "com.asterlink.app.link.ProtocolEntry"))
+        assertEquals(mapOf("launchUri" to url), parser.parse(intent))
+    }
+
     @Test fun invalidAndPrivateInputsAreRejectedWithoutOpeningAnything() {
         for (url in listOf("javascript:alert(1)", "ftp://example.test/a", "file:///data/data/com.asterlink.app/files/vault",
             "file:///storage/../data/private", "content://${context.packageName}.files/files/vault", "https://user:secret@example.test/file")) {

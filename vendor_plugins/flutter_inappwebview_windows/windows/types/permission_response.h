@@ -2,6 +2,7 @@
 #define FLUTTER_INAPPWEBVIEW_PLUGIN_PERMISSION_RESPONSE_H_
 
 #include <flutter/standard_method_codec.h>
+#include <memory>
 #include <WebView2.h>
 
 #include "../utils/flutter.h"
@@ -37,8 +38,12 @@ namespace flutter_inappwebview_plugin
     const std::optional<PermissionResponseActionType> action;
 
     PermissionResponse(const  std::optional<std::vector<int64_t>>& resources, const std::optional<PermissionResponseActionType>& action);
-    PermissionResponse(const flutter::EncodableMap& map);
     ~PermissionResponse() = default;
+
+    // A missing Dart handler returns a successful null method-channel reply.
+    // No decision (or an invalid reply) must take the caller's default path.
+    static std::optional<std::shared_ptr<PermissionResponse>> fromEncodableValue(
+      const flutter::EncodableValue* value);
 
     bool PermissionResponse::operator==(const PermissionResponse& other)
     {

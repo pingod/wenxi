@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/GopeedLab/gopeed/internal/btpolicy"
+	"github.com/GopeedLab/gopeed/internal/outputfile"
 	corebt "github.com/GopeedLab/gopeed/internal/protocol/bt"
 	corehttp "github.com/GopeedLab/gopeed/internal/protocol/http"
 	"github.com/GopeedLab/gopeed/pkg/base"
@@ -51,17 +52,20 @@ type snapshot struct {
 	Aliyun            *fhttp.AliyunTransferState `json:"aliyun,omitempty"`
 }
 type request struct {
-	ID                string            `json:"id"`
-	CacheRoot         string            `json:"cacheRoot,omitempty"`
-	URL               string            `json:"url"`
-	Headers           map[string]string `json:"headers"`
-	Connections       int               `json:"connections"`
-	ConnectionProfile string            `json:"connectionProfile"`
-	AliyunGroup       string            `json:"aliyunGroup"`
-	Retries           int               `json:"retries"`
-	SpeedLimit        int64             `json:"speedLimit"`
-	TorrentData       string            `json:"torrentData"`
-	TorrentIndex      int               `json:"torrentIndex"`
+	ID                string               `json:"id"`
+	CacheRoot         string               `json:"cacheRoot,omitempty"`
+	OutputPath        string               `json:"outputPath,omitempty"`
+	OutputKey         string               `json:"outputKey,omitempty"`
+	URL               string               `json:"url"`
+	Headers           map[string]string    `json:"headers"`
+	NetworkPolicy     *fhttp.NetworkPolicy `json:"networkPolicy,omitempty"`
+	Connections       int                  `json:"connections"`
+	ConnectionProfile string               `json:"connectionProfile"`
+	AliyunGroup       string               `json:"aliyunGroup"`
+	Retries           int                  `json:"retries"`
+	SpeedLimit        int64                `json:"speedLimit"`
+	TorrentData       string               `json:"torrentData"`
+	TorrentIndex      int                  `json:"torrentIndex"`
 }
 
 func Open(storageDir, cacheDir, encodedKey string) (err error) {
@@ -70,6 +74,7 @@ func Open(storageDir, cacheDir, encodedKey string) (err error) {
 	if core != nil {
 		return nil
 	}
+	outputfile.Clear()
 	key, err := base64.StdEncoding.DecodeString(encodedKey)
 	if err != nil || len(key) != 32 {
 		return errors.New("invalid download storage key")
@@ -156,6 +161,7 @@ func remember(event *download.Event) {
 		if task.Protocol == "bt" {
 			value.Path = torrentTaskPath(task)
 		}
+		value.Path = snapshotOutputPath(task, value.Path)
 		if task.Protocol == "http" {
 			value.ReadableRanges = task.ReadableRanges()
 			if task.Status == base.DownloadStatusDone && value.Total > 0 {
@@ -188,6 +194,11 @@ func remember(event *download.Event) {
 		if os.IsPermission(event.Err) {
 			value.Error = "下载目录不可写"
 			value.ErrorKind = "storage"
+		}
+		if errors.Is(event.Err, fhttp.ErrNetworkPolicy) {
+			value.Error = "来源下载地址超出声明的网络权限，请更新来源后重试"
+			value.ErrorKind = "policy"
+			value.RetryExhausted = true
 		}
 	}
 	stateMu.Lock()
@@ -227,8 +238,11 @@ func Begin(value string) error {
 			return errors.New("invalid Aliyun account group")
 		}
 	}
-	if input.Retries < 0 || input.Retries > 3 || input.SpeedLimit < 0 {
+	if input.Retries < 0 || input.Retries > fhttp.MaxRetryLimit || input.SpeedLimit < 0 {
 		return errors.New("invalid retry or speed limit")
+	}
+	if err := validateOutput(input); err != nil {
+		return err
 	}
 	if input.TorrentData != "" {
 		return beginTorrent(input)
@@ -237,11 +251,19 @@ func Begin(value string) error {
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return errors.New("invalid HTTP download URL")
 	}
+	if input.NetworkPolicy != nil {
+		if err := input.NetworkPolicy.CheckURL(parsed); err != nil {
+			return err
+		}
+	}
 	dir, err := taskPayloadDirectory(input)
 	if err != nil {
 		return err
 	}
-	req := &base.Request{URL: input.URL, Extra: &fhttp.ReqExtra{Header: input.Headers}, Labels: map[string]string{"asterlinkId": input.ID}}
+	req := &base.Request{URL: input.URL, Extra: &fhttp.ReqExtra{Header: input.Headers, NetworkPolicy: input.NetworkPolicy}, Labels: map[string]string{"asterlinkId": input.ID}}
+	if input.OutputKey != "" {
+		req.Labels[outputKeyLabel] = input.OutputKey
+	}
 	if taskID, ok := taskIDs[input.ID]; ok {
 		task := core.GetTask(taskID)
 		if task != nil {
@@ -250,7 +272,12 @@ func Begin(value string) error {
 			}
 			// Android may evict externalCacheDir while the encrypted checkpoint survives.
 			// A preallocated range payload must still exist at the original length.
-			if payloadPresent(task, dir) {
+			if name := httpPayloadPath(task, dir); name != "" && outputMatches(task, input) {
+				if err = bindOutput(input, name); err != nil {
+					return err
+				}
+			}
+			if outputMatches(task, input) && payloadPresent(task, dir) {
 				if task.Status == base.DownloadStatusDone {
 					remember(&download.Event{Task: task})
 					return nil
@@ -263,6 +290,7 @@ func Begin(value string) error {
 				stateMu.Lock()
 				progress := states[input.ID]
 				progress.Status, progress.Error, progress.HTTPCode = "running", "", 0
+				progress.Path = snapshotOutputPath(task, task.Meta.SingleFilepath())
 				if input.ConnectionProfile == "aliyun" {
 					progress.Aliyun, progress.ActiveConnections = aliyun, 0
 					progress.RetryAfterMS, progress.RetryExhausted, progress.ErrorKind = 0, false, ""
@@ -281,6 +309,9 @@ func Begin(value string) error {
 	if err = clearTaskPayload(dir); err != nil {
 		return err
 	}
+	if err = bindOutput(input, filepath.Join(dir, "payload.gopeed")); err != nil {
+		return err
+	}
 	var token [16]byte
 	if _, err = rand.Read(token[:]); err != nil {
 		return err
@@ -288,13 +319,14 @@ func Begin(value string) error {
 	req.Labels["asterlinkGeneration"] = hex.EncodeToString(token[:])
 	stateMu.Lock()
 	generations[input.ID] = req.Labels["asterlinkGeneration"]
-	states[input.ID] = snapshot{Status: "running"}
+	states[input.ID] = snapshot{Status: "running", Path: input.OutputPath}
 	stateMu.Unlock()
 	retries := input.Retries
 	taskID, err := core.CreateDirect(req, &base.Options{Name: "payload.gopeed", Path: dir,
 		Extra: &fhttp.OptsExtra{Connections: input.Connections, ConnectionProfile: input.ConnectionProfile, AliyunGroup: input.AliyunGroup,
 			RetryLimit: &retries, SpeedLimit: input.SpeedLimit}})
 	if err != nil {
+		outputfile.Remove(input.ID)
 		return err
 	}
 	taskIDs[input.ID] = taskID
@@ -302,18 +334,32 @@ func Begin(value string) error {
 }
 
 func payloadPresent(task *download.Task, dir string) bool {
-	if task.Meta == nil || task.Meta.Res == nil || task.Meta.Opts == nil || len(task.Meta.Res.Files) != 1 {
+	name := httpPayloadPath(task, dir)
+	if name == "" {
 		return false
 	}
-	name := task.Meta.SingleFilepath()
-	if filepath.Clean(filepath.Dir(name)) != filepath.Clean(dir) {
-		return false
-	}
+	_, direct := outputfile.Path(name)
 	info, err := os.Lstat(name)
+	if direct {
+		info, err = outputfile.Stat(name)
+	} else if task.Meta.Req.Labels[outputKeyLabel] != "" {
+		return false
+	}
 	if err != nil || !info.Mode().IsRegular() {
 		return false
 	}
 	return task.Meta.Res.Size <= 0 || info.Size() == task.Meta.Res.Size
+}
+
+func httpPayloadPath(task *download.Task, dir string) string {
+	if task.Protocol != "http" || task.Meta == nil || task.Meta.Req == nil || task.Meta.Res == nil || task.Meta.Opts == nil || len(task.Meta.Res.Files) != 1 {
+		return ""
+	}
+	name := task.Meta.SingleFilepath()
+	if filepath.Clean(filepath.Dir(name)) != filepath.Clean(dir) {
+		return ""
+	}
+	return name
 }
 
 func clearTaskPayload(dir string) error {
@@ -368,10 +414,12 @@ func Remove(id string) error {
 
 func removeLocked(id string) error {
 	if core == nil {
+		outputfile.Remove(id)
 		return nil
 	}
 	taskID, ok := taskIDs[id]
 	if !ok {
+		outputfile.Remove(id)
 		return nil
 	}
 	if err := core.PauseAndSave(taskID); err != nil && !errors.Is(err, download.ErrTaskNotFound) {
@@ -380,6 +428,7 @@ func removeLocked(id string) error {
 	if err := core.Delete(&download.TaskFilter{IDs: []string{taskID}}, false); err != nil {
 		return err
 	}
+	outputfile.Remove(id)
 	delete(taskIDs, id)
 	stateMu.Lock()
 	delete(generations, id)
@@ -391,6 +440,7 @@ func removeLocked(id string) error {
 func Version() string { return "1.8.1" }
 
 func Close() error {
+	closeParserRequests()
 	closeHTTPProbes()
 	closeTorrentMetadata()
 	apiMu.Lock()
@@ -407,6 +457,7 @@ func Close() error {
 	}
 	err := core.Close()
 	core = nil
+	outputfile.Clear()
 	stateMu.Lock()
 	generations = map[string]string{}
 	states = map[string]snapshot{}

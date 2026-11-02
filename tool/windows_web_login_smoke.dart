@@ -5,10 +5,16 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io' hide Cookie;
 import 'package:flutter/widgets.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:window_manager/window_manager.dart';
 import 'package:asterlink/ui/login_webview.dart';
 import 'package:asterlink/domain/auth.dart';
 import 'package:asterlink/domain/models.dart';
+import 'package:asterlink/diagnostics/app_log.dart';
+import 'package:asterlink/diagnostics/diagnostic_bundle.dart';
+import 'package:archive/archive.dart';
+import 'tests/windows_webview_stability_fixture.dart';
 
 Future<void> main(List<String> arguments) async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -33,7 +39,7 @@ Future<void> main(List<String> arguments) async {
     save();
   }
 
-  final watchdog = Timer(const Duration(seconds: 60), () {
+  final watchdog = Timer(const Duration(seconds: 180), () {
     result['failure'] = 'Smoke test timed out';
     save();
     exit(2);
@@ -47,6 +53,7 @@ Future<void> main(List<String> arguments) async {
     check('WebView2 runtime is installed', runtime?.isNotEmpty == true);
     server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     server.listen((request) async {
+      if (await serveStabilityFixture(request)) return;
       final response = request.response;
       response.headers.contentType = ContentType.html;
       response.headers.set(HttpHeaders.cacheControlHeader, 'no-store');
@@ -268,6 +275,67 @@ document.cookie = 'visible_cookie=fixture-visible; path=/';
             cookie.name != 'ordinary_only',
       ),
     );
+    await verifyPermissionReplies(origin: origin, output: output, check: check);
+    await verifyWebViewStability(
+      origin: origin,
+      environment: environment,
+      output: output,
+      check: check,
+    );
+    const native = MethodChannel('com.asterlink.app/diagnostics');
+    final paths = await native.invokeMapMethod<String, dynamic>(
+      'diagnosticPaths',
+    );
+    check(
+      'Windows native diagnostic bridge provides a session',
+      paths?['session'] is String,
+    );
+    final protection = await const MethodChannel(
+      'com.asterlink.app/native',
+    ).invokeMapMethod<String, dynamic>('downloadProtectionStatus');
+    check(
+      'Diagnostics and the existing download protection channel coexist',
+      protection?['desktop'] == true,
+    );
+    final diagnosticLog = DiagnosticLog.open(
+      Directory('${output.path}/dart-diagnostics'),
+    );
+    try {
+      final bundle = DiagnosticBundle(
+        diagnosticLog,
+        snapshot: () => {'fixture': true},
+      );
+      final bytes = await bundle.build();
+      await File(
+        '${output.path}/windows-diagnostics.zip',
+      ).writeAsBytes(bytes, flush: true);
+      final zip = ZipDecoder().decodeBytes(bytes);
+      final traces = zip.files
+          .where((file) => file.name.startsWith('native/windows-trace-'))
+          .map((file) => utf8.decode(file.content as List<int>))
+          .join('\n');
+      if (paths?['enabled'] == true) {
+        check(
+          'Diagnostic ZIP includes native cookie and renderer-failure steps',
+          traces.contains('webview.cookie_read_completed') &&
+              traces.contains('webview.process_failed'),
+        );
+        check(
+          'Diagnostic ZIP includes permission requests, fallback decisions, and completion',
+          traces.contains('webview.permission_requested') &&
+              traces.contains('webview.permission_default_denied') &&
+              traces.contains('webview.permission_replied') &&
+              traces.contains('webview.permission_completed'),
+        );
+        check(
+          'Diagnostic ZIP excludes synthetic cookie values and test profile paths',
+          !traces.contains('fixture-private-session') &&
+              !traces.contains(output.path),
+        );
+      }
+    } finally {
+      diagnosticLog.close();
+    }
     result['passed'] = true;
   } catch (error, stack) {
     result['failure'] = error.toString();
@@ -285,5 +353,10 @@ document.cookie = 'visible_cookie=fixture-visible; path=/';
     watchdog.cancel();
     save();
   }
-  exit(result['passed'] == true ? 0 : 1);
+  // The JSON report carries assertion failures. Even a failed check closes the
+  // host normally so the fixture does not create a misleading fail-fast crash.
+  // Exit through the production window lifecycle so WebView2 and composition
+  // objects are released on the platform thread before COM is uninitialized.
+  await windowManager.ensureInitialized();
+  await windowManager.destroy();
 }

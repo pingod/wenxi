@@ -71,6 +71,45 @@ void main() {
     }
   });
 
+  test(
+    'copyable blocks accept changing formats without fixed token markers',
+    () {
+      for (final command in [
+        '輸如果你不识解開',
+        '~U_Cfc773YARWW~',
+        '新样式+_/#123🪁',
+        '不限前后缀的口令 ${'a' * 160}',
+      ]) {
+        for (final body in [
+          '<pre><code>$command</code></pre>',
+          _page({
+            '_cachedContent': {'body': '<pre>$command</pre>'},
+          }),
+          '# 每日口令\n\n```text\n$command\n```\n',
+          '~~~~text\n$command\n~~~~\n',
+          '<p>口令：$command</p><p>复制后打开 UC 浏览器</p>',
+          '<p>复制下面的口令</p><p>「$command」</p>',
+          command,
+        ]) {
+          expect(BaiduPublicCommandSource.extract(body), command);
+        }
+      }
+    },
+  );
+
+  test('automated source still requires one bounded copyable value', () {
+    for (final body in [
+      '<pre>新口令_one</pre><pre>新口令_two</pre>',
+      '<pre>${'x' * 2001}</pre><p>口令：不可退回这个旧口令</p>',
+      '```text\n新口令_one\n```\n```text\n新口令_two\n```',
+    ]) {
+      expect(
+        () => BaiduPublicCommandSource.extract(body),
+        throwsA(isA<AppException>()),
+      );
+    }
+  });
+
   test('large bootstrap strings are scanned without a recursive regex', () {
     for (final length in [220000, 800000]) {
       final page = _page({

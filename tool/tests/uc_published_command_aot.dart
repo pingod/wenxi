@@ -9,11 +9,13 @@ import 'package:asterlink/domain/uc_published_command.dart';
 void main(List<String> args) {
   const command = '執每日验证清茶生效';
   var checks = 0;
-  void verify(String page, {bool invalid = false}) {
+  void verify(String page, {bool invalid = false, String? expected}) {
     try {
       final result = UcPublishedCommand.extract(page);
       if (invalid) throw StateError('An invalid document was accepted');
-      if (result != command) throw StateError('Unexpected extracted command');
+      if (result != (expected ?? command)) {
+        throw StateError('Unexpected extracted command');
+      }
     } on AppException {
       if (!invalid) rethrow;
     }
@@ -57,6 +59,8 @@ void main(List<String> args) {
     ),
   );
   verify('<pre>$command</pre>');
+  verify('<pre>輸如果你不识解開</pre>', expected: '輸如果你不识解開');
+  verify('```text\n新格式_123🪁\n```', expected: '新格式_123🪁');
   verify(
     'window.appData = JSON.parse(decodeURIComponent("${'x' * 800000}',
     invalid: true,

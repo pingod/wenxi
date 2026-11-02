@@ -9,6 +9,7 @@ import 'package:asterlink/data/providers/github.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/domain/auth.dart';
 import 'package:asterlink/domain/github.dart';
+import 'package:asterlink/domain/github_acceleration.dart';
 import 'package:asterlink/domain/links.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/domain/uploads.dart';
@@ -407,6 +408,7 @@ void main() {
       );
       final spec = await GitHubConnector(
         http,
+        acceleration: () => const GitHubAcceleration(mode: 'gh-proxy.com'),
       ).download(_session(), _file('文档/空 格.txt'), _credential());
       expect(
         spec.headers.keys.map((k) => k.toLowerCase()),
@@ -484,6 +486,47 @@ void main() {
       expect(result.name, 'new-folder');
       expect(jsonDecode(result.token)['sha'], 'folder-tree');
       expect(_mutations(http), hasLength(1));
+    },
+  );
+
+  test(
+    'Public raw preflight uses configured acceleration but preserves the original file URL',
+    () async {
+      const raw = 'https://raw.githubusercontent.com/sample/files/main/old.txt';
+      final http = _api(
+        intercept: (r) {
+          if (r.uri.path.contains('/contents/')) {
+            return jsonResponse({
+              'type': 'file',
+              'sha': 'blob-old',
+              'size': 5,
+              'download_url': raw,
+            });
+          }
+          if (r.uri.host == 'gh-proxy.com') {
+            expect(r.url, 'https://gh-proxy.com/$raw');
+            expect(r.headers.containsKey('Authorization'), isFalse);
+            return const HttpResult(206, 'x', {
+              'content-range': ['bytes 0-0/5'],
+            });
+          }
+          return null;
+        },
+      );
+      final spec = await GitHubConnector(
+        http,
+        acceleration: () => const GitHubAcceleration(mode: 'gh-proxy.com'),
+      ).download(_session(), _file('old.txt'), _credential());
+      expect(spec.url, raw);
+      expect(
+        http.calls.where((r) => r.uri.host == 'gh-proxy.com'),
+        hasLength(1),
+      );
+      expect(
+        http.calls.where((r) => r.uri.host == 'raw.githubusercontent.com'),
+        isEmpty,
+      );
+      expect(jsonEncode(spec.toJson()), isNot(contains(_token)));
     },
   );
 

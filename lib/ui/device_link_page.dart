@@ -12,6 +12,7 @@ import '../domain/links.dart';
 import '../lan/lan_models.dart';
 import '../lan/lan_qr.dart';
 import '../lan/lan_service.dart';
+import '../platform/desktop_platform.dart';
 import '../platform/qr_scanner.dart';
 import 'common.dart';
 
@@ -40,12 +41,7 @@ class _DeviceLinkPageState extends State<DeviceLinkPage> {
   bool _initialDownloadHandled = false;
   late String _messageDraft = widget.initialText;
 
-  bool get _desktop => switch (defaultTargetPlatform) {
-    TargetPlatform.windows ||
-    TargetPlatform.macOS ||
-    TargetPlatform.linux => true,
-    _ => false,
-  };
+  bool get _desktop => isDesktopTarget(defaultTargetPlatform);
   bool get _autoStart => widget.autoStart ?? _desktop;
 
   @override

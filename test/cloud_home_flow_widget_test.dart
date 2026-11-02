@@ -404,7 +404,7 @@ void main() {
   testWidgets(
     'Cloud account management opens from the top right menu',
     (tester) => scenario(tester, (fixture, _) async {
-      await tester.pumpWidget(AsterLinkApp(fixture.services, initialTab: 1));
+      await tester.pumpWidget(AsterLinkApp(fixture.services, initialTab: 2));
       await tester.pumpAndSettle();
       expect(find.text('账号管理'), findsNothing);
       expect(find.text('网盘收藏'), findsNothing);

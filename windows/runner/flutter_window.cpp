@@ -4,6 +4,7 @@
 #include <flutter/standard_method_codec.h>
 
 #include "flutter/generated_plugin_registrant.h"
+#include "native_diagnostics.h"
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
@@ -30,6 +31,11 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+  // Engine/plugin initialization may install its own process exception filter.
+  // Keep it in the chain while ensuring our recorder still sees host failures.
+  NativeDiagnostics::Instance().InstallExceptionHandler();
+  diagnostics_ = std::make_unique<DiagnosticBridge>(
+      flutter_controller_->engine()->messenger());
   external_downloads_ = std::make_unique<ExternalDownloadBridge>(
       flutter_controller_->engine()->messenger());
   player_images_ = std::make_unique<PlayerImageBridge>(
@@ -83,6 +89,7 @@ void FlutterWindow::OnDestroy() {
   download_power_.reset();
   external_downloads_.reset();
   player_images_.reset();
+  diagnostics_.reset();
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }

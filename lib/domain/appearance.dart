@@ -49,7 +49,7 @@ class AppearanceColors {
   int get fill => _tint(dark ? 0xff262628 : 0xfff2f2f7, .035);
   int get border => _tint(dark ? 0xff414146 : 0xffe2e3e8, .05);
   int get softAccent => _tint(surface, dark ? .14 : .09);
-  int get glass => _tint(dark ? 0xff20242b : 0xfffafcff, dark ? .06 : .025);
+  int get glass => _tint(dark ? 0xff1c1d21 : 0xffffffff, dark ? .04 : .008);
 
   int _tint(int background, double amount) {
     int channel(int shift) =>

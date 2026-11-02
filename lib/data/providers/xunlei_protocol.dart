@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:crypto/crypto.dart';
 import '../../core/json.dart';
 import '../../domain/models.dart';
+import '../../domain/xunlei_web_login.dart';
 import '../state_store.dart';
 
 class XunleiProtocol {
@@ -10,6 +11,8 @@ class XunleiProtocol {
   static const clientSecret = 'Xp6vsy4tN9toTVdMSpomVdXpRmES';
   static const version = '8.31.0.9726';
   static const packageName = 'com.xunlei.downloadprovider';
+  static const webVersion = '1.93.9';
+  static const webPackageName = 'pan.xunlei.com';
   static const appUa =
       'ANDROID-com.xunlei.downloadprovider/8.31.0.9726 netWorkType/5G appid/40 deviceName/Xiaomi_M2004j7ac deviceModel/M2004J7AC OSVersion/12 protocolVersion/301 platformVersion/10 sdkVersion/512000 Oauth2Client/0.9 (Linux 4_14_186-perf-gddfs8vbb238b) (JAVA 0)';
   static const _salts = [
@@ -29,6 +32,33 @@ class XunleiProtocol {
   static String captchaSign(String id, String timestamp) {
     var digest = '$clientId$version$packageName$id$timestamp';
     for (final salt in _salts) {
+      digest = md5.convert(utf8.encode('$digest$salt')).toString();
+    }
+    return '1.$digest';
+  }
+
+  // The official web client's qrImg signing chain (version 1.93.9).
+  // Web tokens must retain their client identity when renewing action captcha.
+  static String webCaptchaSign(String id, String timestamp) {
+    var digest =
+        '${XunleiWebLogin.clientId}$webVersion$webPackageName$id$timestamp';
+    for (final salt in const [
+      'nSRZ+dnDOmo6D1T2nSKYP2qJ',
+      'IYXEGQcnn9EPsfbBGN7mOTeo',
+      'KsNB42qr58JR7sZw/ZJpH+cy2',
+      'GxVMxHYFNwWCjtPE',
+      '+QoEaqp',
+      'hsCZLjlslE/6v6uziIzGCnw7mL',
+      '1X5EmnTRduq9YHHJrna',
+      'vtWp5chbRbIiVvNn+l',
+      'Zfk0F',
+      'l',
+      'Wj+LeMfybKPoZep3m6T3k',
+      'lybzZGLYzhgBwM3CDO',
+      '7oNGgod8jui69+Z',
+      'pGW',
+      '+gjRQKugSO3PXtWKa31cYZKI+z',
+    ]) {
       digest = md5.convert(utf8.encode('$digest$salt')).toString();
     }
     return '1.$digest';

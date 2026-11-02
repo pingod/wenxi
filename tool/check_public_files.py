@@ -16,9 +16,11 @@ import tempfile
 
 MAX_FILE_BYTES = 100 * 1024 * 1024
 PRIVATE_ROOTS = {
-    '.local', '.dart_tool', '.idea', 'logs', 'logo', 'releases',
+    '.local', '.dart_tool', '.idea', 'logs', 'outputs', 'logo', 'releases',
     'caiiliao', 'build', 'coverage', '\u6f14\u793a\u622a\u56fe',
+    'backend', 'wwwroot', '5.com', '.claude',
 }
+PRIVATE_DIRECTORIES = {'tool/password_updater', 'tool/demo'}
 PRIVATE_FILES = {
     'control.json', 'config.fixed.json', 'LanzouAPI-master.zip',
     'announcements.json', '\u516c\u544a\u7f16\u8f91\u5668.html',
@@ -28,6 +30,11 @@ PRIVATE_FILES = {
     'docs/QUARK-AUTHENTICATED-DIRECT-DOWNLOAD.md',
     'native/gopeed/internal/protocol/http/build.data',
     'native/gopeed/internal/protocol/http/download.data',
+    '\u542f\u52a8\u5bc6\u7801\u66f4\u65b0\u5668.cmd',
+    'tool/source_runner.dart', 'tool/build-source-runtime.ps1',
+    'tool/tests/source_live_smoke.dart',
+    'docs/SOURCE-RUNTIME-DEPLOYMENT.md',
+    'docs/REMOTE-SOURCE-VERIFICATION.md',
 }
 PATTERNS = {
     'private-key': re.compile(rb'-----BEGIN (?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----'),
@@ -77,6 +84,9 @@ def path_issue(name):
     if path.is_absolute() or '..' in path.parts or '\\' in name:
         return 'unsafe-path'
     if path.parts[0].lower() in PRIVATE_ROOTS or name in PRIVATE_FILES:
+        return 'private-or-generated-path'
+    if any(name.casefold() == directory or name.casefold().startswith(directory + '/')
+           for directory in PRIVATE_DIRECTORIES):
         return 'private-or-generated-path'
     if len(path.parts) == 1 and re.fullmatch(r'config-\d[^/]*\.json', name, re.I):
         return 'local-release-configuration'

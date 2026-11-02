@@ -10,6 +10,7 @@ import '../diagnostics/app_log.dart';
 import '../domain/auth.dart';
 import '../domain/models.dart';
 import 'browser_page.dart';
+import 'cloud_command_history_sheet.dart';
 import 'common.dart';
 import 'login_page.dart';
 
@@ -119,6 +120,15 @@ class _CloudCommandPageState extends State<CloudCommandPage> {
       return;
     }
     setText(value.text!);
+  }
+
+  Future<void> history() async {
+    if (working) return;
+    focus.unfocus();
+    final entry = await showCloudCommandHistory(context, services);
+    if (entry == null || !mounted || working) return;
+    choose(entry.platform);
+    setText(entry.text);
   }
 
   Future<void> login() async {
@@ -253,6 +263,7 @@ class _CloudCommandPageState extends State<CloudCommandPage> {
         link,
         title: result.$1.title,
         itemCount: result.$2.length,
+        commandText: text,
         canCommit: () => current(run) && !scope.token.isCancelled,
       );
       shareCheckpoint();
@@ -295,11 +306,7 @@ class _CloudCommandPageState extends State<CloudCommandPage> {
   @override
   Widget build(BuildContext context) {
     final paper = Theme.of(context).colorScheme.surface;
-    final help = switch (platform) {
-      CloudPlatform.quark => '支持「咐置…叩苓」中文口令和「/~…~:/」格式口令',
-      CloudPlatform.uc => '支持中文口令和「~U_C…~」字母数字口令',
-      _ => '请从迅雷分享窗口复制中文口令，保留原有内容',
-    };
+    final help = '请从${platform.shortName}复制口令或完整分享文案，保留原有内容';
     return PopScope(
       canPop: !working,
       onPopInvokedWithResult: (didPop, _) {
@@ -307,7 +314,17 @@ class _CloudCommandPageState extends State<CloudCommandPage> {
       },
       child: Scaffold(
         backgroundColor: fill(context),
-        appBar: AppBar(title: const Text('口令解析')),
+        appBar: AppBar(
+          title: const Text('口令解析'),
+          actions: [
+            IconButton(
+              key: const Key('command-history'),
+              tooltip: '口令历史',
+              onPressed: working ? null : history,
+              icon: const Icon(CupertinoIcons.clock),
+            ),
+          ],
+        ),
         body: SafeArea(
           child: Center(
             child: ConstrainedBox(

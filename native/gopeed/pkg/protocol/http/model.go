@@ -1,10 +1,16 @@
 // AsterLink per-task retry and speed options, 2026-09-12. Gopeed v1.8.1 / GPL-3.0.
 package http
 
+const (
+	DefaultRetryLimit = 64
+	MaxRetryLimit     = 64
+)
+
 type ReqExtra struct {
-	Method string            `json:"method"`
-	Header map[string]string `json:"header"`
-	Body   string            `json:"body"`
+	NetworkPolicy *NetworkPolicy    `json:"networkPolicy,omitempty"`
+	Method        string            `json:"method"`
+	Header        map[string]string `json:"header"`
+	Body          string            `json:"body"`
 }
 
 type OptsExtra struct {
@@ -13,7 +19,7 @@ type OptsExtra struct {
 	ConnectionProfile string `json:"connectionProfile,omitempty"`
 	// AliyunGroup is an app-local account digest, never an account credential.
 	AliyunGroup string `json:"aliyunGroup,omitempty"`
-	// AsterLink options; nil retains Gopeed's default of three retries.
+	// AsterLink options; nil uses the application's default retry budget.
 	RetryLimit *int  `json:"retryLimit,omitempty"`
 	SpeedLimit int64 `json:"speedLimit,omitempty"`
 	// AutoTorrent when task download complete, and it is a .torrent file, it will be auto create a new task for the torrent file

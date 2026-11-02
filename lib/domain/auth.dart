@@ -3,6 +3,7 @@ import '../core/json.dart';
 import '../data/state_store.dart';
 import '../data/http.dart';
 import 'models.dart';
+import 'pikpak_web_login.dart';
 import 'tianyi_web_login.dart';
 import 'web_tokens.dart';
 import 'weiyun_web_login.dart';
@@ -745,11 +746,12 @@ class WebLoginTarget {
     ),
     CloudPlatform.xunlei: WebLoginTarget(
       CloudPlatform.xunlei,
-      'https://pan.xunlei.com/',
-      ['https://pan.xunlei.com'],
+      XunleiWebLogin.loginUrl,
+      [XunleiWebLogin.storageOrigin],
       localStorageKey: XunleiWebLogin.storageKey,
+      storageOrigins: [XunleiWebLogin.storageOrigin],
       clearCookieDomains: [
-        'https://i.xunlei.com',
+        XunleiWebLogin.accountOrigin,
         'https://xluser-ssl.xunlei.com',
       ],
     ),
@@ -854,7 +856,7 @@ class WebLoginTarget {
         'https://user.mypikpak.com',
         'https://api-drive.mypikpak.com',
       ],
-      localStorageKey: 'credentials',
+      localStorageKey: PikPakWebLogin.storageKey,
       storageOrigins: ['https://www.mypikpak.com'],
     ),
     CloudPlatform.weiyun: WebLoginTarget(
@@ -885,23 +887,7 @@ class WebLoginTarget {
   };
   String get readStorageScript {
     if (platform == CloudPlatform.pikpak) {
-      return r'''(() => {
-        for (const storage of [localStorage, sessionStorage]) {
-          const sub = storage.getItem('current_sub');
-          const keys = sub ? ['credentials@' + sub, 'credentials', 'token'] : ['credentials', 'token'];
-          for (const key of keys) {
-            try {
-              const raw = storage.getItem(key);
-              if (!raw) continue;
-              const data = JSON.parse(raw);
-              if (!(data.access_token || data.refresh_token || data.accessToken || data.refreshToken)) continue;
-              if (sub && data.sub && String(data.sub) !== sub) continue;
-              return JSON.stringify(data);
-            } catch (_) {}
-          }
-        }
-        return '';
-      })()''';
+      return PikPakWebLogin.readScript;
     }
     if (platform == CloudPlatform.xunlei) return XunleiWebLogin.readScript;
     final key = jsonEncode(localStorageKey);
@@ -966,13 +952,7 @@ class WebLoginTarget {
 
   String get clearStorageScript {
     if (platform == CloudPlatform.pikpak) {
-      return r'''(() => {
-        for (const storage of [localStorage, sessionStorage]) {
-          for (const key of Object.keys(storage)) {
-            if (key === 'credentials' || key.startsWith('credentials@') || key === 'current_sub' || key === 'token') storage.removeItem(key);
-          }
-        }
-      })()''';
+      return PikPakWebLogin.clearScript;
     }
     if (platform == CloudPlatform.xunlei) return XunleiWebLogin.clearScript;
     final key = jsonEncode(localStorageKey);
@@ -1019,7 +999,7 @@ class WebLoginTarget {
     } catch (_) { return 'unavailable'; }
   })()''';
 
-  bool canReadLocalStorage(String? value) {
+  bool canPrepareLocalStorage(String? value) {
     final uri = Uri.tryParse(value ?? '');
     return uri != null &&
         uri.scheme == 'https' &&
@@ -1027,6 +1007,13 @@ class WebLoginTarget {
         uri.userInfo.isEmpty &&
         uri.port == 443;
   }
+
+  bool canReadLocalStorage(String? value) =>
+      canPrepareLocalStorage(value) &&
+      // The account center needs its previous login cleared, but only the
+      // cloud's token can authenticate cloud APIs.
+      (platform != CloudPlatform.xunlei ||
+          Uri.parse(value!).origin == XunleiWebLogin.storageOrigin);
 
   List<String> cookieUrls(String? page) {
     final uri = Uri.tryParse(page ?? '');

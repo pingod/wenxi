@@ -56,6 +56,8 @@ Android 构建内置友盟+移动统计 SDK，通过 Gradle 获取，版本记�
 
 Flutter / Dart 保留其 BSD 许可；Cupertino Icons 为 MIT，Material Icons 为 Apache-2.0。Dio、PointyCastle、media_kit、flutter_inappwebview、flutter_secure_storage、文件选择/打开/分享、托盘及窗口插件等的准确版本记录于 pubspec.lock。其许可由 Flutter 收集并随构建保留；0.3.31 暂时移除应用内的“开源许可”菜单入口。
 
+Windows 文件拖拽使用 desktop_drop 0.8.4（MixinNetwork，Apache-2.0），来源：https://pub.dev/packages/desktop_drop/versions/0.8.4。Dart 与 Windows 源码、原许可保留于 vendor_plugins/desktop_drop；长路径缓冲区、复制语义和生命周期补丁见该目录的 ASTERLINK_PATCHES.md。
+
 vendor_plugins/ 中保留三项插件及 media_kit 的源码和原许可。Android media 插件使用当前 AGP 与 compileSdk，依赖下载先尝试 GitHub，再使用加速地址，并保留固定校验、超时和临时文件处理；改动记录见 vendor_plugins/media_kit_libs_android_video/ASTERLINK_PATCHES.md。media_kit 1.2.6 补充读取 libmpv 的 demux-rotation 字段，改动与上游来源记录在 vendor_plugins/media_kit/ASTERLINK_PATCHES.md，MIT 许可保留在同目录 LICENSE。上述补丁不更换媒体 native 库。
 
 ## 媒体 native 组件
@@ -84,6 +86,16 @@ Gopeed AAR 附带 NDK 28.2.13676358 的 libc++_shared.so。LLVM 及附带组件�
 上游：https://github.com/notofonts/noto-cjk
 
 字体 SHA-256：faa6c9df652116dde789d351359f3d7e5d2285a2b2a1f04a2d7244df706d5ea9
+
+## 文本预览
+
+代码高亮使用 re_highlight 0.0.3（Reqable，MIT），源码：https://github.com/reqable/re-highlight；完整许可见 re_highlight-LICENSE.txt。中文 GBK 解码使用未修改的 enough_convert 1.7.1（MPL-2.0），对应源码：https://pub.dev/packages/enough_convert/versions/1.7.1；完整许可见 enough_convert-LICENSE.txt。脚本仅作为文本显示，不执行。
+
+## 远程来源脚本运行时
+
+远程来源接入包使用 QuickJS-NG 0.14.0，官方固定版本为 https://github.com/quickjs-ng/quickjs/tree/v0.14.0，采用 MIT 许可。原始源码保留在 vendor_plugins/asterlink_js/src/quickjs，未修改上游引擎文件；来源与 SHA-256 清单见该插件的 UPSTREAM.md 和 UPSTREAM-SHA256.json。完整许可见 QuickJS-NG-LICENSE.txt。
+
+应用通过自有 FFI 桥执行已验签的来源模块，未链接 quickjs-libc 或开放进程、本机文件及原生模块加载。后台测试运行时复用同一份引擎和 Dart 宿主代码。HTML 提取使用既有 html / csslib，字符集处理使用前述 enough_convert，其许可继续适用。
 
 ## 图标
 

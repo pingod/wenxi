@@ -60,10 +60,18 @@ Future<ShareResultStatus> shareDiagnosticZip(
 }
 
 Future<void> openDiagnosticExportLocation(String path) async {
-  if (!Platform.isWindows || !await File(path).exists()) {
+  if (!await File(path).exists()) {
     throw const FileSystemException('导出的日志文件已不存在');
   }
+  final directory = p.dirname(path);
+  if (Platform.isLinux) {
+    final result = await Process.run('xdg-open', [directory]);
+    if (result.exitCode != 0) {
+      throw const FileSystemException('未能打开文件管理器');
+    }
+    return;
+  }
   await Process.start('explorer.exe', [
-    p.dirname(path),
+    directory,
   ], mode: ProcessStartMode.detached);
 }

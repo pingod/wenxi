@@ -14,6 +14,7 @@ import 'package:asterlink/lan/lan_files.dart';
 import 'package:asterlink/lan/lan_service.dart';
 import 'package:asterlink/platform/file_access.dart';
 import 'package:asterlink/platform/native_engine.dart';
+import 'package:asterlink/platform/desktop_platform.dart';
 import 'support.dart';
 
 class _LocalIo extends HttpOverrides {}
@@ -29,7 +30,7 @@ class _ObservedFiles extends LanFiles {
 }
 
 void main() {
-  final executable = p.absolute('native/bin/asterlink_gopeed.exe');
+  final executable = gopeedTestExecutable();
   group(
     'LAN with the actual Windows download engine',
     () {
@@ -252,7 +253,7 @@ void main() {
         },
       );
     },
-    skip: !Platform.isWindows || !File(executable).existsSync()
+    skip: !isDesktopPlatform || !File(executable).existsSync()
         ? 'Requires the packaged Windows download helper'
         : false,
   );

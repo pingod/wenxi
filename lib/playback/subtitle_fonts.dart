@@ -318,11 +318,27 @@ class SubtitleFontStore {
             '/system_ext/fonts',
             '/vendor/fonts',
           ]
+        : Platform.isLinux
+        // Distributions differ: Debian/Ubuntu keep TrueType under
+        // truetype/, Arch/Fedora use the unprefixed directory, and KDE
+        // often adds user fonts. Scan the parents so nested family folders
+        // (e.g. /usr/share/fonts/noto) are picked up recursively below.
+        ? [
+            '/usr/share/fonts',
+            '/usr/local/share/fonts',
+            if (Platform.environment['HOME'] case final String home)
+              p.join(home, '.local', 'share', 'fonts'),
+            if (Platform.environment['XDG_DATA_HOME'] case final String data)
+              p.join(data, 'fonts'),
+          ]
         : ['/System/Library/Fonts', '/usr/share/fonts/truetype'];
     final paths = <String>[];
+    // Linux trees nest families one level deep (…/fonts/noto/NotoSans.ttf),
+    // while the Windows and macOS font directories are already flat.
+    final recursive = Platform.isLinux;
     for (final root in roots) {
       try {
-        await for (final file in Directory(root).list()) {
+        await for (final file in Directory(root).list(recursive: recursive)) {
           if ({
             '.ttc',
             '.ttf',

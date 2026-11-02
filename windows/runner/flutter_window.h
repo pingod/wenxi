@@ -12,6 +12,7 @@
 #include "download_power_bridge.h"
 #include "player_image_bridge.h"
 #include "external_download_bridge.h"
+#include "diagnostic_bridge.h"
 
 // A window that does nothing but host a Flutter view.
 class FlutterWindow : public Win32Window {
@@ -36,6 +37,7 @@ class FlutterWindow : public Win32Window {
   std::unique_ptr<DownloadPowerBridge> download_power_;
   std::unique_ptr<PlayerImageBridge> player_images_;
   std::unique_ptr<ExternalDownloadBridge> external_downloads_;
+  std::unique_ptr<DiagnosticBridge> diagnostics_;
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> theme_channel_;
 };
 

@@ -10,9 +10,43 @@ class UcPublishedCommand {
     r'^window\.appData\s*=\s*JSON\.parse\(\s*decodeURIComponent\(\s*',
   );
   static final _bootstrapEnd = RegExp(r'^\s*\)\s*\)');
-  static final _command = RegExp(
-    r'[執执][\u3400-\u4dbf\u4e00-\u9fffA-Za-z0-9]{1,128}?生效',
-  );
+  static const _maximumLength = 2000;
+  static final _invisible = RegExp(r'[\u200b-\u200d\u2060\uFEFF]');
+  static final _label = RegExp(r'口令\s*[:：]\s*(.+)$');
+
+  static String _clean(String text) => text.replaceAll(_invisible, '').trim();
+
+  static String _unquote(String text) {
+    final value = _clean(text);
+    const quotes = {'「': '」', '『': '』', '“': '”', '"': '"', '`': '`'};
+    if (value.length >= 2 && quotes[value[0]] == value[value.length - 1]) {
+      return _clean(value.substring(1, value.length - 1));
+    }
+    return value;
+  }
+
+  static Iterable<String> _fencedBlocks(String text) sync* {
+    var marker = '', width = 0;
+    final lines = <String>[];
+    for (final line in const LineSplitter().convert(text)) {
+      final trimmed = line.trimLeft();
+      if (marker.isEmpty) {
+        if (!trimmed.startsWith('```') && !trimmed.startsWith('~~~')) continue;
+        marker = trimmed[0];
+        width = 0;
+        while (width < trimmed.length && trimmed[width] == marker) {
+          width++;
+        }
+      } else if (trimmed.startsWith(marker * width) &&
+          trimmed.trimRight().split('').every((char) => char == marker)) {
+        yield lines.join('\n');
+        lines.clear();
+        marker = '';
+      } else {
+        lines.add(line);
+      }
+    }
+  }
 
   static String _window(String text, int start) =>
       text.substring(start, (start + 160).clamp(start, text.length));
@@ -86,17 +120,48 @@ class UcPublishedCommand {
         ) ??
         document.body;
     require(body != null, '每日口令页面没有有效正文');
-    Set<String> commands(String text) => _command
-        .allMatches(text.replaceAll(RegExp(r'[\u200b-\u200d\u2060\uFEFF]'), ''))
-        .map((match) => match[0]!)
-        .toSet();
+    final candidates = <String>{};
+    void add(String text) {
+      final value = _clean(text);
+      if (value.isEmpty) return;
+      require(value.length <= _maximumLength, '每日口令内容过长');
+      candidates.add(value);
+    }
 
-    // The copyable code block takes precedence over old instructional text.
-    final candidates = <String>{
-      for (final code in body!.querySelectorAll('pre, code'))
-        ...commands(code.text),
-    };
-    if (candidates.isEmpty) candidates.addAll(commands(body.text));
+    // The publisher's copyable blocks identify the input. The UC endpoint
+    // validates it, so changing token prefixes or suffixes needs no app update.
+    for (final code in body!.querySelectorAll('pre, code')) {
+      add(code.text);
+    }
+    if (candidates.isEmpty) {
+      for (final block in _fencedBlocks(body.text)) {
+        add(block);
+      }
+    }
+    if (candidates.isEmpty) {
+      void addSnippet(String snippet) {
+        final text = _clean(snippet), labelled = _label.firstMatch(text);
+        if (labelled != null) {
+          add(_unquote(labelled[1]!));
+        } else if (_unquote(text) != text) {
+          add(_unquote(text));
+        }
+      }
+
+      for (final node in body.querySelectorAll('p, li, blockquote')) {
+        addSnippet(node.text);
+      }
+      if (candidates.isEmpty) {
+        for (final line in const LineSplitter().convert(body.text)) {
+          addSnippet(line);
+        }
+      }
+    }
+    if (candidates.isEmpty &&
+        !content.contains(RegExp(r'[<>\r\n]')) &&
+        _clean(content).isNotEmpty) {
+      add(content);
+    }
     require(candidates.length == 1, '每日口令页面没有唯一的 UC 口令');
     return candidates.single;
   }

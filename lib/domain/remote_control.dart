@@ -15,6 +15,7 @@ class RemoteControlConfig {
     this.updates = const {},
     this.helpUrl,
     this.aboutDescription = '',
+    this.parserHubUrl,
   });
 
   static const defaults = RemoteControlConfig();
@@ -25,6 +26,7 @@ class RemoteControlConfig {
   final Map<String, RemoteUpdate> updates;
   final Uri? helpUrl;
   final String aboutDescription;
+  final Uri? parserHubUrl;
   static const defaultAboutDescription =
       '网盘文件管理与 Gopeed 下载器\nAndroid · Windows';
   String get aboutText =>
@@ -82,6 +84,7 @@ class RemoteControlConfig {
     },
     if (helpUrl != null) 'help': {'enabled': true, 'url': helpUrl.toString()},
     if (aboutDescription.isNotEmpty) 'about': {'description': aboutDescription},
+    if (parserHubUrl != null) 'parserHub': {'url': parserHubUrl.toString()},
   };
 }
 
@@ -156,6 +159,25 @@ Uri httpsUri(String value) {
     throw const FormatException('链接必须是有效的 HTTPS 地址');
   }
   return uri;
+}
+
+/// Service roots may include a deployment subdirectory. Public configuration
+/// carries only the address; API credentials and rule verification stay local.
+Uri parserHubUri(String value) {
+  final uri = Uri.tryParse(value);
+  if (value.isEmpty ||
+      value.length > 2048 ||
+      RegExp(r'[\s\x00-\x1f\x7f\\]').hasMatch(value) ||
+      uri == null ||
+      !{'http', 'https'}.contains(uri.scheme) ||
+      uri.host.isEmpty ||
+      uri.userInfo.isNotEmpty ||
+      uri.hasQuery ||
+      uri.hasFragment ||
+      (uri.hasPort && (uri.port < 1 || uri.port > 65535))) {
+    throw const FormatException('解析后台地址必须是有效的 HTTP/HTTPS 根地址，不能包含账号、查询参数或片段');
+  }
+  return uri.replace(path: uri.path.replaceFirst(RegExp(r'/+$'), ''));
 }
 
 Map<String, dynamic> _object(Object? value, String field) {

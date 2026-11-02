@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import '../diagnostics/app_log.dart';
 import 'dart:io';
 import 'package:flutter/cupertino.dart';
@@ -9,9 +10,12 @@ import '../data/http.dart';
 import '../data/remote_control_service.dart';
 import '../domain/models.dart';
 import '../domain/file_types.dart';
+import '../download/mobile_data_download_guard.dart';
 import 'operation_progress_view.dart';
 import 'app_theme.dart';
 export '../domain/file_types.dart';
+export '../download/mobile_data_download_guard.dart'
+    show DownloadConfirmationCancelled;
 export 'app_theme.dart' show themeAccent, themeCompanion, themeOnAccent;
 export 'app_background.dart' show backgroundSurface, BackgroundReadable;
 
@@ -50,7 +54,10 @@ void message(BuildContext context, String text, {VoidCallback? onTap}) {
   final messenger = ScaffoldMessenger.maybeOf(context);
   if (messenger == null) return;
   final theme = Theme.of(context);
-  final wide = MediaQuery.sizeOf(context).width >= 640;
+  final screenWidth = MediaQuery.sizeOf(context).width;
+  // Use one inset for phone and desktop so a custom-width snackbar does not
+  // silently fall back to Flutter's lower default margin on large screens.
+  final horizontalMargin = math.max(16.0, (screenWidth - 520) / 2);
   final accent = theme.colorScheme.primary;
   messenger.clearSnackBars();
   messenger.showSnackBar(
@@ -58,8 +65,7 @@ void message(BuildContext context, String text, {VoidCallback? onTap}) {
       behavior: SnackBarBehavior.floating,
       backgroundColor: theme.colorScheme.surface,
       elevation: 4,
-      width: wide ? 520 : null,
-      margin: wide ? null : const EdgeInsets.fromLTRB(16, 0, 16, 12),
+      margin: EdgeInsets.fromLTRB(horizontalMargin, 0, horizontalMargin, 28),
       padding: EdgeInsets.zero,
       duration: Duration(seconds: onTap == null ? 4 : 6),
       shape: RoundedRectangleBorder(
@@ -175,6 +181,10 @@ Future<T?> busy<T>(
   try {
     final value = await scope.run(() => progress.run(action));
     return cancelled ? null : value;
+  } on DownloadConfirmationCancelled {
+    cancelled = true;
+    progress.close(cancelled: true);
+    return null;
   } catch (e, stack) {
     if (!cancelled) {
       DiagnosticLog.error(

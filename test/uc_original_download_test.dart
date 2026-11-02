@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/http.dart';
+import 'package:asterlink/diagnostics/app_log.dart';
 import 'package:asterlink/domain/auth.dart';
 import 'package:asterlink/domain/file_types.dart';
 import 'package:asterlink/domain/models.dart';
@@ -46,6 +47,158 @@ void main() {
       expect(f.calls('/file'), hasLength(1));
       expect(f.calls('/1/clouddrive/file/download'), isEmpty);
       expect(f.calls('/oauth/authorize'), isEmpty);
+    },
+  );
+
+  test(
+    'TV original downloads carry the latest web Cookie into probes and saved tasks',
+    () async {
+      final f = UcTvFixture();
+      const address = 'https://dl.uc.cn/original.bin?sign=a%2Bb&part=1&part=2';
+      f.respond = (r) {
+        if (r.uri.path == '/file') {
+          expect(r.headers.containsKey('Cookie'), isFalse);
+          return () async {
+            await f.vault.putCredential(
+              CloudPlatform.uc,
+              f.credential.withFields({
+                'primary': '__pus=web-owner; __puus=rotated-session',
+              }, preserveRevision: true),
+            );
+            return ucTvOk({
+              'data': {
+                'fid': ucTvVideo.id,
+                'size': ucTvVideo.size,
+                'download_url': address,
+              },
+            });
+          }();
+        }
+        if (r.uri.host == 'dl.uc.cn') {
+          expect(
+            r.headers['Cookie'],
+            '__pus=web-owner; __puus=rotated-session',
+          );
+          expect(r.headers['Range'], 'bytes=0-1');
+          expect(r.headers.containsKey('Authorization'), isFalse);
+          expect(r.headers.containsKey('x-pan-token'), isFalse);
+          return originalRange(ucTvVideo.size);
+        }
+        return null;
+      };
+      final spec = await f.repository.prepare(ucTvPersonal, ucTvVideo);
+      final saved = DownloadSpec.fromJson(spec.toJson());
+      expect(saved.url, address);
+      expect(saved.headers, {'Cookie': f.credential.primary});
+      expect(saved.source!['accountRevision'], 7);
+      expect(f.credential.updatedAt, 7);
+    },
+  );
+
+  test(
+    'TV personal downloads renew the web session before requesting ranges',
+    () async {
+      final credential = ucTvCredential().withFields({
+        'ucSessionRefreshedAt': '0',
+      }, preserveRevision: true);
+      final f = UcTvFixture(credential: credential);
+      f.respond = (r) {
+        if (r.uri.path.endsWith('/config')) {
+          return HttpResult(200, '{"status":200,"code":0,"data":{}}', {
+            'set-cookie': ['__puus=renewed-for-ranges; Path=/'],
+          });
+        }
+        if (r.uri.path == '/file') {
+          return ucTvOk({
+            'data': {
+              'fid': ucTvVideo.id,
+              'size': ucTvVideo.size,
+              'download_url': 'https://dl.uc.cn/original.bin',
+            },
+          });
+        }
+        if (r.uri.host == 'dl.uc.cn') {
+          expect(r.headers['Cookie'], contains('__puus=renewed-for-ranges'));
+          return originalRange(ucTvVideo.size);
+        }
+        return null;
+      };
+      final spec = await f.repository.prepare(ucTvPersonal, ucTvVideo);
+      expect(spec.headers['Cookie'], contains('__puus=renewed-for-ranges'));
+      expect(
+        f.http.calls.indexWhere((r) => r.uri.path.endsWith('/config')),
+        lessThan(f.http.calls.indexWhere((r) => r.uri.path == '/file')),
+      );
+      expect(f.credential.updatedAt, credential.updatedAt);
+    },
+  );
+
+  test(
+    'TV original downloads never attach web Cookies to foreign hosts',
+    () async {
+      for (final host in ['media.example', 'uc.cn.example', 'notuc.cn']) {
+        final f = UcTvFixture();
+        f.respond = (r) {
+          if (r.uri.path == '/file') {
+            return ucTvOk({
+              'data': {
+                'fid': ucTvVideo.id,
+                'size': ucTvVideo.size,
+                'download_url': 'https://$host/original.bin',
+              },
+            });
+          }
+          if (r.uri.host == host) {
+            expect(r.headers.containsKey('Cookie'), isFalse);
+            return originalRange(ucTvVideo.size);
+          }
+          return null;
+        };
+        final spec = await f.repository.prepare(ucTvPersonal, ucTvVideo);
+        expect(spec.headers, isEmpty);
+      }
+    },
+  );
+
+  test(
+    'TV shared downloads use Cookies renewed while transferring the file',
+    () async {
+      final f = UcTvFixture();
+      f.respond = (r) {
+        if (r.uri.path == '/1/clouddrive/share/sharepage/save') {
+          return HttpResult(
+            200,
+            jsonResponse({
+              'status': 200,
+              'code': 0,
+              'data': {'task_id': 'save-task'},
+            }).body,
+            {
+              'set-cookie': ['__puus=transferred-session; Path=/'],
+            },
+          );
+        }
+        if (r.uri.path == '/file') {
+          expect(r.headers.containsKey('Cookie'), isFalse);
+          return ucTvOk({
+            'data': {
+              'fid': 'saved-video',
+              'size': ucTvVideo.size,
+              'download_url': 'https://dl.uc.cn/shared.bin',
+            },
+          });
+        }
+        if (r.uri.host == 'dl.uc.cn') {
+          expect(r.headers['Cookie'], contains('__puus=transferred-session'));
+          return originalRange(ucTvVideo.size);
+        }
+        return null;
+      };
+      final spec = await f.repository.prepare(ucTvShare, ucTvVideo);
+      expect(spec.headers['Cookie'], contains('__puus=transferred-session'));
+      expect(spec.cleanup, isNotNull);
+      expect(f.calls('/1/clouddrive/share/sharepage/save'), hasLength(1));
+      expect(f.credential.updatedAt, 7);
     },
   );
 
@@ -229,6 +382,119 @@ void main() {
           isEmpty,
         );
       }
+    },
+  );
+
+  test(
+    'An authorized replacement records its real size without exposing account or URL secrets',
+    () async {
+      final previous = DiagnosticLog.active;
+      final log = DiagnosticLog.open(null);
+      DiagnosticLog.active = log;
+      addTearDown(() {
+        log.dispose();
+        DiagnosticLog.active = previous;
+      });
+      const file = CloudFile(
+        id: 'video-1',
+        name: 'private-original-video.mp4',
+        size: 1115563,
+      );
+      final f = UcTvFixture();
+      f.respond = (r) {
+        if (r.uri.path == '/file') {
+          return ucTvOk({
+            'data': {
+              'fid': file.id,
+              'size': file.size,
+              'download_url': 'https://dl.uc.cn/original?sign=private-link',
+            },
+          });
+        }
+        if (r.uri.host == 'dl.uc.cn') {
+          expect(r.headers['Cookie'], f.credential.primary);
+          return originalRange(15340287);
+        }
+        return null;
+      };
+      await expectLater(
+        f.repository.prepare(ucTvPersonal, file),
+        throwsA(
+          isA<AppException>().having(
+            (error) => error.message,
+            'download restriction explanation',
+            contains('原站下载限制'),
+          ),
+        ),
+      );
+      final entry = log.entries().singleWhere(
+        (entry) => entry.event == 'uc_tv.original_probe',
+      );
+      expect(entry.data['fields'], {
+        'platform': 'uc',
+        'file': DiagnosticLog.reference(file.id),
+        'route': 'authorized_original',
+        'host': 'dl.uc.cn',
+        'status': 206,
+        'listedBytes': 1115563,
+        'expectedBytes': 1115563,
+        'receivedTotal': 15340287,
+        'responseBytes': 2,
+        'hasWebSession': true,
+        'result': 'size_mismatch',
+      });
+      final recorded = log.entries().map((entry) => entry.detail).join('\n');
+      for (final secret in [
+        file.name,
+        file.id,
+        f.credential.primary,
+        f.credential.field('tv_access_token'),
+        f.credential.field('tv_refresh_token'),
+        'private-link',
+      ]) {
+        expect(recorded, isNot(contains(secret)));
+      }
+      expect(f.calls('/file'), hasLength(1));
+      expect(f.calls('/file').single.uri.queryParameters['method'], 'download');
+      expect(f.calls('/ucdrive/token'), isEmpty);
+      expect(f.calls('/oauth/authorize'), isEmpty);
+    },
+  );
+
+  test(
+    'A rejected original probe retains its HTTP status instead of reporting a size mismatch',
+    () async {
+      final previous = DiagnosticLog.active;
+      final log = DiagnosticLog.open(null);
+      DiagnosticLog.active = log;
+      addTearDown(() {
+        log.dispose();
+        DiagnosticLog.active = previous;
+      });
+      final f = UcTvFixture();
+      f.respond = (r) => r.uri.host == 'media.example'
+          ? const HttpResult(403, 'private server response')
+          : null;
+      await expectLater(
+        f.repository.prepare(ucTvPersonal, ucTvVideo),
+        throwsA(
+          isA<AppException>().having(
+            (error) => error.message,
+            'HTTP status',
+            contains('HTTP 403'),
+          ),
+        ),
+      );
+      final entry = log.entries().singleWhere(
+        (entry) => entry.event == 'uc_tv.original_probe',
+      );
+      final fields = entry.data['fields'] as Map;
+      expect(fields['status'], 403);
+      expect(fields['expectedBytes'], 400);
+      expect(fields['receivedTotal'], isNull);
+      expect(fields['hasWebSession'], isFalse);
+      expect(fields['result'], 'invalid_response');
+      expect(entry.detail, isNot(contains('private server response')));
     },
   );
 
