@@ -92,7 +92,10 @@ class _ResourcePrioritySheetState extends State<_ResourcePrioritySheet> {
             child: ReorderableListView.builder(
               buildDefaultDragHandles: false,
               itemCount: order.length,
-              onReorderItem: (from, to) => move(from, to),
+              onReorder: (from, to) {
+                if (to > from) to--;
+                move(from, to);
+              },
               itemBuilder: (context, index) {
                 final platform = order[index];
                 return ListTile(
