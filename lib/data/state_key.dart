@@ -267,6 +267,27 @@ class LocalStateKey {
     return null;
   }
 
+  /// Turns a raw platform failure into an actionable message: the startup page
+  /// shows [AppException] text verbatim, while an unmapped [PlatformException]
+  /// would only surface as a generic "操作失败，请稍后重试".
+  /// The macOS plugin reports OSStatus -34018 (errSecMissingEntitlement) through
+  /// its details, not its code, so every field is inspected.
+  static String _storageFailure(Object error) {
+    if (error is! PlatformException) return '本地密钥存储不可用，请稍后重试';
+    final description = '${error.code} ${error.message} ${error.details}';
+    if (description.contains('-34018') ||
+        description.contains('entitlement')) {
+      return 'macOS 系统钥匙串拒绝了本次访问（缺少授权）。请确认已登录本机账号后重试；'
+          '原始数据未被修改';
+    }
+    if (description.contains('UserNotAuthenticated') ||
+        description.contains('-25308')) {
+      return '系统钥匙串当前处于锁定状态，请先解锁钥匙串后重试';
+    }
+    return '系统安全存储无法保存本地密钥（${error.code}），原始数据未被修改。'
+        '请检查系统钥匙串或凭据服务后重试';
+  }
+
   static void _recordFailure(String operation, PlatformException error) {
     // Plugin messages may contain values. Keep only known error categories;
     // native details consist solely of exception class names.
@@ -300,11 +321,16 @@ class LocalStateKey {
     require(key.length == 32, '本地密钥格式错误');
     final value = base64Encode(key);
     for (final suffix in ['', '.copy']) {
-      await storage.write(
-        key: '${_name(namespace)}$suffix',
-        value: value,
-        aOptions: _options(namespace),
-      );
+      try {
+        await storage.write(
+          key: '${_name(namespace)}$suffix',
+          value: value,
+          aOptions: _options(namespace),
+        );
+      } on PlatformException catch (error) {
+        _recordFailure('legacy_write', error);
+        throw AppException(_storageFailure(error));
+      }
     }
     if (Platform.isAndroid) {
       require(

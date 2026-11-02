@@ -112,8 +112,17 @@ CI 产物只是**未公证**的 ad-hoc 签名包，用于验证「能编译、�
 
 **公证仍需手动一次**（CI 的公证凭据差异较大，未固化到脚本）：`xcrun notarytool submit <zip> --apple-id ... --team-id ... --password <app 专用密码> --wait`，成功后 `xcrun stapler staple <zip 或 .app>`。凭据可放 Apple Developer Program 的 app-specific password 或 App Store Connect API Key。
 
+## 钥匙串与签名
+
+本地状态密钥经 `flutter_secure_storage` 存入系统钥匙串。该插件在 macOS 上默认使用 *data protection keychain*（`kSecUseDataProtectionKeychain`），而该钥匙串要求应用带有 `keychain-access-groups` 授权，这种授权只有通过 provisioning profile 签名的构建才能获得。ad-hoc 与 Developer ID 构建写入时会返回 `errSecMissingEntitlement (-34018)`，表现为启动即停在「启动恢复 / 应用暂时无法启动」（日志中为 `app.services_failed` + `PlatformException ... -34018`）。
+
+因此 `lib/data/state_store.dart` 显式设置 `MacOsOptions(usesDataProtectionKeychain: false)`，改用旧版登录钥匙串，对所有签名方式都可用。
+
+**不要**给 `macos/Runner/*.entitlements` 添加 `keychain-access-groups`：缺少匹配的 provisioning profile 时，内核会因该授权不合法直接以 SIGKILL 终止进程（实测 `Killed: 9`，同时 `codesign -v` 仍然通过）。
+
 ## 已知限制
 
 - 本机若仅有 Command Line Tools 而无完整 Xcode，`flutter build macos` 会在 `xcodebuild` 阶段失败；CI 已用 `macos-14` runner 覆盖正式构建。
 - CI 的 macOS 产物是 ad-hoc 签名、未公证的 zip，仅供验证与内部测试；对外分发需配置 `MACOS_*` secrets 走 `release.yml` 并用 `notarytool` 公证。
 - 未实现 macOS 内嵌浏览器，需要网页登录的平台（115、百度、夸克、UC、移动、微云、联通等）走「系统浏览器 + 手动粘贴凭据」。
+- 首次写入 `~/Downloads/AsterLink` 时 macOS 可能弹出「访问下载文件夹」的隐私授权；拒绝后下载会失败，需在「系统设置 → 隐私与安全性 → 文件与文件夹」中放开。

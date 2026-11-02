@@ -513,7 +513,10 @@ class AppServices extends ChangeNotifier {
       destination = cache;
       transport = AndroidGopeedTransport();
     } else {
-      require(isDesktopPlatform, '当前版本支持 Android、Windows 和 Linux');
+      require(
+        isDesktopPlatform,
+        '当前版本支持 Android、Windows、Linux 和 macOS',
+      );
       data = Directory(
         p.join((await getApplicationSupportDirectory()).path, 'AsterLink'),
       );

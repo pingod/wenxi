@@ -603,9 +603,17 @@ void main() {
       final pointer = await local(LocalStateKey.locationName).readAsBytes();
       final wrapper = await local(LocalStateKey.recoveryName).readAsBytes();
       storage.denyWrites = true;
+      // A denied secure write surfaces as an actionable AppException instead
+      // of a raw PlatformException (see state_key_storage_failure_test.dart).
       await expectLater(
         recovery().unlock(password),
-        throwsA(isA<PlatformException>()),
+        throwsA(
+          isA<AppException>().having(
+            (error) => error.message,
+            'message',
+            contains('secure-write-unavailable'),
+          ),
+        ),
       );
       expect(await local('state-v1.enc').readAsBytes(), bytes);
       expect(await local(LocalStateKey.locationName).readAsBytes(), pointer);

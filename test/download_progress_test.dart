@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/domain/downloads.dart';
 import 'package:asterlink/domain/models.dart';
@@ -230,7 +231,7 @@ void main() {
             height: 140,
             child: ListView(
               controller: scroll,
-              cacheExtent: 1000,
+              scrollCacheExtent: const ScrollCacheExtent.pixels(1000),
               children: [
                 DownloadProgress(task: task()),
                 const SizedBox(height: 900),

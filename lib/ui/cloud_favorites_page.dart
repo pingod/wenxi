@@ -210,7 +210,6 @@ class _CloudFavoritesPageState extends State<CloudFavoritesPage> {
     int newIndex,
   ) async {
     if (_saving || (!_organizing && !_desktop)) return;
-    if (oldIndex < newIndex) newIndex--;
     if (oldIndex == newIndex) return;
     final favorite = visible[oldIndex];
     final ids = visible.map((item) => item.id).toList();
@@ -315,7 +314,7 @@ class _CloudFavoritesPageState extends State<CloudFavoritesPage> {
                     : ReorderableListView.builder(
                         key: const Key('favorites-reorder-list'),
                         buildDefaultDragHandles: false,
-                        onReorder: (oldIndex, newIndex) =>
+                        onReorderItem: (oldIndex, newIndex) =>
                             unawaited(_reorder(favorites, oldIndex, newIndex)),
                         padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
                         itemCount: favorites.length,

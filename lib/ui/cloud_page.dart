@@ -539,7 +539,8 @@ class _CloudListSettingsPageState extends State<CloudListSettingsPage> {
   void _reorder(int oldIndex, int newIndex) {
     if (_saving) return;
     setState(() {
-      if (newIndex > oldIndex) newIndex--;
+      // onReorderItem already accounts for the removed item, so the target
+      // index needs no manual adjustment here.
       final platform = _preferences.order.removeAt(oldIndex);
       _preferences.order.insert(newIndex, platform);
     });
@@ -609,7 +610,7 @@ class _CloudListSettingsPageState extends State<CloudListSettingsPage> {
                     buildDefaultDragHandles: false,
                     padding: const EdgeInsets.fromLTRB(12, 0, 12, 16),
                     itemCount: _preferences.order.length,
-                    onReorder: _reorder,
+                    onReorderItem: _reorder,
                     itemBuilder: (context, index) {
                       final platform = _preferences.order[index];
                       final entry = cloudEntries.firstWhere(
@@ -624,7 +625,7 @@ class _CloudListSettingsPageState extends State<CloudListSettingsPage> {
                                 _reorder(index, index - 1),
                           if (index < _preferences.order.length - 1 && !_saving)
                             const CustomSemanticsAction(label: '下移'): () =>
-                                _reorder(index, index + 2),
+                                _reorder(index, index + 1),
                         },
                         child: Card(
                           elevation: 0,
