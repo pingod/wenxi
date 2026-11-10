@@ -121,6 +121,8 @@ jobs:
           compression-level: 0
           retention-days: 14
   windows:
+    # Windows 安装包与便携包改由上游 z7786/wenxi 发布，本仓库不再重复打包。
+    if: ${{ false }}
     runs-on: windows-2022
     timeout-minutes: 90
     defaults:
