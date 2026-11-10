@@ -11,9 +11,9 @@ concurrency:
   group: packages-${{ github.ref }}
   cancel-in-progress: true
 env:
-  # pubspec.lock is resolved against the mirror, so every job has to agree with
-  # it; `flutter pub get --enforce-lockfile` rewrites the lock otherwise.
-  PUB_HOSTED_URL: https://pub.flutter-io.cn
+  # The setup action rewrites the mirror URLs in pubspec.lock to the official
+  # registry, so every job here must resolve against the same host.
+  PUB_HOSTED_URL: https://pub.dev
   # The Flutter SDK itself comes from the official storage: the mainland mirror
   # is single-digit megabytes per second from a hosted runner and drops the
   # connection part way through the 1.4 GB archive.
@@ -165,7 +165,7 @@ jobs:
     # Apple Silicon runner: the .app and the Go download helper are both built
     # for arm64 here, so the default `build-native-darwin.sh` (GOARCH=arm64)
     # lines up with the app the Flutter toolchain produces.
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
