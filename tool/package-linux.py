@@ -217,12 +217,20 @@ def _tar_bytes(stage, prefix, epoch, compression=None):
 
 
 def _installed_size(stage):
-    return sum(path.stat().st_size for path in Path(stage).rglob('*') if path.is_file())
+    return sum(
+        path.stat().st_size
+        for path in Path(stage).rglob('*')
+        if path.is_file() and not path.is_symlink()
+    )
 
 
 def _md5sums(stage):
     records = []
-    for path in sorted(p for p in Path(stage).rglob('*') if p.is_file()):
+    # dpkg's md5sums covers regular files only; a symlink such as
+    # /usr/bin/asterlink must not be hashed (or followed).
+    for path in sorted(
+        p for p in Path(stage).rglob('*') if p.is_file() and not p.is_symlink()
+    ):
         digest = hashlib.md5()
         with path.open('rb') as stream:
             for block in iter(lambda: stream.read(1024 * 1024), b''):
