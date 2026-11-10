@@ -4,9 +4,11 @@ import XCTest
 
 class RunnerTests: XCTestCase {
 
-  func testExample() {
-    // If you add code to the Runner application, consider adding tests here.
-    // See https://developer.apple.com/documentation/xctest for more information about using XCTest.
+  func testApplicationBundleKeepsDownloadHelper() {
+    let app = Bundle.main
+    XCTAssertEqual(app.bundleIdentifier, "com.asterlink.app")
+    let helper = app.bundleURL.appendingPathComponent("Contents/MacOS/asterlink_gopeed")
+    XCTAssertTrue(FileManager.default.isExecutableFile(atPath: helper.path))
   }
 
 }

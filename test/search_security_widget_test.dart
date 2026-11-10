@@ -127,25 +127,16 @@ void main() {
         expect(redeemed, 0);
         expect(continued, isFalse);
         if (name == 'android' || name == 'windows') {
-          // The screenshots are a report artefact of the machine that ran the
-          // Windows fidelity pass. Writing them is best effort so the test also
-          // passes on machines without that drive.
-          final path = File(
-            'D:/.ls/pan-relay-main/reports/search-security-2026-10-23/app-verification-$name.png',
-          );
-          if (path.parent.existsSync()) {
-            final render =
-                boundary.currentContext!.findRenderObject()!
-                    as RenderRepaintBoundary;
-            await tester.runAsync(() async {
-              final image = await render.toImage(pixelRatio: 1);
-              final data = await image.toByteData(
-                format: ui.ImageByteFormat.png,
-              );
-              await path.writeAsBytes(data!.buffer.asUint8List());
-              image.dispose();
-            });
-          }
+          final render =
+              boundary.currentContext!.findRenderObject()!
+                  as RenderRepaintBoundary;
+          await tester.runAsync(() async {
+            final image = await render.toImage(pixelRatio: 1);
+            final data = await image.toByteData(format: ui.ImageByteFormat.png);
+            final path = File('${directory.path}/app-verification-$name.png');
+            await path.writeAsBytes(data!.buffer.asUint8List());
+            image.dispose();
+          });
         }
         for (var i = 0; i < 3; i++) {
           final cell = find.byKey(ValueKey('search-captcha-cell-$i'));

@@ -15,16 +15,20 @@ import '../data/http.dart';
 import '../data/resource_pool_preview.dart';
 import '../data/parser_rules/hub.dart';
 import '../domain/auth.dart';
+import '../domain/ctfile_captcha.dart';
 import '../domain/baidu_share_route.dart';
 import '../domain/public_share_route.dart';
 import '../domain/links.dart';
+import '../domain/github.dart';
 import '../domain/models.dart';
 import '../domain/ed2k.dart';
 import '../domain/resource_search.dart';
 import 'cloud_command_page.dart';
 import '../platform/desktop_platform.dart';
 import '../platform/file_access.dart';
+import '../platform/document_actions.dart';
 import 'browser_page.dart';
+import 'ctfile_verification_page.dart';
 import 'baidu_share_route_picker.dart';
 import 'resource_preferences.dart';
 import 'parser_site_picker.dart';
@@ -63,6 +67,7 @@ class ParsePageState extends State<ParsePage> {
   final _progress = OperationProgress();
   List<ParsedLink> links = [];
   int selected = 0, _generation = 0;
+  bool _ctfileVerifying = false;
   bool working = false;
   bool _startingParse = false;
   String stage = '', error = '';
@@ -114,7 +119,7 @@ class ParsePageState extends State<ParsePage> {
     if (!widget.active &&
         !widget.resourceActive &&
         (oldWidget.active || oldWidget.resourceActive)) {
-      if (working) _cancel();
+      if (working || _ctfileVerifying) _cancel();
       focus.unfocus();
       codeFocus.unfocus();
     }
@@ -140,7 +145,7 @@ class ParsePageState extends State<ParsePage> {
     if (_recognizedText == input.text) return;
     _recognizedText = input.text;
     _parserPasswordGrant = null;
-    if (working) _cancel();
+    if (working || _ctfileVerifying) _cancel();
     _progress.clear();
     final previous = current?.url;
     final recognized = LinkParser.parse(input.text);
@@ -165,6 +170,7 @@ class ParsePageState extends State<ParsePage> {
   void _editCode(String value) {
     var link = current;
     if (link == null) return;
+    if (_ctfileVerifying) _cancel();
     setState(() {
       _manualCodes[link.url] = value;
       links[selected] = link.withPasscode(value);
@@ -325,15 +331,7 @@ class ParsePageState extends State<ParsePage> {
   Future<void> addTorrent() async {
     if (working) return;
     try {
-      final file = await openFile(
-        acceptedTypeGroups: [
-          const XTypeGroup(
-            label: 'BT 种子',
-            extensions: ['torrent'],
-            mimeTypes: ['application/x-bittorrent', 'application/octet-stream'],
-          ),
-        ],
-      );
+      final file = await openFile(acceptedTypeGroups: const [torrentFileType]);
       if (file == null || !mounted) return;
       require(await file.length() <= maxTorrentBytes, '种子文件不能超过 4 MiB');
       final data = await file.readAsBytes();
@@ -353,6 +351,7 @@ class ParsePageState extends State<ParsePage> {
   }
 
   Future<bool> _trySource(ParsedLink link) async {
+    if (GitHubLink.isRawFile(Uri.parse(link.url))) return false;
     final sources = widget.services.sources;
     if (!sources.enabled ||
         !sources.hub.configured ||
@@ -369,7 +368,14 @@ class ParsePageState extends State<ParsePage> {
     try {
       await scope.run(() => RequestScope.cancellable(sources.load()));
       if (!sources.ready) {
-        await scope.run(() => RequestScope.cancellable(sources.refresh()));
+        final refresh = sources.refresh();
+        if (link.kind == LinkKind.cloudShare &&
+            link.platform?.supportsShareParsing == true) {
+          // Built-in cloud parsing can proceed while the source catalog loads.
+          unawaited(refresh);
+        } else {
+          await scope.run(() => RequestScope.cancellable(refresh));
+        }
       }
       if (!_current(generation)) return true;
       final candidates = sources.candidates(link.url);
@@ -412,11 +418,10 @@ class ParsePageState extends State<ParsePage> {
         }),
       );
       if (!_current(generation)) return true;
-      await widget.services.remember(
+      widget.services.rememberInBackground(
         link,
         title: session.title,
         itemCount: session.items.length,
-        canCommit: () => _current(generation),
       );
       if (!_current(generation) || !mounted) return true;
       await Navigator.push<void>(
@@ -443,12 +448,16 @@ class ParsePageState extends State<ParsePage> {
   Future<void> parse({
     String? passwordGrant,
     ResourcePoolPreview? poolPreview,
+    CtfileCaptchaProof? ctfileProof,
   }) async {
-    if (!mounted || !_active || working || _startingParse) return;
+    if (!mounted || !_active || working || _startingParse || _ctfileVerifying) {
+      return;
+    }
     passwordGrant ??= _parserPasswordGrant;
     _parserPasswordGrant = null;
     _progress.clear();
     final link = current;
+    final watch = Stopwatch()..start();
     DiagnosticLog.event(
       'parse.start',
       fields: {'kind': link?.kind.name, 'platform': link?.platform?.name},
@@ -479,6 +488,18 @@ class ParsePageState extends State<ParsePage> {
       setState(() => error = '已识别${link.cloudLabel ?? '网盘'}链接，当前版本暂未接入该网盘');
       return;
     }
+    if (GitHubLink.isRawFile(Uri.parse(link.url))) {
+      focus.unfocus();
+      codeFocus.unfocus();
+      final added = await directDownloadDialog(
+        context,
+        widget.services,
+        initial: link.url,
+        headers: const {'User-Agent': 'AsterLink-GitHub/1.0'},
+      );
+      if (added && mounted) widget.services.rememberInBackground(link);
+      return;
+    }
     if (link.platform?.supportsShareParsing == false) {
       setState(() => error = link.platform!.shareUnavailableMessage);
       return;
@@ -490,7 +511,9 @@ class ParsePageState extends State<ParsePage> {
           builder: (_) => TorrentPage(widget.services, link.url),
         ),
       );
-      if (added == true && mounted) await widget.services.remember(link);
+      if (added == true && mounted) {
+        widget.services.rememberInBackground(link);
+      }
       return;
     }
     if (link.platform != null && link.kind != LinkKind.cloudShare) {
@@ -512,7 +535,9 @@ class ParsePageState extends State<ParsePage> {
           widget.services,
           initial: link.url,
         );
-        if (added && _current(generation)) await widget.services.remember(link);
+        if (added && _current(generation)) {
+          widget.services.rememberInBackground(link);
+        }
         return;
       }
       final platform = link.platform!;
@@ -566,10 +591,11 @@ class ParsePageState extends State<ParsePage> {
                     : BaiduShareRoute.account,
                 parserSiteId: parserSite?.id,
                 parserPasswordGrant: passwordGrant,
+                ctfileProof: ctfileProof,
               );
               checkpoint();
               setState(() => stage = '正在读取文件列表…');
-              final files = await widget.services.cloud.list(
+              final files = await widget.services.cloud.listPage(
                 session,
                 session.rootId,
               );
@@ -585,11 +611,18 @@ class ParsePageState extends State<ParsePage> {
             },
           );
       checkpoint();
-      await widget.services.remember(
+      DiagnosticLog.event(
+        'parse.ready',
+        fields: {
+          'platform': platform.name,
+          'count': result.$2.files.length,
+          'elapsedMs': watch.elapsedMilliseconds,
+        },
+      );
+      widget.services.rememberInBackground(
         link,
         title: result.$1.title,
-        itemCount: result.$2.length,
-        canCommit: () => _current(generation),
+        itemCount: result.$2.files.length,
       );
       checkpoint();
       _request = null;
@@ -604,14 +637,49 @@ class ParsePageState extends State<ParsePage> {
           builder: (_) => BrowserPage(
             widget.services,
             result.$1,
-            initialItems: result.$2,
+            initialItems: result.$2.files,
+            initialCursor: result.$2.nextCursor,
             poolPreview: poolPreview,
           ),
         ),
       );
     } catch (e, stack) {
       if (!_current(generation)) return;
-      _progress.close(failed: true);
+      _progress.close(failed: e is! CtfileShareVerificationRequired);
+      if (e is CtfileShareVerificationRequired) {
+        _request?.cancel();
+        _request = null;
+        setState(() {
+          working = false;
+          _ctfileVerifying = true;
+          stage = '';
+          error = '';
+        });
+        CtfileCaptchaProof? proof;
+        try {
+          if (!mounted) return;
+          proof = await Navigator.push<CtfileCaptchaProof>(
+            context,
+            MaterialPageRoute(
+              builder: (_) =>
+                  CtfileVerificationPage(widget.services, e.challenge),
+            ),
+          );
+        } finally {
+          _ctfileVerifying = false;
+        }
+        if (!_current(generation) || current != link) return;
+        if (proof == null) {
+          setState(() => error = '已取消安全验证，链接和提取码已保留');
+        } else {
+          await parse(
+            ctfileProof: proof,
+            passwordGrant: passwordGrant,
+            poolPreview: poolPreview,
+          );
+        }
+        return;
+      }
       if (e is ParserPasswordRequired) {
         _request?.cancel();
         _request = null;
@@ -1625,7 +1693,7 @@ class ParsePageState extends State<ParsePage> {
                     style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
                   ),
                   subtitle: const Text(
-                    '夸克 · 迅雷 · UC',
+                    '夸克 · 迅雷 · UC · 移动',
                     style: TextStyle(fontSize: 12),
                   ),
                   trailing: const Icon(CupertinoIcons.chevron_right, size: 17),

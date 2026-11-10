@@ -8,6 +8,41 @@ import 'remote_control_support.dart';
 
 void main() {
   test(
+    'Apple update sections roundtrip independently and retain valid values on a bad publication',
+    () {
+      final root = controlJson(androidBuild: 221, windowsBuild: 222);
+      final updates = root['updates'] as Map;
+      for (final (platform, build) in [('ios', 223), ('macos', 224)]) {
+        updates[platform] = {
+          'enabled': true,
+          'version': '2.2.1',
+          'build': build,
+          'downloadUrl': 'https://example.test/$platform',
+          'notes': 'Apple update',
+          'force': true,
+          'expiresAt': '2026-12-01T00:00:00Z',
+        };
+      }
+      final previous = RemoteControlDocument.parse(root);
+      expect(
+        previous.validSections,
+        containsAll(['updates.ios', 'updates.macos']),
+      );
+      final restored = RemoteControlConfig.fromJson(previous.config.toJson());
+      expect(restored.updates['ios']!.build, 223);
+      expect(restored.updates['macos']!.build, 224);
+      (updates['ios'] as Map)['downloadUrl'] = 'http://insecure.test/app.ipa';
+      (updates['macos'] as Map)['build'] = 225;
+      final next = RemoteControlDocument.parse(root, previous: previous.config);
+      expect(next.issues.single.path, 'updates.ios.downloadUrl');
+      expect(ControlConfigIssue.isKnownPath(next.issues.single.path), isTrue);
+      expect(next.config.updates['ios']!.build, 223);
+      expect(next.config.updates['macos']!.build, 225);
+      expect(RemoteControlConfig.fromJson(controlJson()).updates, isEmpty);
+    },
+  );
+
+  test(
     'Optional in-app update link and passcode survive roundtrip; old configs use browser URL',
     () {
       final source = controlJson(androidBuild: 120, windowsBuild: 120);
@@ -113,6 +148,25 @@ void main() {
       expect(config.announcement!.buttonUrl, isNull);
     },
   );
+
+  test('Startup announcements accept and cache mini-program buttons', () {
+    final source = controlJson(
+      noticeId: 'mini-program',
+      buttonText: '打开微信小程序',
+      buttonUrl: 'weixin://dl/business/?t=example-ticket',
+    );
+    (source['announcement'] as Map)['content'] =
+        '活动详情\n\n![图片](https://images.example.test/notice.png)';
+    final config = RemoteControlConfig.fromJson(source);
+    final restored = RemoteControlConfig.fromJson(config.toJson());
+    expect(restored.announcement!.buttonUrl, config.announcement!.buttonUrl);
+    expect(restored.announcement!.contentKey, config.announcement!.contentKey);
+    expect(restored.announcement!.content, config.announcement!.content);
+    (source['announcement'] as Map)['buttonUrl'] = 'weixin://dl/scan/';
+    final rejected = RemoteControlDocument.parse(source, previous: config);
+    expect(rejected.issues.single.path, 'announcement.buttonUrl');
+    expect(rejected.config.announcement, same(config.announcement));
+  });
 
   test('Update policies remain independent for Android and Windows', () {
     final json = controlJson(androidBuild: 50, windowsBuild: 51, force: true);

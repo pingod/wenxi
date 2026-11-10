@@ -4,12 +4,13 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../app_services.dart';
+import '../data/backup.dart';
 import '../diagnostics/app_log.dart';
 import '../diagnostics/diagnostic_bundle.dart';
 import '../domain/download_retries.dart';
 import '../domain/settings.dart';
 import '../platform/desktop_platform.dart';
-import '../platform/native_engine.dart';
+import '../platform/document_actions.dart';
 import 'common.dart';
 import 'appearance_page.dart';
 import 'remote_control_dialogs.dart';
@@ -122,27 +123,15 @@ class MinePage extends StatelessWidget {
   }
 
   Future<bool> _saveBytes(Uint8List bytes, String name) async {
-    if (Platform.isAndroid && services.platformFeatures) {
-      final result = await nativeChannel.invokeMethod<String>('saveDocument', {
-        'name': name,
-        'bytes': bytes,
-        'mime': 'application/json',
-      });
-      return result != null;
-    }
-    final location = await getSaveLocation(
-      suggestedName: name,
+    final location = await const DocumentActions().saveBytes(
+      bytes,
+      name,
+      mime: 'application/json',
       acceptedTypeGroups: const [
         XTypeGroup(label: 'JSON', extensions: ['json']),
       ],
     );
-    if (location == null) return false;
-    await XFile.fromData(
-      bytes,
-      name: name,
-      mimeType: 'application/json',
-    ).saveTo(location.path);
-    return true;
+    return location != null;
   }
 
   Future<void> _export(BuildContext context) async {
@@ -152,7 +141,7 @@ class MinePage extends StatelessWidget {
         context: context,
         builder: (context) => StatefulBuilder(
           builder: (context, update) => AlertDialog(
-            title: const Text('导出加密备份'),
+            title: const Text('导出备份'),
             content: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -185,17 +174,10 @@ class MinePage extends StatelessWidget {
       if (choice == null || !context.mounted) return;
       includeImages = choice;
     }
-    final password = await askText(
-      context,
-      '设置备份密码',
-      hint: '至少 8 位；导出成功后也可用于恢复本机数据访问',
-      secret: true,
-    );
-    if (password == null || !context.mounted) return;
     final exported = await busy(
       context,
       () => services.backup.exportTo(
-        password,
+        '',
         (bytes) => context.mounted
             ? _saveBytes(
                 bytes,
@@ -204,48 +186,39 @@ class MinePage extends StatelessWidget {
             : Future.value(false),
         includeBackgroundImages: includeImages,
       ),
-      label: '正在导出备份并建立恢复保护…',
+      label: '正在导出备份…',
     );
     if (exported == true && context.mounted) {
-      message(context, '备份已导出，并建立本机密码恢复保护');
+      message(context, '备份已导出，请妥善保管，文件包含账号登录信息');
     }
   }
 
   Future<void> _restore(BuildContext context) async {
-    final file = await openFile(
-      acceptedTypeGroups: const [
-        XTypeGroup(
-          label: '文析助手备份',
-          extensions: ['json', 'bak'],
-          mimeTypes: ['application/json', 'application/octet-stream'],
-        ),
-      ],
-    );
+    final file = await openFile(acceptedTypeGroups: const [backupFileType]);
     if (file == null || !context.mounted) return;
     if (await file.length() > 16 * 1024 * 1024) {
       if (context.mounted) message(context, '备份文件过大');
       return;
     }
     if (!context.mounted ||
-        !await confirm(
-          context,
-          '恢复备份',
-          '备份中的账号和设置将覆盖本机对应项目，下载文件不会被删除。\n'
-              '导入成功后，此备份密码也可用于恢复本机数据访问，请妥善保管。',
-        ) ||
+        !await confirm(context, '恢复备份', '备份中的账号和设置将覆盖本机对应项目，下载文件不会被删除。') ||
         !context.mounted) {
       return;
     }
-    final password = await askText(context, '输入备份密码', secret: true);
+    final bytes = await file.readAsBytes();
+    if (!context.mounted) return;
+    final password = isPlainBackup(bytes)
+        ? ''
+        : await askText(context, '输入旧备份密码', secret: true);
     if (password == null || !context.mounted) return;
     final count = await busy(
       context,
-      () async => services.backup.restore(await file.readAsBytes(), password),
+      () => services.backup.restore(bytes, password),
       label: '正在验证并恢复备份…',
     );
     if (count != null && context.mounted) {
       await services.downloads.settingsChanged();
-      if (context.mounted) message(context, '已恢复 $count 个账号及下载设置，并建立密码恢复保护');
+      if (context.mounted) message(context, '已恢复 $count 个账号及下载设置');
     }
   }
 
@@ -616,12 +589,21 @@ class MinePage extends StatelessWidget {
           ),
         ),
       if (services.platformFeatures &&
-          (Platform.isAndroid || Platform.isWindows))
+          (Platform.isAndroid ||
+              Platform.isIOS ||
+              Platform.isWindows ||
+              Platform.isMacOS))
         _tile(
           context,
           CupertinoIcons.shield_lefthalf_fill,
           '后台下载保护',
-          Platform.isWindows ? '最小化到托盘与自动休眠保护' : '锁屏下载、通知与系统后台设置',
+          Platform.isIOS
+              ? '前台下载与后台续传说明'
+              : Platform.isMacOS
+              ? '最小化窗口与自动休眠保护'
+              : Platform.isWindows
+              ? '最小化到托盘与自动休眠保护'
+              : '锁屏下载、通知与系统后台设置',
           () => Navigator.push<void>(
             context,
             MaterialPageRoute(builder: (_) => const DownloadProtectionPage()),
@@ -671,7 +653,7 @@ class MinePage extends StatelessWidget {
     _tile(
       context,
       CupertinoIcons.lock_shield,
-      '导出加密备份',
+      '导出备份',
       '保存账号与应用设置',
       () => _export(context),
     ),
@@ -693,22 +675,34 @@ class MinePage extends StatelessWidget {
   ]);
 
   Widget _help(BuildContext context) => _section(context, '帮助与诊断', [
-    _tile(
-      context,
-      CupertinoIcons.arrow_down_circle,
-      '检查更新',
-      services.control.checking
-          ? '正在检查…'
-          : services.control.availableUpdate != null
-          ? '发现新版本 ${services.control.availableUpdate!.version}'
-          : '当前版本 ${applicationVersion.split('+').first}',
-      () => checkForAppUpdate(
+    if (services.control.platform == 'ios')
+      _tile(
         context,
-        services.control,
-        launcher: linkLauncher,
-        updater: services.appUpdates,
+        CupertinoIcons.arrow_down_circle,
+        '版本与更新',
+        '当前版本 ${applicationVersion.split('+').first} · iOS 测试版',
+        () => message(
+          context,
+          'iOS 测试版请通过签名安装渠道更新；发布到 TestFlight 或 App Store 后，请通过对应渠道更新。',
+        ),
+      )
+    else
+      _tile(
+        context,
+        CupertinoIcons.arrow_down_circle,
+        '检查更新',
+        services.control.checking
+            ? '正在检查…'
+            : services.control.availableUpdate != null
+            ? '发现新版本 ${services.control.availableUpdate!.version}'
+            : '当前版本 ${applicationVersion.split('+').first}',
+        () => checkForAppUpdate(
+          context,
+          services.control,
+          launcher: linkLauncher,
+          updater: services.appUpdates,
+        ),
       ),
-    ),
     _tile(
       context,
       CupertinoIcons.question_circle,

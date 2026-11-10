@@ -15,11 +15,11 @@
     "reason": "Synthetic credential-bearing URLs on reserved example/test hosts exercise rejection of unsafe URLs."
   },
   "test/remote_control_test.dart": {
-    "sha256": "4f809fd3f1382dd9bbf612a8bda85c78038acef947059a4a9bd3b117dde3ec29",
+    "sha256": "c71fd289af3124eaa014abedeada834ed76ef3525584696b6b5c412fbb1eed03",
     "reason": "Synthetic credential-bearing URLs on reserved example/test hosts exercise rejection of unsafe URLs."
   },
   "test/tianyi_test.dart": {
-    "sha256": "5aab7e5cf90a53979d984b1a5cf4d0dea3256b7ecf2abad1468736db3f0fc8be",
+    "sha256": "57e7a6262af8fd2286ab3ab47dcaedc8ca85538ba98aad11c001984e1c988b98",
     "reason": "Synthetic credential-bearing URLs on reserved example/test hosts exercise rejection of unsafe URLs."
   },
   "test/uc_tv_test.dart": {

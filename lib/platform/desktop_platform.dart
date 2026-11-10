@@ -1,5 +1,7 @@
 import 'dart:io';
 import 'package:flutter/foundation.dart';
+import 'package:path/path.dart' as p;
+import '../core/json.dart';
 
 /// Desktops run the bundled Gopeed helper as a child process and share the wide
 /// window layout. Android uses the service/JNI path instead, and the web build
@@ -22,6 +24,17 @@ bool isDesktopTarget(TargetPlatform platform) =>
 /// plain executable name next to the app binary.
 String desktopHelperName() =>
     Platform.isWindows ? 'asterlink_gopeed.exe' : 'asterlink_gopeed';
+
+/// Resolves the bundled helper for the platforms whose app bundle layout is
+/// known to the release tooling.
+String desktopDownloadExecutable(String executable, String platform) {
+  require({'windows', 'macos'}.contains(platform), '当前系统不支持桌面下载组件');
+  final paths = platform == 'windows' ? p.windows : p.posix;
+  return paths.join(
+    paths.dirname(executable),
+    platform == 'windows' ? 'asterlink_gopeed.exe' : 'asterlink_gopeed',
+  );
+}
 
 /// Web login relies on the WebView2 bridge on Windows and the platform WebView
 /// on Android. Linux and macOS have no embedded browser component in this app

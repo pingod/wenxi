@@ -314,6 +314,10 @@ class _DeviceLinkPageState extends State<DeviceLinkPage> {
   }
 
   Future<bool> _connect(LanPeer peer) async {
+    peer = lan.peers.firstWhere(
+      (value) => value.id == peer.id,
+      orElse: () => peer,
+    );
     if (lan.connected(peer)) return true;
     final code = await _input(
       '连接 ${peer.name}',
@@ -416,8 +420,14 @@ class _DeviceLinkPageState extends State<DeviceLinkPage> {
   }
 
   Future<void> _sendMessage([LanPeer? target]) async {
-    final peer = target ?? await _choosePeer();
-    if (peer == null || !mounted || !await _connect(peer) || !mounted) return;
+    final chosen = target ?? await _choosePeer();
+    if (chosen == null || !mounted || !await _connect(chosen) || !mounted) {
+      return;
+    }
+    final peer = lan.peers.firstWhere(
+      (value) => value.id == chosen.id,
+      orElse: () => chosen,
+    );
     final value = await _input(
       '发送消息给 ${peer.name}',
       '输入文字、网址或网盘分享文案，支持多行内容',
@@ -453,6 +463,10 @@ class _DeviceLinkPageState extends State<DeviceLinkPage> {
 
   Future<void> _peer(LanPeer peer) async {
     if (!await _connect(peer) || !mounted) return;
+    peer = lan.peers.firstWhere(
+      (value) => value.id == peer.id,
+      orElse: () => peer,
+    );
     final action = await showModalBottomSheet<String>(
       context: context,
       showDragHandle: true,
@@ -861,6 +875,23 @@ class _DeviceLinkPageState extends State<DeviceLinkPage> {
             height: 1.5,
           ),
         ),
+      if (defaultTargetPlatform == TargetPlatform.windows)
+        TextButton.icon(
+          key: const Key('lan-allow-incoming'),
+          onPressed: _busy
+              ? null
+              : () async {
+                  final allowed = await _run(() async {
+                    await lan.allowIncomingConnections();
+                    return true;
+                  }, '正在允许局域网连接…');
+                  if (allowed == true && mounted) {
+                    message(context, '已允许本应用的局域网连接，请在手机端重新连接');
+                  }
+                },
+          icon: const Icon(Icons.wifi_rounded, size: 17),
+          label: const Text('允许手机连接'),
+        ),
     ],
   );
 
@@ -979,6 +1010,14 @@ class _DeviceLinkPageState extends State<DeviceLinkPage> {
             padding: const EdgeInsets.all(16),
             children: [
               _status(),
+              if (defaultTargetPlatform == TargetPlatform.iOS)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(4, 0, 4, 12),
+                  child: Text(
+                    '设备互传期间请保持应用在前台；锁屏或切后台后，iOS 可能中断连接。',
+                    style: TextStyle(fontSize: 12, color: secondary(context)),
+                  ),
+                ),
               if (_busy)
                 _card(
                   Row(
@@ -1782,7 +1821,10 @@ class _LanReceivePageState extends State<_LanReceivePage> {
         _destination!,
         widget.manifest.directories,
       );
-      final specs = widget.manifest.downloads(widget.origin);
+      final specs = widget.services.lan.prepareDownloads(
+        widget.manifest,
+        widget.origin,
+      );
       await widget.services.store.put('lanDestination', _destination!);
       if (specs.isNotEmpty) {
         await widget.services.downloads.enqueueAll(

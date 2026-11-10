@@ -6,7 +6,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:media_kit/media_kit.dart';
+import 'package:asterlink/playback/playback_state.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/playback/cast/cast_discovery.dart';
 import 'package:asterlink/playback/cast/cast_session.dart';
@@ -28,6 +28,13 @@ final _tv = CastDevice(
 class _Discovery extends CastDiscovery {
   int scans = 0;
   bool cleaned = false;
+  final manualAddresses = <String>[];
+  @override
+  Future<CastDevice> addAddress(String value) async {
+    manualAddresses.add(value);
+    return _tv;
+  }
+
   @override
   List<CastDevice> get devices => [_tv];
   @override
@@ -48,6 +55,11 @@ class _Session extends CastSession {
   bool cleaned = false;
   Future<void>? barrier;
   final commands = <String>[];
+  void disableSeek() {
+    seekSupported = false;
+    notifyListeners();
+  }
+
   @override
   PlayerState get state => value;
   @override
@@ -177,9 +189,37 @@ void main() {
     expect(find.byKey(const Key('player-cast-panel')), findsOneWidget);
   }
 
+  testWidgets(
+    'manual address dialog can be closed and reopened without stale text controllers',
+    (tester) async {
+      final result = await render(tester);
+      await open(tester);
+      await tester.tap(find.byKey(const Key('cast-add-address')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const Key('cast-address-input')),
+        '192.168.1.8',
+      );
+      await tester.tap(find.byKey(const Key('cast-address-confirm')));
+      await tester.pumpAndSettle();
+      expect(result.discovery.manualAddresses, ['192.168.1.8']);
+      expect(tester.takeException(), isNull);
+      await tester.tap(find.byKey(const Key('cast-add-address')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('取消').last);
+      await tester.pumpAndSettle();
+      expect(result.discovery.manualAddresses, ['192.168.1.8']);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+      await tester.pumpAndSettle();
+      result.fixture.store.dispose();
+    },
+  );
+
   Future<void> connect(WidgetTester tester) async {
     final tile = find.byKey(const ValueKey('cast-device-test-tv'));
     await tester.ensureVisible(tile);
+    await tester.pumpAndSettle();
     await tester.tap(tile);
     await tester.pumpAndSettle();
   }
@@ -230,6 +270,39 @@ void main() {
       expect(page.fixture.leases.values.single, 0);
     });
   }
+
+  testWidgets('unsupported TV seeking disables progress and skip controls', (
+    tester,
+  ) async {
+    final page = await render(tester);
+    await open(tester);
+    await connect(tester);
+    page.sessions.single.disableSeek();
+    await tester.pumpAndSettle();
+    final panel = find.byKey(const Key('player-cast-panel'));
+    final progress = tester.widget<Slider>(
+      find.descendant(of: panel, matching: find.byType(Slider)),
+    );
+    expect(progress.onChanged, isNull);
+    expect(progress.onChangeEnd, isNull);
+    for (final label in ['后退 15 秒', '前进 15 秒']) {
+      expect(
+        tester
+            .widget<TextButton>(find.widgetWithText(TextButton, label))
+            .onPressed,
+        isNull,
+      );
+    }
+    final pause = find.widgetWithText(TextButton, '暂停');
+    expect(tester.widget<TextButton>(pause).onPressed, isNotNull);
+    await tester.ensureVisible(pause);
+    await tester.tap(pause);
+    await tester.pumpAndSettle();
+    expect(page.sessions.single.commands.last, 'Pause');
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpAndSettle();
+  });
 
   testWidgets('return to local keeps TV progress and closes remote transport', (
     tester,

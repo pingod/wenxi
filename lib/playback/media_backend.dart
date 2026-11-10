@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 import '../diagnostics/app_log.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import '../core/json.dart';
@@ -14,6 +15,7 @@ import 'playback_stall_monitor.dart';
 import 'playback_buffer_policy.dart';
 import 'playback_metrics.dart';
 import 'subtitle_fonts.dart';
+import 'video_output_policy.dart';
 
 /// The controller also runs against a deterministic backend in lifecycle tests.
 abstract class PlaybackBackend extends ChangeNotifier {
@@ -65,6 +67,10 @@ abstract class PlaybackBackend extends ChangeNotifier {
   }
 
   VideoController? get videoController => null;
+  Widget? buildVideo({required BoxFit fit, double? aspectRatio}) => null;
+  Widget? buildSubtitleOverlay() => null;
+  bool get usesSubtitleOverlay => false;
+  String get engineName => 'media_kit / libmpv';
   int get errorRevision;
   PlaybackFailure? get failure => null;
   bool get canRetryWithSoftware => true;
@@ -80,6 +86,7 @@ abstract class PlaybackBackend extends ChangeNotifier {
   Future<void> initialize() async {}
   Future<void> setSubtitlePresentation({
     required double size,
+    double? width,
     required double height,
     required double bottom,
     int? backgroundColor,
@@ -124,8 +131,9 @@ class MediaKitBackend extends PlaybackBackend {
           // Keep it when decoding on the CPU; the native output already falls
           // back to CPU rendering if ANGLE cannot initialize.
           enableHardwareAcceleration:
-              defaultTargetPlatform == TargetPlatform.windows ||
-              hardwareAcceleration,
+              supportsNativeHardwareRendering &&
+              (defaultTargetPlatform == TargetPlatform.windows ||
+                  hardwareAcceleration),
           hwdec: hardwareAcceleration ? null : 'no',
         ),
       );
@@ -346,7 +354,8 @@ class MediaKitBackend extends PlaybackBackend {
   }
 
   @override
-  bool get canRetryWithSoftware => !_sourceFailure;
+  bool get canRetryWithSoftware =>
+      !_sourceFailure && _failure?.decoderUnavailable != true;
   @override
   bool get rendersSubtitlesNatively =>
       player.platform?.configuration.libass == true;
@@ -463,6 +472,7 @@ class MediaKitBackend extends PlaybackBackend {
   String get streamingDescription => _streamingDescription;
   @override
   Map<String, Object?> get diagnosticFields => {
+    'engine': engineName,
     'transport': _transport,
     'networkTimeoutSeconds': ?_networkTimeoutSeconds,
     'openElapsedMs': ?_openWatch?.elapsedMilliseconds,
@@ -472,8 +482,10 @@ class MediaKitBackend extends PlaybackBackend {
     ..._nativeMetrics,
     ..._metrics.fields(_openWatch?.elapsed ?? Duration.zero),
     'effectiveConnections': _proxy?.connections ?? 1,
+    'configuredConnections': _connections,
     'sourceConnectionLimit': ?_sourceConnectionLimit,
     'packetCacheBytes': _bufferPolicy.forwardBytes,
+    'playbackCacheBudgetBytes': _bufferPolicy.byteBudget,
     'proxyCacheLimit': ?_proxy?.maxCacheBytes,
     'preloadSeconds': _enhancedPrefetch
         ? PlaybackBufferPolicy.readaheadSeconds
@@ -572,7 +584,7 @@ class MediaKitBackend extends PlaybackBackend {
   }
 
   String get _proxyDescription => downloadCache == null
-      ? '最多 $_effectiveConnectionLimit 个连接 · $_segmentSizeMiB MiB / 片'
+      ? '最多 $_effectiveConnectionLimit 个连接 · 当前 ${_proxy?.connections ?? _bufferPolicy.connections} 个 · $_segmentSizeMiB MiB / 片'
       : '边下边播 · 优先读取已下载片段';
   @override
   Future<void> setSegmentSizeMiB(int value) async {
@@ -593,6 +605,23 @@ class MediaKitBackend extends PlaybackBackend {
   @override
   VideoController? get videoController => _video;
   @override
+  Widget? buildVideo({required BoxFit fit, double? aspectRatio}) {
+    final video = _video;
+    if (_closing || video == null) return null;
+    return Video(
+      controller: video,
+      controls: NoVideoControls,
+      fit: fit,
+      aspectRatio: aspectRatio,
+      pauseUponEnteringBackgroundMode: false,
+      resumeUponEnteringForegroundMode: false,
+      subtitleViewConfiguration: const SubtitleViewConfiguration(
+        visible: false,
+      ),
+    );
+  }
+
+  @override
   int get errorRevision => _errorRevision;
   @override
   Future<void> open(DownloadSpec source, Duration start) async {
@@ -607,6 +636,11 @@ class MediaKitBackend extends PlaybackBackend {
         : null;
     _bufferPolicy = PlaybackBufferPolicy(
       connectionLimit: _effectiveConnectionLimit,
+      desktop: {
+        TargetPlatform.windows,
+        TargetPlatform.macOS,
+        TargetPlatform.linux,
+      }.contains(defaultTargetPlatform),
     );
     _sourceBytes = source.expectedSize;
     _transport = 'pending';
@@ -782,17 +816,35 @@ class MediaKitBackend extends PlaybackBackend {
         }
         if (_closing) return;
         if (proxy != null) {
+          double? nativeBufferedSeconds;
+          try {
+            nativeBufferedSeconds = double.tryParse(
+              await native.getProperty('demuxer-cache-duration'),
+            );
+            if (nativeBufferedSeconds != null &&
+                nativeBufferedSeconds.isFinite &&
+                nativeBufferedSeconds >= 0) {
+              _nativeMetrics['demuxerCacheSeconds'] = nativeBufferedSeconds;
+            } else {
+              nativeBufferedSeconds = null;
+            }
+          } catch (_) {
+            // Some demuxers do not expose a cache duration.
+          }
+          if (_closing) return;
           proxy.connections = _bufferPolicy.observe(
             elapsed: _openWatch!.elapsed,
             receivedBytes: proxy.receivedBytes,
             failures: proxy.segmentFailures,
             status: proxy.lastUpstreamStatus,
             activeRequests: proxy.activeRequests,
+            requestCapacity: proxy.requestCapacity,
             bufferedSeconds:
-                math.max(
-                  0,
-                  (state.buffer - state.position).inMilliseconds / 1000,
-                ) /
+                (nativeBufferedSeconds ??
+                    math.max(
+                      0,
+                      (state.buffer - state.position).inMilliseconds / 1000,
+                    )) /
                 math.max(.25, state.rate),
             buffering: state.buffering,
             playing: _wantsPlay && state.playing,
@@ -803,6 +855,7 @@ class MediaKitBackend extends PlaybackBackend {
                       state.rate
                 : 0,
           );
+          _streamingDescription = _proxyDescription;
         }
       }
       for (final entry in const {
@@ -835,6 +888,7 @@ class MediaKitBackend extends PlaybackBackend {
   @override
   Future<void> setSubtitlePresentation({
     required double size,
+    double? width,
     required double height,
     required double bottom,
     int? backgroundColor,
@@ -890,7 +944,13 @@ class MediaKitBackend extends PlaybackBackend {
     _metrics.pause(_openWatch?.elapsed ?? Duration.zero);
     _stallMonitor.reset();
     _proxy?.setPaused(true);
-    return player.pause();
+    if (_closing) return Future.value();
+    final native = player.platform;
+    // Do not queue audio pause behind a seek or an external subtitle load.
+    // libmpv serializes native commands; only the Dart control queue is bypassed.
+    return native is NativePlayer
+        ? native.pause(synchronized: false)
+        : player.pause();
   }
 
   @override

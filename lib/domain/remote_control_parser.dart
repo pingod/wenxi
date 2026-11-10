@@ -25,7 +25,7 @@ class ControlConfigIssue {
       for (final p in CloudPlatform.values)
         'clouds.${p.name}': ['enabled', 'message', 'expiresAt'],
       'updates': [],
-      for (final p in ['android', 'windows'])
+      for (final p in remoteUpdatePlatforms)
         'updates.$p': [
           'enabled',
           'version',
@@ -65,8 +65,7 @@ class RemoteControlDocument {
   static final sectionNames = List<String>.unmodifiable([
     'announcement',
     for (final platform in CloudPlatform.values) 'clouds.${platform.name}',
-    'updates.android',
-    'updates.windows',
+    for (final platform in remoteUpdatePlatforms) 'updates.$platform',
     'help',
     'about',
     'parserHub',
@@ -154,7 +153,9 @@ class RemoteControlDocument {
           title,
           content,
           buttonText: button,
-          buttonUrl: url.isEmpty ? null : f.link('buttonUrl', url),
+          buttonUrl: url.isEmpty
+              ? null
+              : f.read('buttonUrl', () => announcementButtonUri(url)),
         );
       },
       (a) => a == null
@@ -208,7 +209,7 @@ class RemoteControlDocument {
     }
 
     final updates = <String, RemoteUpdate>{};
-    for (final platform in ['android', 'windows']) {
+    for (final platform in remoteUpdatePlatforms) {
       final key = 'updates.$platform', container = raw['updates'];
       final source = container is Map ? container[platform] : container;
       final update = section<RemoteUpdate?>(

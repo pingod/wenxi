@@ -15,6 +15,7 @@ import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import android.util.Rational
+import android.view.View
 import android.view.WindowManager
 import androidx.annotation.RequiresApi
 import androidx.core.view.WindowInsetsCompat
@@ -26,8 +27,13 @@ import io.flutter.plugin.common.MethodChannel
 import kotlin.math.roundToInt
 
 /** Playback-only window state; late calls from an old page cannot change a new page. */
-class PlaybackBridge(private val context: Context, engine: FlutterEngine) {
-    private val channel = MethodChannel(engine.dartExecutor.binaryMessenger, "com.asterlink.app/playback")
+class PlaybackBridge internal constructor(
+    private val context: Context,
+    private val channel: MethodChannel,
+    private val rootInsets: (View) -> WindowInsetsCompat? = ViewCompat::getRootWindowInsets,
+) {
+    constructor(context: Context, engine: FlutterEngine) : this(context,
+        MethodChannel(engine.dartExecutor.binaryMessenger, "com.asterlink.app/playback"))
     private var activity: Activity? = null
     private var session: String? = null
     private var video = false
@@ -45,6 +51,10 @@ class PlaybackBridge(private val context: Context, engine: FlutterEngine) {
     private var originalBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_DEFAULT
     private var desiredOrientation = "system"
     private var orientationLocked = false
+    private val volume: PlaybackVolume = PlaybackVolume(context, changed = ::volumeChanged)
+    private fun volumeChanged(value: Double) {
+        emit("volume", mapOf("systemVolumeSupported" to volume.supported, "systemVolume" to value))
+    }
 
     init { channel.setMethodCallHandler(::handle) }
     fun attach(current: Activity) {
@@ -53,7 +63,11 @@ class PlaybackBridge(private val context: Context, engine: FlutterEngine) {
         originalOrientation = current.requestedOrientation
         originalVolumeStream = current.volumeControlStream
         originalKeepScreen = current.window.attributes.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON != 0
-        if (session != null) { updateWindow(); applyOrientation() }
+        if (session != null) {
+            current.volumeControlStream = AudioManager.STREAM_MUSIC
+            volume.start(); updateWindow(); applyOrientation()
+            emit("volume", mapOf("systemVolumeSupported" to volume.supported, "systemVolume" to volume.volume))
+        }
     }
     fun detach(current: Activity) {
         if (activity === current) {
@@ -74,8 +88,22 @@ class PlaybackBridge(private val context: Context, engine: FlutterEngine) {
     fun stopped(current: Activity) {
         if (activity === current) emit("action", mapOf("action" to "hidden"))
     }
+    fun paused(current: Activity) {
+        if (activity !== current) return
+        // PiP stays visible while Android reports the activity as paused.
+        if (Build.VERSION.SDK_INT >= 26 && current.isInPictureInPictureMode) return
+        emit("action", mapOf("action" to "hidden"))
+    }
     fun windowFocused(current: Activity) {
-        if (activity === current && session != null) applySystemBars()
+        if (activity === current && session != null) {
+            volume.refresh(); applySystemBars()
+        }
+    }
+    fun volumeKey(current: Activity) {
+        if (activity !== current || session == null) return
+        current.window.decorView.post {
+            if (activity === current && session != null) volume.refresh()
+        }
     }
     fun action(token: String?, action: String?) {
         if (token != session || token == null || action !in setOf("rewind", "toggle", "forward")) return
@@ -111,9 +139,13 @@ class PlaybackBridge(private val context: Context, engine: FlutterEngine) {
                     originalNavigationBar = insets?.isVisible(WindowInsetsCompat.Type.navigationBars()) ?: true
                     originalBarsBehavior = WindowInsetsControllerCompat(current.window, current.window.decorView).systemBarsBehavior
                     current.volumeControlStream = AudioManager.STREAM_MUSIC
+                    volume.start()
                     val brightness = if (originalBrightness >= 0) originalBrightness
-                        else Settings.System.getInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS, 128) / 255f
-                    result.success(mapOf("pip" to supportsPip(), "brightness" to brightness.toDouble()))
+                        else runCatching { Settings.System.getInt(context.contentResolver, Settings.System.SCREEN_BRIGHTNESS, 128) / 255f }
+                            .getOrDefault(.5f)
+                    result.success(mapOf("pip" to supportsPip(), "brightness" to brightness.toDouble(),
+                        "systemVolumeSupported" to volume.supported, "systemVolume" to volume.volume,
+                        "systemInsets" to systemInsets(current)))
                 }
                 "state" -> {
                     playing = call.argument<Boolean>("playing") ?: false
@@ -131,8 +163,13 @@ class PlaybackBridge(private val context: Context, engine: FlutterEngine) {
                     require(current != null)
                     val value = call.argument<Number>("value")?.toFloat() ?: originalBrightness
                     require(value.isFinite())
-                    current.window.attributes = current.window.attributes.apply { screenBrightness = value.coerceIn(.05f, 1f) }
+                    current.window.attributes = current.window.attributes.apply { screenBrightness = value.coerceIn(0f, 1f) }
                     result.success(null)
+                }
+                "volume" -> {
+                    val value = call.argument<Number>("value")?.toDouble() ?: Double.NaN
+                    val actual = volume.setVolume(value)
+                    result.success(mapOf("systemVolumeSupported" to volume.supported, "systemVolume" to actual))
                 }
                 "fullscreen" -> {
                     require(current != null)
@@ -146,6 +183,7 @@ class PlaybackBridge(private val context: Context, engine: FlutterEngine) {
                         current.enterPictureInPictureMode(parameters()) else false)
                 }
                 "isPip" -> result.success(current != null && Build.VERSION.SDK_INT >= 26 && current.isInPictureInPictureMode)
+                "systemInsets" -> result.success(mapOf("systemInsets" to current?.let(::systemInsets)))
                 "end" -> {
                     restoreWindow()
                     session = null; video = false; playing = false; fullscreen = false
@@ -153,7 +191,31 @@ class PlaybackBridge(private val context: Context, engine: FlutterEngine) {
                 }
                 else -> result.notImplemented()
             }
-        } catch (_: Exception) { result.error("playback", "系统播放控制未能完成，请重试", null) }
+        } catch (error: Exception) {
+            (context.applicationContext as? AsterLinkHost)?.diagnostics?.record("playback.${call.method}", error)
+            result.error("playback", "系统播放控制未能完成，请重试", null)
+        }
+    }
+    private fun systemInsets(current: Activity): Map<String, Double>? {
+        val decor = current.window.decorView
+        val content = current.findViewById<View>(android.R.id.content) ?: decor
+        if (content.width <= 0 || content.height <= 0) return null
+        val root = rootInsets(decor) ?: return null
+        // Read the bounds with bars hidden as well, so rotation never depends
+        // on which frame happens to expose the status or navigation bar.
+        val insets = root.getInsetsIgnoringVisibility(
+            WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+        val offset = IntArray(2)
+        content.getLocationInWindow(offset)
+        val density = current.resources.displayMetrics.density.toDouble()
+        return mapOf(
+            "width" to content.width / density,
+            "height" to content.height / density,
+            "left" to (insets.left - offset[0]).coerceAtLeast(0) / density,
+            "top" to (insets.top - offset[1]).coerceAtLeast(0) / density,
+            "right" to (insets.right - (decor.width - offset[0] - content.width)).coerceAtLeast(0) / density,
+            "bottom" to (insets.bottom - (decor.height - offset[1] - content.height)).coerceAtLeast(0) / density,
+        )
     }
     private fun updateWindow() {
         val current = activity ?: return
@@ -209,6 +271,7 @@ class PlaybackBridge(private val context: Context, engine: FlutterEngine) {
         return RemoteAction(Icon.createWithResource(context, resource), title, title, pending)
     }
     private fun restoreWindow() {
+        volume.stop()
         val current = activity ?: return
         current.window.attributes = current.window.attributes.apply { screenBrightness = originalBrightness }
         current.requestedOrientation = originalOrientation

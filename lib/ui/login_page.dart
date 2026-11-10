@@ -195,7 +195,7 @@ class _LoginEntryPage extends StatelessWidget {
           ),
           _ => WebLoginPage(
             services,
-            WebLoginTarget.targets[platform]!,
+            webLoginTarget(platform),
             accountId: owner,
           ),
         };
@@ -289,7 +289,7 @@ class _PasswordLoginFlowState extends State<PasswordLoginFlow> {
     _LoginMethod.sms when widget.platform == CloudPlatform.baidu =>
       WebLoginPage(
         widget.services,
-        WebLoginTarget.targets[CloudPlatform.baidu]!,
+        webLoginTarget(CloudPlatform.baidu),
         key: const ValueKey('baidu-native-login'),
         accountId: widget.accountId,
         baiduNativeLogin: true,
@@ -331,7 +331,7 @@ class _PasswordLoginFlowState extends State<PasswordLoginFlow> {
     ),
     _LoginMethod.web => WebLoginPage(
       widget.services,
-      WebLoginTarget.targets[widget.platform]!,
+      webLoginTarget(widget.platform),
       accountId: widget.accountId,
       passwordLogin: _webPassword,
       onUsePassword: () => _switch(_defaultMethod),
@@ -638,7 +638,7 @@ class _WebLoginPageState extends State<WebLoginPage>
         stage: 'cleanup',
         flush: _flushLogin,
       );
-      await manager.deleteAllCookies();
+      await forgetWebLoginCookies(manager, widget.target);
       diagnostics.record(
         'cookie_cleanup_completed',
         stage: 'cleanup',
@@ -918,9 +918,8 @@ class _WebLoginPageState extends State<WebLoginPage>
       );
       widget.services.control.checkCloud(widget.target.platform);
       cookies = CookieManager.instance(webViewEnvironment: environment);
-      // SSO cookies may live on authentication hosts that are not part of the
-      // provider API domain list. Clear the whole browser jar before rendering
-      // so adding an account can never silently reuse the previous login.
+      // Clear this login and its authentication hosts before rendering. Apple
+      // search shares the default store and keeps unrelated challenge cookies.
       await _forgetBrowserCookies(requireSuccess: true);
       if (!active) return;
       _tianyiBrowserId = '';
@@ -2035,8 +2034,8 @@ class _ManualLoginPageState extends State<ManualLoginPage> {
                   Expanded(
                     child: Text(
                       platform == CloudPlatform.baidu
-                          ? '登录信息加密保存在本机；下载和播放时，必要凭据会加密发送至取链服务，用你的账号获取下载地址'
-                          : '登录信息加密保存在本机',
+                          ? '登录信息保存在本机应用私有目录；下载和播放时，必要凭据会加密发送至取链服务，用你的账号获取下载地址'
+                          : '登录信息保存在本机应用私有目录',
                       style: TextStyle(fontSize: 13, color: secondary(context)),
                     ),
                   ),
@@ -2427,7 +2426,9 @@ class _XunleiLoginPageState extends State<XunleiLoginPage> {
               ),
             const SizedBox(height: 20),
             Text(
-              smsMode ? '短信需由你主动发送并填写验证码。' : '账号密码加密保存，下次自动保持登录，需要安全验证时会提示你完成。',
+              smsMode
+                  ? '短信需由你主动发送并填写验证码。'
+                  : '账号密码保存在本机应用私有目录，下次自动保持登录，需要安全验证时会提示你完成。',
               style: TextStyle(fontSize: 12, color: secondary(context)),
             ),
           ],

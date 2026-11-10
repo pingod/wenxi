@@ -29,7 +29,7 @@ class AppUpdateInstaller {
     platform == 'android'
         ? '安卓更新链接必须是单个 APK 安装包'
         : platform == 'macos'
-        ? 'macOS 更新链接必须是单个 DMG 安装包或 ZIP 压缩包'
+        ? 'macOS 更新链接必须是单个 DMG 镜像或 ZIP 压缩包'
         : 'Windows 更新链接必须是单个 EXE 安装包或 ZIP 压缩包',
   );
 
@@ -130,6 +130,9 @@ class AppUpdateInstaller {
       } on PlatformException catch (error) {
         throw AppException(error.message ?? '无法打开系统安装器');
       }
+    } else if (platform == 'macos') {
+      final result = await Process.run('/usr/bin/open', [path]);
+      require(result.exitCode == 0, '无法打开安装镜像，请到下载管理中打开文件');
     } else if (name.toLowerCase().endsWith('.zip')) {
       await desktop.revealFile(path);
     } else {

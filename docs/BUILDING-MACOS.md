@@ -1,6 +1,6 @@
 # macOS 编译与运行
 
-macOS 桌面版使用与 Windows / Linux 相同的 Flutter 界面和同一个 Gopeed 下载内核，构建产物是 `build/macos/Build/Products/Release/asterlink.app`。当前状态：Dart 层已放行 macOS（`isDesktopPlatform` 含 `Platform.isMacOS`），下载内核可原生编译为 Mach-O，`flutter analyze` 无 error/warning；**最终 App 必须在装有完整 Xcode 的 Mac 上构建**（仅 Command Line Tools 无法用 `xcodebuild` 构建 Flutter macOS App）。
+macOS 桌面版使用与 Windows / Linux 相同的 Flutter 界面和同一个 Gopeed 下载内核，构建产物是 `build/macos/Build/Products/Release/文析助手.app`（bundle id `com.asterlink.app`）。当前状态：Dart 层已放行 macOS（`isDesktopPlatform` 含 `Platform.isMacOS`），下载内核可原生编译为 Mach-O，`flutter analyze` 无 error/warning；**最终 App 必须在装有完整 Xcode 的 Mac 上构建**（仅 Command Line Tools 无法用 `xcodebuild` 构建 Flutter macOS App）。
 
 ## 依赖
 
@@ -38,23 +38,23 @@ CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./tool/build-ma
 GOARCH=amd64 ./tool/build-native-darwin.sh
 ```
 
-Xcode 工程里有一个 **Copy Gopeed Helper** 构建阶段，会在 `flutter run -d macos` / `flutter build macos` 时把 `native/bin/asterlink_gopeed` 复制到 `asterlink.app/Contents/MacOS/asterlink_gopeed`（与主可执行文件同目录，Dart 侧 `desktopHelperName()` 在非 Windows 平台即按此名称查找）。若未先编译内核，该阶段会自动跳过，App 仍可启动，只是下载组件不可用。
+Runner 工程（`macos/Runner/Configs/AppInfo.xcconfig` 的 `PRODUCT_NAME = 文析助手`）没有负责拷贝下载内核的构建阶段，所以内核由 `tool/build-macos.sh` 在 `flutter build macos` 之后复制到 `文析助手.app/Contents/MacOS/asterlink_gopeed`（与主可执行文件同目录，Dart 侧 `desktopHelperName()` 在非 Windows 平台即按此名称查找）。直接 `flutter run -d macos` 不会带上内核，App 仍可启动，只是下载组件不可用。
 
 产物说明：
 
 | 文件 | 说明 |
 | --- | --- |
-| `asterlink.app/Contents/MacOS/asterlink` | 主程序 |
-| `asterlink.app/Contents/MacOS/asterlink_gopeed` | 下载 / BT 内核（Darwin 独立进程，JSON over stdio） |
-| `asterlink.app/Contents/Frameworks/App.framework/Resources/flutter_assets/` | Flutter 资源 |
-| `asterlink.app/Contents/Frameworks/` | Flutter 引擎与插件框架，含 `media_kit_libs_macos_video` 提供的 libmpv |
+| `文析助手.app/Contents/MacOS/文析助手` | 主程序（可执行文件名取自 `PRODUCT_NAME`） |
+| `文析助手.app/Contents/MacOS/asterlink_gopeed` | 下载 / BT 内核（Darwin 独立进程，JSON over stdio） |
+| `文析助手.app/Contents/Frameworks/App.framework/Resources/flutter_assets/` | Flutter 资源 |
+| `文析助手.app/Contents/Frameworks/` | Flutter 引擎与插件框架，含 `media_kit_libs_macos_video` 提供的 libmpv |
 
 打包分发：
 
 ```bash
-ditto -c -k --keepParent "build/macos/Build/Products/Release/asterlink.app" AsterLink-macos.zip
+ditto -c -k --keepParent "build/macos/Build/Products/Release/文析助手.app" AsterLink-macos.zip
 # 或用 hdiutil 打成 DMG：
-hdiutil create -volname "文析助手" -srcfolder "build/macos/Build/Products/Release/asterlink.app" -ov -format UDZO AsterLink.dmg
+hdiutil create -volname "文析助手" -srcfolder "build/macos/Build/Products/Release/文析助手.app" -ov -format UDZO AsterLink.dmg
 ```
 
 ## 签名与公证
@@ -93,7 +93,7 @@ flutter test --no-pub test/native_integration_test.dart   # 需要 native/bin/as
 
 ## 持续集成（GitHub Actions）
 
-`.github/workflows/packages.yml` 的 `macos` job 在 `macos-14`（Apple Silicon）runner 上运行 `./tool/build-macos.sh --build-config config/build.community.json`：脚本会编译 Darwin/arm64 下载内核、`flutter build macos`，并用 ad-hoc 签名产出 `asterlink.app`。随后 job 校验 `Contents/MacOS/asterlink`、`Contents/MacOS/asterlink_gopeed`（须为 Mach-O）、`codesign --verify --deep --strict`，再 `python3 tool/package-release.py --platform macos` 打成 `asterlink-<版本>-macos-arm64.zip`（`ditto -c -k --keepParent`，保留可执行位与符号链接），上传为 `package-macos` artifact。该 job 触发条件与 linux/windows 一致（push 到 `feat/**`、`main`、`master`，PR 到 `main`/`master`，或手动）。
+`.github/workflows/packages.yml` 的 `macos` job 在 `macos-14`（Apple Silicon）runner 上运行 `./tool/build-macos.sh --build-config config/build.community.json`：脚本会编译 Darwin/arm64 下载内核、`flutter build macos`，并用 ad-hoc 签名产出 `文析助手.app`。随后 job 校验 `Contents/MacOS/文析助手`、`Contents/MacOS/asterlink_gopeed`（须为 Mach-O）、`codesign --verify --deep --strict`，再 `python3 tool/package-release.py --platform macos` 打成 `asterlink-<版本>-macos-arm64.zip`（`ditto -c -k --keepParent`，保留可执行位与符号链接），上传为 `package-macos` artifact。该 job 触发条件与 linux/windows 一致（push 到 `feat/**`、`main`、`master`，PR 到 `main`/`master`，或手动）。
 
 CI 产物只是**未公证**的 ad-hoc 签名包，用于验证「能编译、能打包」，不能直接分发（Gatekeeper 会拦截）。正式分发的签名 + 公证在下面「发布」说明。
 

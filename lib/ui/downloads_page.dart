@@ -303,7 +303,10 @@ class _DownloadsPageState extends State<DownloadsPage>
                       child: const Text('无法下载？'),
                     ),
                     if (widget.services.platformFeatures &&
-                        (Platform.isAndroid || Platform.isWindows))
+                        (Platform.isAndroid ||
+                            Platform.isIOS ||
+                            Platform.isWindows ||
+                            Platform.isMacOS))
                       IconButton(
                         tooltip: '后台下载保护',
                         icon: Icon(
@@ -1092,7 +1095,7 @@ class _DownloadsPageState extends State<DownloadsPage>
       await busy(
         context,
         () => widget.services.desktop.revealFile(path),
-        label: '打开资源管理器…',
+        label: Platform.isMacOS ? '在访达中显示…' : '打开资源管理器…',
       );
       return;
     }
@@ -1106,17 +1109,21 @@ class _DownloadsPageState extends State<DownloadsPage>
         task,
         widget.services.downloads.tasks,
       );
-      await Navigator.push<void>(
-        context,
-        MaterialPageRoute(
-          builder: (_) => PlayerPage(
-            controller,
-            subtitleDirectory: Directory(
-              '${widget.services.cacheDirectory.path}/playback-subtitles',
+      try {
+        await Navigator.push<void>(
+          context,
+          MaterialPageRoute(
+            builder: (_) => PlayerPage(
+              controller,
+              subtitleDirectory: Directory(
+                '${widget.services.cacheDirectory.path}/playback-subtitles',
+              ),
             ),
           ),
-        ),
-      );
+        );
+      } finally {
+        widget.services.finishPlaybackInBackground(controller.close());
+      }
       return;
     }
     await busy(context, () async {
@@ -1135,16 +1142,29 @@ class _DownloadsPageState extends State<DownloadsPage>
     if (!await _checkOpen(task) || !mounted) return;
     final path = task.savedPath;
     if (path == null) return;
+    final box = context.findRenderObject() as RenderBox?;
+    final origin = box == null
+        ? null
+        : box.localToGlobal(Offset.zero) & box.size;
     await busy(context, () async {
       if (Platform.isAndroid) {
         await nativeChannelOpen(path, name: task.spec.fileName, share: true);
       } else if (Platform.isWindows) {
         await SharePlus.instance.share(ShareParams(files: [XFile(path)]));
       } else {
-        // Linux has no system share sheet for files; point the file manager at
-        // the downloaded file so the user can drag or copy it manually.
-        await widget.services.desktop.revealFile(path);
-        if (mounted) message(context, '当前系统不支持直接分享，已打开文件所在位置');
+        if (Platform.isMacOS) {
+          await SharePlus.instance.share(
+            ShareParams(
+              files: [XFile(path)],
+              sharePositionOrigin: origin,
+            ),
+          );
+        } else {
+          // Linux has no system share sheet for files; point the file manager at
+          // the downloaded file so the user can drag or copy it manually.
+          await widget.services.desktop.revealFile(path);
+          if (mounted) message(context, '当前系统不支持直接分享，已打开文件所在位置');
+        }
       }
     });
   }
@@ -1482,7 +1502,7 @@ class _DownloadsPageState extends State<DownloadsPage>
               ),
             );
           } finally {
-            await controller.close();
+            widget.services.finishPlaybackInBackground(controller.close());
           }
         } catch (e) {
           if (mounted) {

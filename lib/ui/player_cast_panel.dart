@@ -61,6 +61,17 @@ class _PlayerCastPanelState extends State<PlayerCastPanel> {
     }
   }
 
+  Future<void> _byAddress() async {
+    final value = await showDialog<String>(
+      context: context,
+      builder: (_) => const _CastAddressDialog(),
+    );
+    if (!mounted || value == null || value.trim().isEmpty) return;
+    await _run(() async {
+      await discovery.addAddress(value);
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final controller = widget.controller, cast = controller.castSession;
@@ -68,6 +79,7 @@ class _PlayerCastPanelState extends State<PlayerCastPanel> {
     final state = controller.state;
     final max = state.duration.inMilliseconds.toDouble();
     final enabled = active && !busy && !controller.connectingCast;
+    final canSeek = enabled && cast?.seekSupported == true;
     return ListView(
       shrinkWrap: true,
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 20),
@@ -115,10 +127,10 @@ class _PlayerCastPanelState extends State<PlayerCastPanel> {
                           .round(),
                 ),
               ),
-              onChanged: enabled && cast.seekSupported
+              onChanged: canSeek
                   ? (value) => setState(() => preview = value)
                   : null,
-              onChangeEnd: enabled && cast.seekSupported
+              onChangeEnd: canSeek
                   ? (value) {
                       setState(() => preview = null);
                       unawaited(
@@ -145,7 +157,7 @@ class _PlayerCastPanelState extends State<PlayerCastPanel> {
               runSpacing: 4,
               children: [
                 TextButton.icon(
-                  onPressed: enabled
+                  onPressed: canSeek
                       ? () => _run(() => controller.skip(-15))
                       : null,
                   icon: const Icon(Icons.fast_rewind),
@@ -157,7 +169,7 @@ class _PlayerCastPanelState extends State<PlayerCastPanel> {
                   label: Text(state.playing ? '暂停' : '播放'),
                 ),
                 TextButton.icon(
-                  onPressed: enabled
+                  onPressed: canSeek
                       ? () => _run(() => controller.skip(15))
                       : null,
                   icon: const Icon(Icons.fast_forward),
@@ -227,6 +239,15 @@ class _PlayerCastPanelState extends State<PlayerCastPanel> {
             ),
           ],
         ),
+        Align(
+          alignment: Alignment.centerRight,
+          child: TextButton.icon(
+            key: const Key('cast-add-address'),
+            onPressed: busy ? null : _byAddress,
+            icon: const Icon(Icons.add_link, size: 18),
+            label: const Text('输入电视地址'),
+          ),
+        ),
         if (discovery.scanning) const LinearProgressIndicator(minHeight: 2),
         if (discovery.error.isNotEmpty) _message(discovery.error),
         for (final device in discovery.devices)
@@ -267,5 +288,44 @@ class _PlayerCastPanelState extends State<PlayerCastPanel> {
       text,
       style: const TextStyle(color: Colors.orangeAccent, fontSize: 13),
     ),
+  );
+}
+
+class _CastAddressDialog extends StatefulWidget {
+  const _CastAddressDialog();
+  @override
+  State<_CastAddressDialog> createState() => _CastAddressDialogState();
+}
+
+class _CastAddressDialogState extends State<_CastAddressDialog> {
+  final input = TextEditingController();
+  @override
+  void dispose() {
+    input.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('输入电视地址'),
+    content: TextField(
+      key: const Key('cast-address-input'),
+      controller: input,
+      autofocus: true,
+      keyboardType: TextInputType.url,
+      decoration: const InputDecoration(hintText: '192.168.1.8 或完整设备描述地址'),
+      onSubmitted: (value) => Navigator.pop(context, value),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('取消'),
+      ),
+      TextButton(
+        key: const Key('cast-address-confirm'),
+        onPressed: () => Navigator.pop(context, input.text),
+        child: const Text('添加'),
+      ),
+    ],
   );
 }

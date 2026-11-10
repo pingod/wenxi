@@ -5,7 +5,8 @@
 在项目根目录执行：
 
 ```powershell
-flutter pub get
+$env:PUB_HOSTED_URL = 'https://pub.flutter-io.cn'
+flutter pub get --enforce-lockfile
 # Android 无签名构建检查
 .\tool\build-android.ps1 -BuildConfig config/build.community.json -Unsigned
 # Windows 完整运行目录
@@ -24,7 +25,37 @@ Linux 使用对应的 shell 入口，产物是完整的运行目录：
 
 缺少原生库时脚本会自动从源码构建。Android 可安装的正式包需要自己的签名，格式参考 `keystore.properties.example`。
 
+测试和构建均使用 `pubspec.lock` 中记录的包源、版本及校验值。构建脚本不会自动升级依赖；更新依赖时先明确修改并验证锁文件，再提交源码。
+
+## GitHub 自动构建
+
+提交到 `main` 或创建面向 `main` 的 PR 会运行 `CI`，先完成源码检查及 Flutter、原生组件测试，再构建 Android ARM64、Windows x64 和 Windows ARM64。该流程使用公开配置，安卓构建检查不需要签名密钥。Windows ARM64 使用独立的 Flutter 3.47.9 及固定引擎校验，详情见 [ARM64 构建](WINDOWS-ARM64-BUILD.md)。
+
+正式安装包在仓库的 **Actions → Build signed release → Run workflow** 中选择 `main` 后生成。推送与 `pubspec.yaml` 版本匹配的 `v` 标签也会触发，例如版本 `2.2.0+220` 对应 `v2.2.0+220`。工作流读取 GitHub 的 `release` environment：
+
+| 类型 | 名称 |
+| --- | --- |
+| Secrets | `ANDROID_KEYSTORE_BASE64`、`ANDROID_KEYSTORE_PASSWORD`、`ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD`、`ASTERLINK_CONTROL_URL`、`UMENG_APPKEY` |
+| Variables | `ASTERLINK_APPLICATION_ID`（正式版为 `com.asterlink.app`）、`ASTERLINK_GITHUB_REPO`、`UMENG_CHANNEL` |
+
+已有用户覆盖安装需要继续使用原签名密钥。私有配置和签名只放在 environment 中，不能提交到源码。
+
+使用私有口令解析、百度取链及解析配置时，额外设置 Secret `ASTERLINK_CLIENT_DEFINES_JSON`。其 JSON 对象以 `baidu-api.defines.json`、`cloud-command.defines.json`、`parser-hub.defines.json` 为键，值为对应本机 `.local/` 文件的 JSON 对象。准备脚本只接受这些文件及已知客户端字段，写入临时构建目录后沿用本机构建的配置校验；不包含后端源码或管理凭据。
+
+构建成功后，在运行详情底部的 **Artifacts** 下载 `release-android`（签名 APK）、`release-windows`（x64 安装器、便携 ZIP）和 `release-windows-arm64`（ARM64 安装器、便携 ZIP），保留 14 天。工作流只生成并上传构建附件，公开 Release 另行发布。
+
 新增 ED2K 需要更新 Gopeed 原生组件。升级已有工作目录时，Android 构建加 `-RebuildNative`（正式入口同样支持该参数），避免沿用旧 AAR；Windows 构建会重建所选架构 helper。源码与验证说明见 [ED2K 下载](ED2K-DOWNLOAD.md)。
+
+## macOS 测试包
+
+macOS 构建需要 Mac 和 Xcode。仓库的 **Actions → Build macOS test app → Run workflow**
+可选择 `arm64`（苹果芯片）或 `x64`（Intel），并使用原有客户端配置。工作流在对应
+架构的 Mac 上编译，检查下载器、解析脚本运行库和播放器架构，并验证启动和视频播放。
+成功后下载 `macos-arm64-test` 或 `macos-x64-test` 附件中的 DMG。
+
+本机 Mac 使用 PowerShell 执行 `./tool/build-macos.ps1 -Architecture x64`，苹果芯片改为
+`-Architecture arm64`；随后执行 `python tool/package-macos.py --app build/macos/Build/Products/Release/文析助手.app --architecture x64`。
+输出位于 `.local/macos-release-assets/`。测试包使用临时签名，未配置 Developer ID 签名与苹果公证。
 
 ## 本机正式版
 
@@ -56,5 +87,16 @@ Linux 使用对应的 shell 入口，产物是完整的运行目录：
 | Linux 运行目录 | `build/linux/x64/release/bundle/` |
 
 便携使用时保留完整运行目录，不能只复制 EXE。
+
+Android、Windows x64 / ARM64 内置播放恢复为仓库原有的 media_kit 1.2.6、
+media_kit_video 2.0.1 和 libmpv。继续使用 `vendor_plugins/` 中的本地补丁、
+固定原生依赖及 Windows ARM64 媒体准备脚本；当前构建不使用 MDK / FVP。
+播放器界面、网盘取链、BT、边下边播和投屏沿用现有逻辑。系统音量同步、
+切后台/切集先暂停、播放进度保存和后台释放播放器的优化继续保留。
+
+Windows 原生播放回归可先运行 `tool/prepare-player-test.ps1`，再执行
+`flutter test test/native_playback_test.dart --concurrency=1`。这些测试使用本地
+libmpv 和测试媒体，采用空音频/视频输出；它们不能替代安卓真机硬解、功耗
+和长时间播放验证。
 
 更新链接的配置与安装行为见 [App 内更新](IN-APP-UPDATE.md)。

@@ -29,6 +29,7 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
     private val main = Handler(Looper.getMainLooper())
     private val io = Executors.newFixedThreadPool(3)
     private val lanFiles = LanFiles(context)
+    private val uploadFiles = LanFiles(context)
     private val lanQrScanner = LanQrScanner { activity }
     private val nativeWorker = Executors.newSingleThreadExecutor()
     private val externalWorker = Executors.newSingleThreadExecutor()
@@ -41,6 +42,7 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
     private val downloadTargets = DownloadTargetStore(context)
     private val vault = SecureVault(context)
     private val exports = ConcurrentHashMap<String, AtomicBoolean>()
+    private val verifications = ConcurrentHashMap<String, AtomicBoolean>()
     private val cache = File(context.externalCacheDir ?: context.cacheDir, "asterlink_downloads")
     private var nativeStarted = false
     private var parserNativeUsed = false
@@ -249,16 +251,24 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
             }
             return
         }
-        if (call.method == "chooseDirectory") {
+        if (call.method == "chooseDirectory" || call.method == "chooseUploadDirectory") {
             val current = activity
             if (current == null || picker != null) { result.error("busy", "请先关闭当前目录选择窗口", null); return }
             picker = result
-            try { current.startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION), 831) }
+            val access = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or
+                (if (call.method == "chooseDirectory") Intent.FLAG_GRANT_WRITE_URI_PERMISSION else 0)
+            try { current.startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(access), 831) }
             catch (_: Exception) { picker = null; result.error("picker", "无法打开目录选择器", null) }
             return
         }
         if (call.method == "cancelExport") {
             call.argument<String>("id")?.let { exports[it]?.set(true) }
+            result.success(null)
+            return
+        }
+        if (call.method == "cancelDownloadVerification") {
+            val key = "${call.argument<String>("id")}:${call.argument<Number>("token")?.toLong()}"
+            verifications[key]?.set(true)
             result.success(null)
             return
         }
@@ -275,10 +285,27 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
         // Register before queueing IO so a pause can cancel a save that has not
         // yet reached its worker thread.
         if (call.method == "saveFile") call.argument<String>("id")?.let { exports[it] = AtomicBoolean(false) }
+        val verificationKey = if (call.method == "verifyDownloadTarget")
+            "${call.argument<String>("id")}:${call.argument<Number>("token")?.toLong()}" else null
+        val verification = verificationKey?.let { AtomicBoolean(false).also { flag -> verifications[it] = flag } }
         val executor = if (call.method == "gopeed") nativeWorker else io
         executor.execute {
             try {
                 val value: Any? = when (call.method) {
+                    "verifyDownloadTarget" -> {
+                        try {
+                            downloadTargets.digest(requireNotNull(call.argument<String>("id")),
+                                requireNotNull(call.argument<String>("lease")), requireNotNull(call.argument<String>("algorithm"))) {
+                                if (verification!!.get()) throw IOException("校验已暂停")
+                            }
+                        } finally { verifications.remove(requireNotNull(verificationKey), requireNotNull(verification)) }
+                    }
+                    "uploadScan" -> uploadFiles.scanUploadDirectory(call.argument<String>("path").orEmpty())
+                    "uploadCheckDirectory" -> { uploadFiles.checkDirectory(call.argument<String>("path").orEmpty()); null }
+                    "uploadStat" -> uploadFiles.stat(call.argument<String>("path").orEmpty())
+                    "uploadOpenRead" -> uploadFiles.open(call.argument<String>("path").orEmpty(), call.argument<Number>("offset")?.toLong() ?: 0)
+                    "uploadRead" -> uploadFiles.read(call.argument<String>("id").orEmpty(), call.argument<Number>("length")?.toInt() ?: 0)
+                    "uploadCloseRead" -> { uploadFiles.close(call.argument<String>("id").orEmpty()); null }
                     "prepareAppUpdate" -> AppUpdatePackage(context).prepare(
                         call.argument<String>("path").orEmpty(),
                         call.argument<String>("version").orEmpty(),
@@ -354,17 +381,20 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
                 main.post { result.error("native", "下载组件加载失败，请安装适配当前设备的完整安装包", null) }
             } catch (error: SecurityException) {
                 diagnostics.record("bridge.${call.method}", error)
-                main.post { result.error("permission", "目录权限已失效，请重新选择下载目录后重试", null) }
+                val message = if (call.method.startsWith("upload")) "上传目录权限已失效，请重新选择文件夹后重试"
+                    else "目录权限已失效，请重新选择下载目录后重试"
+                main.post { result.error("permission", message, null) }
             } catch (error: Throwable) {
                 if (!call.method.startsWith("diagnostic")) diagnostics.record("bridge.${call.method}", error)
                 val message = when (call.method) {
+                    "uploadScan", "uploadCheckDirectory", "uploadStat", "uploadOpenRead", "uploadRead", "uploadCloseRead" -> error.message ?: "上传源文件不可访问，请重新选择"
                     "lanScan", "lanStat", "lanOpenRead", "lanRead", "lanCreateDirectories" -> error.message ?: "所选文件不可访问，请重新选择"
                     "prepareAppUpdate" -> error.message ?: "安装包校验失败，请重新下载或使用浏览器更新"
                     "legacySnapshot" -> "旧版数据读取失败，原文件已保留，可稍后重试导入"
                     "gopeed" -> if (error is EngineKeyStore.Unavailable) error.message else "下载组件操作失败，请重试并检查下载目录"
                     "deleteFile" -> "文件未能删除，请检查目录权限后重试"
                     "saveFile" -> if (error.message == "保存已暂停") "保存已暂停" else "无法保存下载文件，请检查存储空间和目录权限"
-                    "inspectDownloadTarget", "openDownloadTarget", "downloadTargetIo", "finishDownloadTarget", "releaseDownloadTarget", "discardDownloadTarget", "forgetDownloadTarget" ->
+                    "inspectDownloadTarget", "openDownloadTarget", "downloadTargetIo", "verifyDownloadTarget", "finishDownloadTarget", "releaseDownloadTarget", "discardDownloadTarget", "forgetDownloadTarget" ->
                         error.message ?: "无法访问下载目标，请检查存储空间和目录权限"
                     else -> "下载组件操作失败，请重试并检查下载目录"
                 }
@@ -454,7 +484,9 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
         check(!nativeStarted || nativeDirectory == directory.absolutePath) { "请重启应用以切换恢复后的下载记录" }
         check(directory.mkdirs() || directory.isDirectory)
         check(cache.mkdirs() || cache.isDirectory)
-        val key = EngineKeyStore(directory, vault::open).load(args.optString("key"))
+        Seq.setContext(context.applicationContext)
+        val key = if (nativeStarted || Gopeed.storageFormat(directory.absolutePath) == "plain")
+            "" else EngineKeyStore(directory, vault::open).load(args.optString("key"))
         if (!nativeStarted) {
             Seq.setContext(context.applicationContext)
             Gopeed.open(directory.absolutePath, cache.absolutePath, key)

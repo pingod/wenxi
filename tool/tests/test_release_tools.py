@@ -24,6 +24,7 @@ def load(name, filename):
 public = load('public_files', 'check_public_files.py')
 release = load('release_assets', 'package-release.py')
 settings = load('release_settings', 'prepare-ci-release.py')
+arm64_lock = load('arm64_lock', 'prepare-windows-arm64-lock.py')
 
 BACKEND_ONLY_PATHS = [
     'backend/src/Routes.php', 'wwwroot/5.com/src/Sources.php',
@@ -124,6 +125,9 @@ class PublicFilesTest(unittest.TestCase):
             'native/gopeed/internal/protocol/http/build.data',
             'native/gopeed/internal/protocol/http/download.data',
             'outputs/player-tests.txt', 'outputs/task.network-response',
+            'dist/verification.json', 'dist/SHA256SUMS.txt',
+            'tool/DISK_CLEANUP_PANEL.md', 'tool/disk_cleanup_panel.py',
+            'tool/run_disk_cleanup_panel.cmd',
             'setup.exe', 'app-release.apk', 'download.zip', 'capture.har',
         ]
         public_paths = [
@@ -163,6 +167,9 @@ class PublicFilesTest(unittest.TestCase):
             'setup.exe', 'download.zip', 'capture.har',
             'native/gopeed/internal/protocol/http/download.data',
             'outputs/player-tests.txt', 'outputs/task.network-response',
+            'dist/verification.json', 'dist/SHA256SUMS.txt',
+            'tool/DISK_CLEANUP_PANEL.md', 'tool/disk_cleanup_panel.py',
+            'tool/run_disk_cleanup_panel.cmd',
         ]
         for name in paths:
             path = self.root / name
@@ -259,9 +266,9 @@ class ReleaseFilesTest(unittest.TestCase):
             release.stage(self.root, 'linux')
 
     def _create_macos_app(self):
-        app = self.root / 'build/macos/Build/Products/Release/asterlink.app'
+        app = self.root / 'build/macos/Build/Products/Release/文析助手.app'
         files = (
-            'Contents/MacOS/asterlink',
+            'Contents/MacOS/文析助手',
             'Contents/MacOS/asterlink_gopeed',
             'Contents/Info.plist',
             'Contents/Frameworks/App.framework/App',
@@ -271,7 +278,7 @@ class ReleaseFilesTest(unittest.TestCase):
             file = app / name
             file.parent.mkdir(parents=True, exist_ok=True)
             file.write_bytes(b'fixture')
-        (app / 'Contents/MacOS/asterlink').chmod(0o755)
+        (app / 'Contents/MacOS/文析助手').chmod(0o755)
         (app / 'Contents/MacOS/asterlink_gopeed').chmod(0o755)
         return app
 
@@ -287,10 +294,10 @@ class ReleaseFilesTest(unittest.TestCase):
         # The whole .app is kept as one directory tree, not flattened into the
         # archive root, and the helper must travel with the executable.
         tops = {name.split('/', 1)[0] for name in names}
-        self.assertEqual(tops, {'asterlink.app'})
-        self.assertIn('asterlink.app/Contents/MacOS/asterlink', names)
-        self.assertIn('asterlink.app/Contents/MacOS/asterlink_gopeed', names)
-        self.assertIn('asterlink.app/Contents/Info.plist', names)
+        self.assertEqual(tops, {'文析助手.app'})
+        self.assertIn('文析助手.app/Contents/MacOS/文析助手', names)
+        self.assertIn('文析助手.app/Contents/MacOS/asterlink_gopeed', names)
+        self.assertIn('文析助手.app/Contents/Info.plist', names)
 
     def test_macos_bundle_without_helper_is_rejected(self):
         app = self._create_macos_app()
@@ -306,6 +313,80 @@ class ReleaseFilesTest(unittest.TestCase):
             file.write_bytes(b'fixture')
         with self.assertRaises(ValueError):
             release.stage(self.root, 'windows')
+
+    def test_windows_architectures_stage_distinct_runtimes_and_installers(self):
+        for architecture in ('x64', 'arm64'):
+            runtime = self.root / ('build/windows/' + architecture + '/runner/Release')
+            for name in ('asterlink.exe', 'asterlink_gopeed.exe', 'flutter_windows.dll', 'libmpv-2.dll', 'data/app.so'):
+                file = runtime / name
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_bytes(architecture.encode())
+            installer = self.root / (architecture + '-setup.exe')
+            installer.write_bytes(architecture.encode())
+            output = release.stage(self.root, 'windows', installer, architecture)
+            with zipfile.ZipFile(output / ('asterlink-1.2.3+4-windows-' + architecture + '.zip')) as archive:
+                self.assertEqual(archive.read('asterlink.exe'), architecture.encode())
+            self.assertEqual((output / ('asterlink-1.2.3+4-windows-' + architecture + '-setup.exe')).read_bytes(), architecture.encode())
+        self.assertEqual(release.checksums(output), 4)
+
+    def test_invalid_architecture_is_rejected_before_staging(self):
+        with self.assertRaises(ValueError):
+            release.stage(self.root, 'windows', architecture='../other')
+        self.assertFalse((self.root / '.local').exists())
+
+
+class Arm64LockTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        self.sdk = self.root / 'sdk'
+        (self.sdk / 'bin/internal').mkdir(parents=True)
+        (self.sdk / 'bin/internal/engine.version').write_text(arm64_lock.ENGINE, encoding='utf-8')
+        self.path = self.root / 'pubspec.lock'
+        self.original = (ROOT / 'pubspec.lock').read_bytes()
+        self.path.write_bytes(self.original)
+
+    def test_only_sdk_companion_blocks_change_and_reapplying_is_stable(self):
+        arm64_lock.prepare(self.root, self.sdk)
+        adapted = self.path.read_bytes()
+        def other_blocks(data):
+            text = data.decode('utf-8').replace('\r\n', '\n')
+            for name in arm64_lock.PACKAGES:
+                text = __import__('re').sub(r'(?m)^  ' + name + r':\n(?:(?:    .*|)\n)+', '', text)
+            return text
+        self.assertEqual(other_blocks(adapted), other_blocks(self.original))
+        arm64_lock.prepare(self.root, self.sdk)
+        self.assertEqual(self.path.read_bytes(), adapted)
+        self.assertIn(b'version: "4.10.1"', adapted)
+
+    def test_wrong_engine_and_package_source_preserve_the_lock(self):
+        (self.sdk / 'bin/internal/engine.version').write_text('other-engine', encoding='utf-8')
+        with self.assertRaises(ValueError):
+            arm64_lock.prepare(self.root, self.sdk)
+        self.assertEqual(self.path.read_bytes(), self.original)
+        (self.sdk / 'bin/internal/engine.version').write_text(arm64_lock.ENGINE, encoding='utf-8')
+        invalid = self.original.replace(b'pub.flutter-io.cn', b'packages.invalid').replace(b'pub.dev', b'packages.invalid')
+        self.path.write_bytes(invalid)
+        with self.assertRaises(ValueError):
+            arm64_lock.prepare(self.root, self.sdk)
+        self.assertEqual(self.path.read_bytes(), invalid)
+
+    def test_official_registry_keeps_sources_and_non_sdk_packages(self):
+        official = self.original.replace(b'pub.flutter-io.cn', b'pub.dev')
+        self.path.write_bytes(official)
+        arm64_lock.prepare(self.root, self.sdk)
+        adapted = self.path.read_bytes()
+        def other_blocks(data):
+            text = data.decode('utf-8').replace('\r\n', '\n')
+            for name in arm64_lock.PACKAGES:
+                text = __import__('re').sub(r'(?m)^  ' + name + r':\n(?:(?:    .*|)\n)+', '', text)
+            return text
+        self.assertEqual(other_blocks(adapted), other_blocks(official))
+        self.assertNotIn(b'pub.flutter-io.cn', adapted)
+        self.assertIn(b'url: "https://pub.dev"', adapted)
+        arm64_lock.prepare(self.root, self.sdk)
+        self.assertEqual(self.path.read_bytes(), adapted)
 
 
 class SigningSettingsTest(unittest.TestCase):
@@ -328,6 +409,50 @@ class SigningSettingsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             settings.prepare(self.root, environment={})
         self.assertEqual(config.read_text(encoding='utf-8'), '{"local":true}')
+
+    def test_client_defines_are_restored_without_exposing_them_in_build_settings(self):
+        files = {'cloud-command.defines.json': {
+            'ASTERLINK_QUARK_COMMAND_KEY': 'fixture-quark',
+            'ASTERLINK_UC_COMMAND_KEY': 'fixture-uc',
+        }}
+        settings.prepare(self.root, environment={'ASTERLINK_CLIENT_DEFINES_JSON': json.dumps(files)})
+        local = self.root / '.local'
+        self.assertEqual(json.loads((local / 'cloud-command.defines.json').read_text()),
+                         files['cloud-command.defines.json'])
+        self.assertNotIn('fixture-quark', (local / 'build-config.json').read_text())
+
+    def test_unknown_files_fields_and_non_string_values_are_rejected_before_writing(self):
+        invalid = [
+            {'../outside.json': {}},
+            {'cloud-command.defines.json': {'ADMIN_PASSWORD': 'synthetic'}},
+            {'cloud-command.defines.json': {
+                'ASTERLINK_QUARK_COMMAND_KEY': 123, 'ASTERLINK_UC_COMMAND_KEY': 'fixture',
+            }},
+            ['cloud-command.defines.json'],
+        ]
+        for files in invalid:
+            with self.subTest(files=files), self.assertRaises(ValueError):
+                settings.prepare(self.root, environment={'ASTERLINK_CLIENT_DEFINES_JSON': json.dumps(files)})
+            self.assertFalse((self.root / '.local').exists())
+
+    def test_malformed_client_config_error_does_not_echo_secret_values(self):
+        with self.assertRaises(ValueError) as error:
+            settings.prepare(self.root, environment={'ASTERLINK_CLIENT_DEFINES_JSON': 'synthetic-private-data'})
+        self.assertNotIn('synthetic-private-data', str(error.exception))
+        self.assertFalse((self.root / '.local').exists())
+
+    def test_existing_client_config_is_not_overwritten(self):
+        local = self.root / '.local'
+        local.mkdir()
+        defines = local / 'cloud-command.defines.json'
+        defines.write_text('{"local":true}', encoding='utf-8')
+        files = {'cloud-command.defines.json': {
+            'ASTERLINK_QUARK_COMMAND_KEY': 'fixture-quark', 'ASTERLINK_UC_COMMAND_KEY': 'fixture-uc',
+        }}
+        with self.assertRaises(ValueError):
+            settings.prepare(self.root, environment={'ASTERLINK_CLIENT_DEFINES_JSON': json.dumps(files)})
+        self.assertEqual(defines.read_text(), '{"local":true}')
+        self.assertFalse((local / 'build-config.json').exists())
 
     def test_properties_escape_metacharacters_and_keep_secrets_out_of_config(self):
         env = {

@@ -17,7 +17,9 @@ def version_of(root):
     return match.group(1)
 
 
-def stage(root, platform, installer=None):
+def stage(root, platform, installer=None, architecture='x64'):
+    if platform not in {'android', 'linux', 'windows', 'macos'} or architecture not in {'x64', 'arm64'}:
+        raise ValueError('Unsupported release platform or architecture')
     root = Path(root).resolve()
     version = version_of(root)
     output = root / '.local/release-assets'
@@ -58,18 +60,20 @@ def stage(root, platform, installer=None):
                 with path.open('rb') as stream:
                     archive.addfile(info, stream)
     elif platform == 'windows':
-        runtime = root / 'build/windows/x64/runner/Release'
+        runtime = root / ('build/windows/' + architecture + '/runner/Release')
         for name in ('asterlink.exe', 'asterlink_gopeed.exe', 'flutter_windows.dll', 'libmpv-2.dll', 'data/app.so'):
             if not (runtime / name).is_file():
                 raise ValueError('Windows runtime is incomplete')
         files = sorted(p for p in runtime.rglob('*') if p.is_file())
         for path in files:
             relative = path.relative_to(runtime)
+            if re.match(r'(?i)^(fvp|mdk(?:-(?:braw|r3d))?|ffmpeg-9|libass)\.dll$', path.name):
+                raise ValueError('Windows runtime contains a removed player library')
             if path.is_symlink() or runtime.resolve() not in path.resolve().parents:
                 raise ValueError('Windows runtime contains a link')
             if any(part in {'.local', '.git', 'logs', 'diagnostics'} for part in relative.parts) or path.suffix in {'.jks', '.keystore', '.p12', '.pfx', '.log', '.pdb'}:
                 raise ValueError('Windows runtime contains private or development files')
-        destination = output / ('asterlink-' + version + '-windows-x64.zip')
+        destination = output / ('asterlink-' + version + '-windows-' + architecture + '.zip')
         if destination.exists():
             raise ValueError('A staged Windows asset already exists')
         with zipfile.ZipFile(destination, 'x', compression=zipfile.ZIP_DEFLATED) as archive:
@@ -79,18 +83,19 @@ def stage(root, platform, installer=None):
             source = Path(installer).resolve()
             if not source.is_file() or source.suffix.lower() != '.exe':
                 raise ValueError('Installer must be an existing EXE')
-            target = output / ('asterlink-' + version + '-windows-x64-setup.exe')
+            target = output / ('asterlink-' + version + '-windows-' + architecture + '-setup.exe')
             if target.exists():
                 raise ValueError('A staged installer already exists')
             shutil.copy2(source, target)
     elif platform == 'macos':
-        # Flutter's macOS bundle is a .app directory. AsterLink keeps both the
-        # app executable and the download helper in Contents/MacOS, so check
-        # the paths the Dart runtime resolves at startup (desktopHelperName).
-        app = root / 'build/macos/Build/Products/Release/asterlink.app'
+        # Flutter's macOS bundle is a .app directory named after the Xcode
+        # PRODUCT_NAME (文析助手). AsterLink keeps both the app executable and
+        # the download helper in Contents/MacOS, so check the paths the Dart
+        # runtime resolves at startup (desktopHelperName).
+        app = root / 'build/macos/Build/Products/Release/文析助手.app'
         contents = app / 'Contents'
         required = (
-            ('Contents/MacOS/asterlink', app / 'Contents/MacOS/asterlink'),
+            ('Contents/MacOS/文析助手', app / 'Contents/MacOS/文析助手'),
             ('Contents/MacOS/asterlink_gopeed', app / 'Contents/MacOS/asterlink_gopeed'),
             ('Contents/Info.plist', contents / 'Info.plist'),
             ('Contents/Frameworks/App.framework/App', contents / 'Frameworks/App.framework/App'),
@@ -134,12 +139,13 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--platform', choices=('android', 'windows', 'linux', 'macos'))
     parser.add_argument('--installer')
+    parser.add_argument('--architecture', choices=('x64', 'arm64'), default='x64')
     parser.add_argument('--checksums', action='store_true')
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     try:
         if args.platform:
-            stage(root, args.platform, args.installer)
+            stage(root, args.platform, args.installer, args.architecture)
             print('Release assets staged for ' + args.platform)
         if args.checksums:
             print('SHA-256 written for {} assets'.format(checksums(root / '.local/release-assets')))

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
+import 'package:collection/collection.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
@@ -18,16 +19,20 @@ import '../domain/downloads.dart';
 import '../domain/ed2k.dart';
 import '../domain/file_types.dart';
 import '../domain/models.dart';
+import '../domain/github_acceleration.dart';
 import '../domain/settings.dart';
 import '../domain/torrent.dart';
 import '../platform/file_access.dart';
+import '../platform/android_download_file.dart';
 import '../platform/native_engine.dart';
+import '../lan/lan_download_route.dart';
 import 'hls.dart';
 import 'download_activity.dart';
 import 'download_request.dart';
 import 'download_playback_cache.dart';
 import 'space_budget.dart';
 import 'transfer_http.dart';
+import 'native_http_probe.dart';
 import 'baidu_transfer_recovery.dart';
 import 'aliyun_transfer_recovery.dart';
 
@@ -118,6 +123,7 @@ class _Run {
   final scope = RequestScope();
   final wake = Completer<void>();
   bool stopped = false;
+  Future<void>? stoppingWriters;
   Future<void> done = Future.value();
   int networkRetries = 0;
   bool networkActive = true;
@@ -250,6 +256,8 @@ class DownloadManager extends ChangeNotifier {
   int _torrentPlaybackHolds = 0;
   bool _postBusy = false;
   Timer? _progressFlush;
+  Future<void>? _progressSaving;
+  bool _progressSaveAgain = false;
   Timer? _foregroundTimer;
   bool _foregroundPublishing = false;
   Future<void>? _pausingAll;
@@ -467,10 +475,13 @@ class DownloadManager extends ChangeNotifier {
     // Recovery is explicitly authorized by the native service after startup.
     if (_initialised) return;
     final watch = Stopwatch()..start();
-    _loadSnapshot();
-    await _persist();
+    final changed = _loadSnapshot();
+    if (changed) {
+      await _persist(reconcileCleanups: true);
+    } else {
+      await cleanups.reconcile(recoverOrphans: true);
+    }
     _initialised = true;
-    await cleanups.reconcile(recoverOrphans: true);
     _background(cleanups.drain());
     _background(_drainRemovedDownloads());
     _background(_drainCompletedCaches());
@@ -490,14 +501,20 @@ class DownloadManager extends ChangeNotifier {
     await _persist();
   }
 
-  void _loadSnapshot() {
+  bool _loadSnapshot() {
+    final saved = store.data;
+    final raw = saved['tasks'];
+    final values = saved.list('tasks');
+    var changed =
+        saved.integer('baiduConnectionsPolicy') != 1 ||
+        raw != null && (raw is! List || raw.length != values.length) ||
+        saved['torrents'] != null && saved['torrents'] is! Map;
+    const equality = DeepCollectionEquality();
     final loaded = <String, DownloadTask>{};
     _interrupted
       ..clear()
-      ..addAll(
-        (store.data['downloadRecovery'] as List? ?? []).whereType<String>(),
-      );
-    for (final value in store.data.list('tasks')) {
+      ..addAll((saved['downloadRecovery'] as List? ?? []).whereType<String>());
+    for (final value in values) {
       var task = DownloadTask.fromJson(value);
       engine.validateId(task.id);
       if (task.active) {
@@ -522,6 +539,10 @@ class DownloadManager extends ChangeNotifier {
             },
         });
       }
+      changed =
+          changed ||
+          loaded.containsKey(task.id) ||
+          !equality.equals(value, task.toJson());
       loaded[task.id] = task;
     }
     _interrupted.removeWhere(
@@ -530,6 +551,16 @@ class DownloadManager extends ChangeNotifier {
     _tasks
       ..clear()
       ..addAll(loaded);
+    final usedTorrents = loaded.values
+        .where((task) => task.spec.isTorrent)
+        .map((task) => task.spec.torrent!.str('hash'))
+        .toSet();
+    return changed ||
+        !equality.equals(
+          saved['downloadRecovery'] ?? const [],
+          _interrupted.toList(),
+        ) ||
+        saved.obj('torrents').keys.any((hash) => !usedTorrents.contains(hash));
   }
 
   /// Hold scheduling while merging legacy records, then reload the committed
@@ -554,6 +585,7 @@ class DownloadManager extends ChangeNotifier {
     String? removedDownload,
     List<String> removedDownloads = const [],
     List<DownloadCleanup?> removedCleanups = const [],
+    bool reconcileCleanups = false,
   }) {
     _progressFlush?.cancel();
     _progressFlush = null;
@@ -605,6 +637,9 @@ class DownloadManager extends ChangeNotifier {
         }
         cleanups.readyInDraft(draft, removedCleanups);
       }
+      if (reconcileCleanups) {
+        cleanups.reconcileInDraft(draft, recoverOrphans: true);
+      }
     });
   }
 
@@ -624,11 +659,28 @@ class DownloadManager extends ChangeNotifier {
       if (progress) {
         _progressFlush ??= Timer(const Duration(seconds: 2), () {
           _progressFlush = null;
-          _background(_persist());
+          _progressSaveAgain = true;
+          if (_progressSaving == null) {
+            _progressSaving = Future<void>.microtask(_flushProgress);
+            _background(_progressSaving!);
+          }
         });
       } else {
         await _persist();
       }
+    }
+  }
+
+  Future<void> _flushProgress() async {
+    try {
+      // One progress commit may be slow on a large queue. Merge later ticks
+      // into its successor instead of placing a full snapshot on every tick.
+      while (_progressSaveAgain) {
+        _progressSaveAgain = false;
+        await _persist();
+      }
+    } finally {
+      _progressSaving = null;
     }
   }
 
@@ -1255,11 +1307,19 @@ class DownloadManager extends ChangeNotifier {
     final run = _running[id];
     if (run != null) {
       run.stop();
-      await files.cancelExport(id);
-      await engine.pause(id);
+      await _stopWriters(id, run);
       await run.done;
     }
   }
+
+  Future<void> _stopWriters(String id, _Run run) => run.stoppingWriters ??=
+      () async {
+        await files.cancelExport(id);
+        await engine.pause(id);
+      }().catchError((Object error, StackTrace stack) {
+        run.stoppingWriters = null;
+        Error.throwWithStackTrace(error, stack);
+      });
 
   Future<void> pause(String id) => _control(id, () async {
     _interrupted.remove(id);
@@ -1267,16 +1327,24 @@ class DownloadManager extends ChangeNotifier {
       'download.pause',
       fields: {'ref': DiagnosticLog.reference(id)},
     );
-    // Commit the user's pause before waiting for native/export writers. A
-    // process loss during cancellation must not restore it as active work.
+    // Start durable saving and writer cancellation together. The UI status is
+    // immediate; return only after both the record and native checkpoint finish.
     if (_tasks[id]?.active == true) {
       _running[id]?.stop();
-      await _update(id, {'status': 'paused', 'speed': 0, 'phase': ''});
+      await _update(id, {
+        'status': 'paused',
+        'speed': 0,
+        'phase': '',
+      }, persist: false);
     }
-    await _stop(id);
+    await Future.wait([_persist(), _stop(id)]);
     final current = _tasks[id];
     if (current != null && !current.terminal) {
-      await _update(id, {'status': 'paused', 'speed': 0, 'phase': ''});
+      if (current.status != DownloadStatus.paused ||
+          current.speed != 0 ||
+          current.phase.isNotEmpty) {
+        await _update(id, {'status': 'paused', 'speed': 0, 'phase': ''});
+      }
     }
   });
   Future<void> pauseAll({String reason = ''}) =>
@@ -1308,10 +1376,10 @@ class DownloadManager extends ChangeNotifier {
           'phase': '',
         });
       }
-      await _persist();
       // Queued files have no writer. Calling pause() on each of them used to
       // rewrite the entire queue once per file during shutdown.
       await Future.wait([
+        _persist(),
         for (final id in ids)
           if (_running.containsKey(id)) _control(id, () => _stop(id)),
       ]);
@@ -2192,6 +2260,11 @@ class DownloadManager extends ChangeNotifier {
         }
       }
       if (output == null) {
+        if (LanDownloadRoute.owns(_tasks[id]!.spec)) {
+          // Rebuild the local listener only when network data is needed. A
+          // completed payload can still be verified/exported with LAN off.
+          await _prepareSource(id, run);
+        }
         var refresh = 0;
         while (true) {
           run.check();
@@ -2253,14 +2326,20 @@ class DownloadManager extends ChangeNotifier {
       final readyLength = await output.length();
       await _reserve(id, run, readyLength, readyLength, waitForExport: true);
       run.networkActive = false;
-      await _update(id, {'phase': '等待校验 / 保存', 'speed': 0});
+      await _update(id, {'phase': '等待校验 / 保存', 'speed': 0}, persist: false);
       _schedule();
+      final postClock = Stopwatch()..start();
       await _acquirePost(run);
+      final postQueueMs = postClock.elapsedMilliseconds;
+      late final DownloadSpec completedSpec;
       try {
         run.check();
-        await _update(id, {'phase': '校验文件', 'speed': 0});
+        await _update(id, {'phase': '校验文件', 'speed': 0}, persist: false);
         final task = _tasks[id]!;
+        completedSpec = task.spec;
+        final verifyClock = Stopwatch()..start();
         if (task.hls.isEmpty) await _verify(output, task.spec, run);
+        final verifyMs = verifyClock.elapsedMilliseconds;
         run.check();
         final length = await output.length();
         final target = _directTargets[id];
@@ -2316,6 +2395,8 @@ class DownloadManager extends ChangeNotifier {
             'ref': DiagnosticLog.reference(id),
             'bytes': length,
             'saveMs': saveClock.elapsedMilliseconds,
+            'verifyMs': verifyMs,
+            'postQueueMs': postQueueMs,
             'retries': run.networkRetries,
             'directOutput': target != null,
             'sameVolume': run.storage.cache.id == run.storage.target.id,
@@ -2323,10 +2404,12 @@ class DownloadManager extends ChangeNotifier {
         );
         await _markCompleted(id, newSaved);
         committed = true;
-        await _afterCompleted(id, task.spec);
       } finally {
         _releasePost();
       }
+      // Completed state is durable before releasing the post-processing slot.
+      // Cleanup remains awaited for safe shutdown, but cannot block the next hash.
+      await _afterCompleted(id, completedSpec);
     } catch (e, stack) {
       if (!run.stopped && e is! _Stopped) {
         DiagnosticLog.error(
@@ -2398,7 +2481,7 @@ class DownloadManager extends ChangeNotifier {
       }
     } finally {
       try {
-        await engine.pause(id);
+        await _stopWriters(id, run);
         await _releaseDirectTarget(id, onlyIfUnused: !_closing);
       } catch (_) {
         if (!committed) lastError = '暂停下载组件失败，重试前请重新打开应用';
@@ -2627,6 +2710,18 @@ class DownloadManager extends ChangeNotifier {
   }
 
   Future<Probe> _probe(String id, _Run run, DownloadSpec spec) async {
+    final original = _tasks[id]!.spec;
+    if (spec.networkPolicy == null &&
+        (original.profile == 'github' ||
+            GitHubAcceleration.permits(original.url, original.headers))) {
+      return NativeHttpProbe(engine).probe(
+        spec,
+        id: id,
+        checkpoint: run.check,
+        delay: run.delay,
+        sampleBytes: 1024,
+      );
+    }
     if (spec.profile != 'wopan') return http.probeDownload(spec);
     // Use the same TLS implementation as the actual Wopan file transfer.
     // Each native call returns promptly so pause/delete can cancel the probe.
@@ -2672,8 +2767,34 @@ class DownloadManager extends ChangeNotifier {
     _validateDownloadUrl(task.spec);
     // Choose once per transfer so the probe and native engine use the same
     // endpoint even if settings change while the connection is being opened.
-    final transferSpec = settings.githubAcceleration.apply(task.spec);
-    final probe = await _probe(id, run, transferSpec);
+    final candidates = settings.githubAcceleration.downloadCandidates(
+      task.spec,
+    );
+    var transferSpec = candidates.first;
+    late Probe probe;
+    for (var index = 0; ; index++) {
+      transferSpec = candidates[index];
+      try {
+        probe = await _probe(id, run, transferSpec);
+        break;
+      } catch (error) {
+        run.check();
+        if (index + 1 >= candidates.length ||
+            !(retryableDownloadError(error) ||
+                error is DownloadProbeContentException)) {
+          rethrow;
+        }
+        DiagnosticLog.event(
+          'download.github_route_fallback',
+          fields: {
+            'host': Uri.parse(transferSpec.url).host,
+            'reason': error is DownloadProbeContentException
+                ? 'invalidRange'
+                : 'network',
+          },
+        );
+      }
+    }
     run.check();
     if (probe.hls) {
       require(task.spec.networkPolicy == null, '该来源暂不支持流媒体清单下载');
@@ -3189,16 +3310,22 @@ class DownloadManager extends ChangeNotifier {
       _ => null,
     };
     if (hash == null) return;
-    final digest = await file
-        .openRead()
-        .map((chunk) {
-          run.check();
-          return chunk;
-        })
-        .transform(hash)
-        .first;
+    var digest = file is AndroidDownloadFile
+        ? await file.digest(algorithm!, cancelled: run.wake.future)
+        : null;
+    digest ??=
+        (await file
+                .openRead()
+                .map((chunk) {
+                  run.check();
+                  return chunk;
+                })
+                .transform(hash)
+                .first)
+            .toString();
+    run.check();
     require(
-      digest.toString().toLowerCase() == spec.checksumValue!.toLowerCase(),
+      digest.toLowerCase() == spec.checksumValue!.toLowerCase(),
       '文件校验失败，请删除此任务后重新下载',
     );
   }
@@ -3317,6 +3444,8 @@ class DownloadManager extends ChangeNotifier {
 
   Future<void> close() async {
     _closing = true;
+    _progressFlush?.cancel();
+    _progressFlush = null;
     _foregroundTimer?.cancel();
     _foregroundTimer = null;
     await pauseAll();
@@ -3328,6 +3457,11 @@ class DownloadManager extends ChangeNotifier {
     await engine.close();
     for (final id in _directTargets.keys.toList()) {
       await _releaseDirectTarget(id);
+    }
+    try {
+      await _progressSaving;
+    } catch (_) {
+      // Background persistence has already reported the storage failure.
     }
     await store.flush();
   }

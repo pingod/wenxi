@@ -8,7 +8,8 @@ const vm = require('node:vm');
 
 const root = resolve(__dirname, '..');
 const html = readFileSync(resolve(root, '远程配置编辑器.html'), 'utf8');
-const context = vm.createContext({ URL, TextEncoder, TextDecoder, AbortController, setTimeout, clearTimeout });
+const context = vm.createContext({ URL, TextEncoder, TextDecoder, AbortController, setTimeout, clearTimeout, atob });
+vm.runInContext(html.match(/<script id="markdown-vendor">([\s\S]*?)<\/script>/)[1], context);
 const script = html.match(/<script id="config-core">([\s\S]*?)<\/script>/)[1];
 vm.runInContext(script, context);
 const C = context.WenxiConfig;
@@ -31,6 +32,42 @@ test('Optional in-app update fields roundtrip and count as changed publication c
   assert.ok(C.validate(changed).some(e => e.path === 'updates.android.inAppDownloadUrl'));
 });
 const issue = (value, path) => assert.ok(C.validate(value).some(e => e.path === path), `Expected validation error at ${path}`);
+
+test('Apple updates have editable fields, independent policies and legacy defaults', () => {
+  const config = C.normalize(C.parse('{"updates":{"android":{"enabled":false}}}'));
+  assert.deepEqual(native(C.PLATFORMS), ['android','windows','ios','macos']);
+  assert.equal(config.updates.ios.enabled, false);
+  assert.equal(config.updates.macos.enabled, false);
+  for (const platform of ['ios','macos']) {
+    Object.assign(config.updates[platform], {enabled:true, version:'2.2.1', build:221,
+      downloadUrl:`https://example.test/${platform}`, force:platform === 'macos'});
+    valid(config);
+    const changed = C.clone(config);
+    changed.updates[platform].build = 222;
+    assert.equal(C.samePublishedContent(changed,config), false);
+    assert.ok(!C.extras(config).includes(`updates.${platform}`));
+    changed.updates[platform].downloadUrl = 'http://invalid.test/download';
+    issue(changed, `updates.${platform}.downloadUrl`);
+  }
+  assert.match(html, /data-preview-platform="ios"/);
+  assert.match(html, /data-preview-platform="macos"/);
+});
+
+test('announcement mini-program targets validate without relaxing updates or images', () => {
+  const config = C.template();
+  config.announcement = {enabled:true,title:'活动',content:'![图片](https://example.test/banner.png)',
+    buttonText:'打开微信小程序',buttonUrl:'weixin://dl/business/?t=example-ticket'};
+  valid(config);
+  assert.equal(C.https(config.announcement.buttonUrl),false);
+  assert.equal(C.announcementLink(config.announcement.buttonUrl),true);
+  assert.match(C.markdown(config.announcement.content),/<img/);
+  assert.doesNotMatch(C.markdown('![本机](file:///C:/private.png)\n\n<script>alert(1)</script>'),/<(?:img|script)\b/);
+  config.announcement.buttonUrl = 'weixin://dl/scan/';
+  issue(config,'announcement.buttonUrl');
+  config.updates.android = {...config.updates.android,enabled:true,version:'1',build:100,
+    downloadUrl:'weixin://dl/business/?t=example-ticket'};
+  issue(config,'updates.android.downloadUrl');
+});
 
 test('both embedded scripts parse and the single HTML has no remote dependencies', () => {
   for (const [, id, source] of html.matchAll(/<script id="([^"]+)">([\s\S]*?)<\/script>/g)) {
@@ -131,7 +168,7 @@ test('all controls coexist, with independent normal and forced platform updates'
 });
 
 test('unknown optional metadata and future platform fields survive editing', () => {
-  const original = C.parse('{"schema":1,"revision":2,"metadata":{"nested":[1,{"note":"保留"}]},"__proto__":{"polluted":true},"announcement":{"extra":"保留"},"updates":{"ios":{"enabled":true}}}');
+  const original = C.parse('{"schema":1,"revision":2,"metadata":{"nested":[1,{"note":"保留"}]},"__proto__":{"polluted":true},"announcement":{"extra":"保留"},"updates":{"futureOS":{"enabled":true}}}');
   const config = C.normalize(original);
   config.about.description = '新的介绍';
   const roundTrip = JSON.parse(JSON.stringify(config));
@@ -139,8 +176,8 @@ test('unknown optional metadata and future platform fields survive editing', () 
   assert.equal(roundTrip.__proto__.polluted, true);
   assert.equal({}.polluted, undefined);
   assert.equal(config.announcement.extra, '保留');
-  assert.equal(config.updates.ios.enabled, true);
-  assert.ok(C.extras(config).includes('updates.ios'));
+  assert.equal(config.updates.futureOS.enabled, true);
+  assert.ok(C.extras(config).includes('updates.futureOS'));
   valid(config);
 });
 
@@ -244,10 +281,10 @@ test('enabled sections require their essential fields', () => {
   for (const path of ['announcement.title', 'announcement.content', 'updates.windows.version', 'updates.windows.build', 'updates.windows.downloadUrl', 'help.url']) issue(config, path);
 });
 
-test('notice ID is no longer an editable or required field; today preview stays local', () => {
+test('notice ID is no longer an editable or required field; week preview stays local', () => {
   assert.doesNotMatch(html, /data-path="announcement\.id"|id="new-notice-id"/);
   assert.match(html, /id="preview-hide-today"/);
-  assert.match(html, /今天不再显示/);
+  assert.match(html, /7天不再显示/);
   const config = C.template();
   delete config.announcement.id;
   config.announcement.enabled = true;

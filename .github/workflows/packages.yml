@@ -179,8 +179,8 @@ jobs:
         run: ./tool/build-macos.sh --build-config config/build.community.json
       - name: Verify and stage the app bundle
         run: |
-          app="build/macos/Build/Products/Release/asterlink.app"
-          test -x "$app/Contents/MacOS/asterlink"
+          app="build/macos/Build/Products/Release/文析助手.app"
+          test -x "$app/Contents/MacOS/文析助手"
           test -x "$app/Contents/MacOS/asterlink_gopeed"
           file "$app/Contents/MacOS/asterlink_gopeed" | grep -q 'Mach-O'
           codesign --verify --deep --strict "$app"

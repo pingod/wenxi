@@ -8,8 +8,9 @@
 #   ./tool/build-macos.sh --offline               # drop remote control/update URLs
 #   CODESIGN_IDENTITY="Developer ID Application: ..." ./tool/build-macos.sh
 #
-# Output: build/macos/Build/Products/Release/asterlink.app — a self-contained
-# app bundle whose Contents/MacOS holds both the app executable and the
+# Output: build/macos/Build/Products/Release/文析助手.app — a self-contained
+# app bundle whose Contents/MacOS holds both the app executable (named after
+# PRODUCT_NAME in macos/Runner/Configs/AppInfo.xcconfig) and the
 # asterlink_gopeed download helper. Zip it (`ditto -c -k --keepParent`) or wrap
 # it in a DMG to distribute.
 #
@@ -129,11 +130,12 @@ mkdir -p "$PUB_CACHE"
 GO="$go_bin" "$(dirname "${BASH_SOURCE[0]}")/build-native-darwin.sh"
 "$flutter_bin" build macos --release --no-pub "${dart_defines[@]}"
 
-app="$project_dir/build/macos/Build/Products/Release/asterlink.app"
+app="$project_dir/build/macos/Build/Products/Release/文析助手.app"
+[[ -d "$app" ]] || { echo "Missing app bundle: $app" >&2; exit 1; }
 helper="$app/Contents/MacOS/asterlink_gopeed"
 if [[ ! -f "$helper" ]]; then
-  # The Xcode "Copy Gopeed Helper" phase normally handles this; keep a fallback
-  # so a plain `flutter build` (which may skip that phase) still ships it.
+  # The Runner project has no copy phase for the helper, so this step installs
+  # it next to the app executable (where `desktopHelperName()` looks for it).
   cp -f "$project_dir/native/bin/asterlink_gopeed" "$helper"
   chmod +x "$helper"
 fi

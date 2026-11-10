@@ -3,9 +3,9 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'legacy_state_fixture.dart';
 import 'package:asterlink/core/crypto_box.dart';
 import 'package:asterlink/core/json.dart';
-import 'package:asterlink/data/backup.dart';
 import 'package:asterlink/data/http.dart';
 import 'package:asterlink/data/startup_recovery.dart';
 import 'package:asterlink/data/state_key.dart';
@@ -81,19 +81,31 @@ void main() {
   late StateStore store;
   const primary = 'legacy|${StateStore.keyName}';
   const copy = '$primary.copy';
-  // These cases exercise the OS-storage pointer, so the private-file backend
-  // Android and macOS use by default is opted out of explicitly.
-  LocalStateKey legacyKey(Directory dir, _DeviceStorage records) =>
-      LocalStateKey(dir, records, privateBackend: false);
+  // These fixtures deliberately cover the legacy OS store on every test host.
+  LocalStateKey keys([Directory? target, FlutterSecureStorage? device]) =>
+      LocalStateKey(
+        target ?? directory,
+        device ?? storage,
+        nativeAndroid: false,
+        windowsFiles: false,
+        privateBackend: false,
+      );
 
   setUpAll(() async {
     final sourceDirectory = await Directory.systemTemp.createTemp(
       'state-device-a-',
     );
     final sourceStorage = _DeviceStorage({});
-    final source = await StateStore.open(
+    final source = await LegacyStateFixture.open(
       sourceDirectory,
-      localKey: legacyKey(sourceDirectory, sourceStorage),
+      storage: sourceStorage,
+      localKey: LocalStateKey(
+        sourceDirectory,
+        sourceStorage,
+        nativeAndroid: false,
+        windowsFiles: false,
+        privateBackend: false,
+      ),
     );
     try {
       sourceKey = sourceStorage.records[primary]!;
@@ -102,7 +114,7 @@ void main() {
         Credential('A账号', {'primary': 'BDUSS=device-a-fixture'}),
       );
       await source.put('settings', {'theme': 'Dark'});
-      backup = await BackupRepository(source).create(password);
+      backup = await LegacyBackupFixture(source).create(password);
     } finally {
       source.dispose();
       await sourceDirectory.delete(recursive: true);
@@ -111,9 +123,10 @@ void main() {
   setUp(() async {
     directory = await Directory.systemTemp.createTemp('state-device-b-');
     storage = _DeviceStorage({});
-    store = await StateStore.open(
+    store = await LegacyStateFixture.open(
       directory,
-      localKey: legacyKey(directory, storage),
+      storage: storage,
+      localKey: keys(),
     );
     await store.put('engineStorageGeneration', 'existing-engine');
     await store.put('tasks', [
@@ -125,19 +138,17 @@ void main() {
     await directory.delete(recursive: true);
   });
   File local(String name) => File('${directory.path}/$name');
-  // These cases exercise the OS-storage pointer, so the private-file backend
-  // Android and macOS use by default is opted out of explicitly.
-  LocalStateKey keys() => LocalStateKey(directory, storage, privateBackend: false);
   StartupRecovery recovery() => StartupRecovery(
     StateRecoveryRequired(directory, StateRecoveryCause.missingKey),
     storage: storage,
     localKey: keys(),
   );
   Future<void> reopen() async {
-    final restarted = storage.restart();
-    final next = await StateStore.open(
+    final nextStorage = storage.restart();
+    final next = await LegacyStateFixture.open(
       directory,
-      localKey: legacyKey(directory, restarted),
+      storage: nextStorage,
+      localKey: keys(directory, nextStorage),
     );
     store.dispose();
     store = next;
@@ -154,7 +165,7 @@ void main() {
       final scope = RequestScope();
       var saveCalled = false;
       final export = scope.run(
-        () => BackupRepository(store).exportTo(password, (_) async {
+        () => LegacyBackupFixture(store).exportTo(password, (_) async {
           saveCalled = true;
           return true;
         }),
@@ -202,26 +213,29 @@ void main() {
       final freshStorage = _DeviceStorage({})..dropWrites = true;
       try {
         await expectLater(
-          StateStore.open(
+          LegacyStateFixture.open(
             freshDirectory,
-            localKey: legacyKey(freshDirectory, freshStorage),
+            storage: freshStorage,
+            localKey: keys(freshDirectory, freshStorage),
           ),
           throwsA(isA<AppException>()),
         );
         expect(await freshDirectory.list().toList(), isEmpty);
         freshStorage.dropWrites = false;
-        final first = await StateStore.open(
+        final first = await LegacyStateFixture.open(
           freshDirectory,
           storage: freshStorage,
+          localKey: keys(freshDirectory, freshStorage),
         );
         try {
           await first.put('savedAfterRetry', true);
         } finally {
           first.dispose();
         }
-        final reopened = await StateStore.open(
+        final reopened = await LegacyStateFixture.open(
           freshDirectory,
           storage: freshStorage.restart(),
+          localKey: keys(freshDirectory, freshStorage.restart()),
         );
         try {
           expect(reopened.data.boolean('savedAfterRetry'), isTrue);
@@ -239,7 +253,7 @@ void main() {
     () async {
       final deviceKey = storage.records[primary]!;
       expect(deviceKey, isNot(sourceKey));
-      await BackupRepository(store).restore(backup, password);
+      await LegacyBackupFixture(store).restore(backup, password);
       for (var restart = 0; restart < 3; restart++) {
         await reopen();
         expect(
@@ -264,7 +278,7 @@ void main() {
   test(
     'lost secure storage unlocks latest data without reimporting or replacing engine keys',
     () async {
-      await BackupRepository(store).restore(backup, password);
+      await LegacyBackupFixture(store).restore(backup, password);
       await Vault(store).putCredential(
         CloudPlatform.uc,
         Credential('导入后新增', {'primary': 'cookie=device-b-fixture'}),
@@ -297,7 +311,7 @@ void main() {
   test(
     'successful export protects later edits without importing a backup',
     () async {
-      final repository = BackupRepository(store);
+      final repository = LegacyBackupFixture(store);
       final originalState = await local('state-v1.enc').readAsBytes();
       final originalRecords = Map<String, String>.from(storage.records);
       Uint8List? exported;
@@ -337,7 +351,7 @@ void main() {
   test(
     'cancelled or failed export cannot replace the recovery password',
     () async {
-      final repository = BackupRepository(store);
+      final repository = LegacyBackupFixture(store);
       expect(await repository.exportTo(password, (_) async => false), isFalse);
       expect(await recovery().canUnlock(), isFalse);
       await repository.exportTo(password, (_) async => true);
@@ -363,7 +377,7 @@ void main() {
   test(
     'protection write failure preserves the prior password and saved backup',
     () async {
-      final repository = BackupRepository(store);
+      final repository = LegacyBackupFixture(store);
       await repository.exportTo(password, (_) async => true);
       final envelope = await local(LocalStateKey.recoveryName).readAsBytes();
       final state = await local('state-v1.enc').readAsBytes();
@@ -384,7 +398,7 @@ void main() {
       );
       final portable = StateStore.memory();
       try {
-        await BackupRepository(portable).restore(exported!, 'next-password');
+        await LegacyBackupFixture(portable).restore(exported!, 'next-password');
       } finally {
         portable.dispose();
       }
@@ -400,7 +414,7 @@ void main() {
       storage.blocked.add('legacy');
       final originalState = await local('state-v1.enc').readAsBytes();
       expect(
-        await BackupRepository(store).exportTo(password, (_) async => true),
+        await LegacyBackupFixture(store).exportTo(password, (_) async => true),
         isTrue,
       );
       expect(await local('state-v1.enc').readAsBytes(), originalState);
@@ -419,19 +433,21 @@ void main() {
         'state-export-empty-',
       );
       final emptyStorage = _DeviceStorage({});
-      final empty = await StateStore.open(
+      final empty = await LegacyStateFixture.open(
         emptyDirectory,
         storage: emptyStorage,
+        localKey: keys(emptyDirectory, emptyStorage),
       );
       try {
         expect(
           await File('${emptyDirectory.path}/state-v1.enc').exists(),
           isFalse,
         );
-        await BackupRepository(empty).exportTo(password, (_) async => true);
-        final reopened = await StateStore.open(
+        await LegacyBackupFixture(empty).exportTo(password, (_) async => true);
+        final reopened = await LegacyStateFixture.open(
           emptyDirectory,
           storage: emptyStorage.restart(),
+          localKey: keys(emptyDirectory, emptyStorage.restart()),
         );
         expect(reopened.data, empty.data);
         reopened.dispose();
@@ -483,9 +499,10 @@ void main() {
     'brief system storage failure retries without data replacement',
     () async {
       storage.temporaryReadFailures = 2;
-      final next = await StateStore.open(
+      final next = await LegacyStateFixture.open(
         directory,
-        localKey: legacyKey(directory, storage),
+        storage: storage,
+        localKey: keys(),
       );
       expect(next.data.str('engineStorageGeneration'), 'existing-engine');
       next.dispose();
@@ -496,7 +513,7 @@ void main() {
   test(
     'invalidated backend is preserved then password recovery binds a new namespace',
     () async {
-      await BackupRepository(store).restore(backup, password);
+      await LegacyBackupFixture(store).restore(backup, password);
       final oldNamespace = await activeNamespace();
       final savedRecords = Map<String, String>.from(storage.records);
       final encrypted = await local('state-v1.enc').readAsBytes();
@@ -526,7 +543,7 @@ void main() {
   test(
     'wrong password tampering and stale key envelopes cannot change current data or keys',
     () async {
-      await BackupRepository(store).restore(backup, password);
+      await LegacyBackupFixture(store).restore(backup, password);
       final wrapper = await local(LocalStateKey.recoveryName).readAsBytes();
       final encrypted = await local('state-v1.enc').readAsBytes();
       final pointer = await local(LocalStateKey.locationName).readAsBytes();
@@ -567,9 +584,9 @@ void main() {
       await recovery().restore(backup, password);
       await reopen();
       expect(Vault(store).credential(CloudPlatform.baidu), isNotNull);
-      expect(await recovery().canUnlock(), isTrue);
+      expect(await local('state-v2.json').exists(), isTrue);
+      expect(await recovery().canUnlock(), isFalse);
       storage.records.clear();
-      await recovery().unlock(password);
       await reopen();
       expect(Vault(store).credential(CloudPlatform.baidu), isNotNull);
     },
@@ -582,7 +599,7 @@ void main() {
       final data = jsonEncode(store.data);
       storage.dropWrites = true;
       await expectLater(
-        BackupRepository(store).restore(backup, password),
+        LegacyBackupFixture(store).restore(backup, password),
         throwsA(isA<AppException>()),
       );
       expect(await local('state-v1.enc').readAsBytes(), original);
@@ -602,7 +619,7 @@ void main() {
       final data = jsonEncode(store.data);
       await Directory('${directory.path}/state-v1.enc.tmp').create();
       await expectLater(
-        BackupRepository(store).restore(backup, password),
+        LegacyBackupFixture(store).restore(backup, password),
         throwsA(isA<FileSystemException>()),
       );
       expect(await local('state-v1.enc').readAsBytes(), original);
@@ -617,7 +634,7 @@ void main() {
   test(
     'denied recovery writes preserve capsule and data and allow a later retry',
     () async {
-      await BackupRepository(store).restore(backup, password);
+      await LegacyBackupFixture(store).restore(backup, password);
       storage.records.clear();
       final bytes = await local('state-v1.enc').readAsBytes();
       final pointer = await local(LocalStateKey.locationName).readAsBytes();
@@ -653,7 +670,7 @@ void main() {
       ).writeAsString('incomplete');
       await reopen();
       expect(store.data.str('engineStorageGeneration'), 'existing-engine');
-      await BackupRepository(store).restore(backup, password);
+      await LegacyBackupFixture(store).restore(backup, password);
       for (final suffix in ['', '.bak', '.tmp']) {
         final file = local('state-v1.enc$suffix');
         if (await file.exists()) await file.delete();
@@ -668,10 +685,10 @@ void main() {
   );
 
   test('latest successful import password replaces recovery password', () async {
-    await BackupRepository(store).restore(backup, password);
+    await LegacyBackupFixture(store).restore(backup, password);
     const nextPassword = 'next-fixture-password';
-    final nextBackup = await BackupRepository(store).create(nextPassword);
-    await BackupRepository(store).restore(nextBackup, nextPassword);
+    final nextBackup = await LegacyBackupFixture(store).create(nextPassword);
+    await LegacyBackupFixture(store).restore(nextBackup, nextPassword);
     await store.put('after-second-import', true);
     storage.records.clear();
     // A corrupt location file also permits password recovery into fresh storage.
@@ -690,7 +707,7 @@ void main() {
   test(
     'reinitialize archives old password recovery file instead of leaving it active',
     () async {
-      await BackupRepository(store).restore(backup, password);
+      await LegacyBackupFixture(store).restore(backup, password);
       final oldWrapper = await local(LocalStateKey.recoveryName).readAsBytes();
       storage.records.clear();
       final result = await recovery().reinitialize();

@@ -1,9 +1,8 @@
 import 'dart:async';
 import '../diagnostics/app_log.dart';
 import 'dart:io';
-import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
-import 'package:media_kit/media_kit.dart';
+import 'package:asterlink/playback/playback_state.dart';
 import '../core/json.dart';
 import '../core/operation_progress.dart';
 import '../data/http.dart';
@@ -18,11 +17,13 @@ import 'playback_failure.dart';
 import 'playback_selection.dart';
 import 'subtitle_matching.dart';
 import 'external_stream.dart';
+import 'system_pip.dart';
 import 'cast/cast_session.dart';
 import 'cast/dlna.dart';
 import 'cast/cast_platform.dart';
 
 part 'playback_cast.dart';
+part 'playback_pip.dart';
 
 CastSession _managedCastSession(CastDevice device, DownloadSpec source) =>
     CastSession(device, source, managePlatform: false);
@@ -61,7 +62,9 @@ class _Session {
   final subtitleGate = AsyncGate();
   VideoGeometry? geometry;
   PlayerState? castBookmark;
-  Future<void>? closing;
+  PlayerState? pipBookmark;
+  Future<void>? closing, retirementPause, retirementSave;
+  Future<void>? pipRestoring;
   Timer? recoveryTimer;
   Duration recoveryPosition = Duration.zero;
   int healthyRecoveryChecks = 0;
@@ -167,6 +170,8 @@ class PlaybackController extends ChangeNotifier {
 
   /// The page can finish its native orientation/layout transition before play.
   Future<void> Function()? beforePlay;
+  Future<double> Function(double)? systemVolumeControl;
+  double? _systemVolume;
   PlaybackPreferences preferences;
   late PlaybackPreferences _persistedPreferences;
   late final String? _playlistFolder;
@@ -179,6 +184,10 @@ class PlaybackController extends ChangeNotifier {
   bool get remembersFolder => history.remembersFolder(folderKey);
   int index, _generation = 0;
   bool loading = false, closed = false, boosting = false, _background = false;
+  bool _visible = true;
+  bool boostLocked = false;
+  double? _temporaryBoostRate;
+  Future<void>? _boostRateSync;
   bool _sourceRecoveryUsed = false;
   bool _playWhenReady = true;
   String error = '', notice = '';
@@ -199,10 +208,28 @@ class PlaybackController extends ChangeNotifier {
   int _externalRevision = 0;
   bool openingExternalPlayer = false;
   bool get playingExternally => _externalStream != null;
+  _SystemPipSession? _pipSession;
+  RequestScope? _pipScope;
+  int _pipRevision = 0;
+  bool preparingSystemPip = false;
+  Future<void>? _pipClosing;
+  SystemPipPlayback? get systemPipPlayback => _pipSession?.playback;
+  bool get usingSystemPip => _pipSession != null;
   PlaybackEntry get current => entries[index];
   PlaybackBackend? get backend => _session?.backend;
-  PlayerState get state =>
-      _cast?.state ?? backend?.state ?? const PlayerState();
+  PlayerState get state {
+    final cast = _cast;
+    if (cast != null) return cast.state;
+    final value =
+        _pipSession?.state ??
+        _session?.pipBookmark ??
+        backend?.state ??
+        const PlayerState();
+    return systemVolumeControl != null && _systemVolume != null
+        ? value.copyWith(volume: _systemVolume)
+        : value;
+  }
+
   int get playlistPosition => _playlistPositions[index];
   int playlistPositionOf(int entryIndex) => _playlistPositions[entryIndex];
   int? get previousIndex =>
@@ -223,8 +250,9 @@ class PlaybackController extends ChangeNotifier {
   VideoGeometry? get videoGeometry => hasVideo
       ? _session?.geometry ?? history.videoGeometry(current.key)
       : null;
-  double get effectiveRate =>
-      boosting ? math.max(2.0, preferences.rate) : preferences.rate;
+  double get effectiveRate => boosting
+      ? (_temporaryBoostRate ?? preferences.boostRate)
+      : preferences.rate;
   int get generation => _generation;
   bool canResumeAfterPanel(int generation, int stopRevision) =>
       ready &&
@@ -425,6 +453,9 @@ class PlaybackController extends ChangeNotifier {
     final generation = ++_generation, old = _session;
     _externalRevision++;
     _externalScope?.cancel();
+    _pipRevision++;
+    _pipScope?.cancel();
+    if (_pipSession != null) old?.pipBookmark = _pipSession!.state;
     final retiredSelection = _selection?.key == entries[next].key
         ? null
         : _selection;
@@ -441,17 +472,22 @@ class PlaybackController extends ChangeNotifier {
     final scope = _scope = RequestScope();
     _saveTimer?.cancel();
     _session = null;
+    unawaited(_pauseForRetirement(old));
     index = next;
     loading = true;
     error = '';
     sourceError = null;
     notice = automaticRecovery ? '视频连接中断，正在刷新地址并恢复进度' : '';
     boosting = false;
+    boostLocked = false;
+    _temporaryBoostRate = null;
     resumedFrom = Duration.zero;
     _changed();
+    await _stopSystemPip();
     await _stopExternalPlayback();
     await _stopCast(keepPlatform: continueCast != null);
     await _retire(old);
+    _independentBookmark = null;
     await retiredSelection?.release();
     await _preferenceGate.run(() async {});
     if (closed || generation != _generation) return;
@@ -527,7 +563,10 @@ class PlaybackController extends ChangeNotifier {
           stage = 'configure';
           await backend.setRate(preferences.rate);
           if (!_current(session)) return;
-          await backend.setVolume(preferences.volume);
+          // Android uses the media stream volume; do not attenuate it again.
+          await backend.setVolume(
+            systemVolumeControl == null ? preferences.volume : 100,
+          );
           if (!_current(session)) return;
           if (!preferences.subtitles) {
             await backend.setSubtitleTrack(SubtitleTrack.no());
@@ -1028,7 +1067,10 @@ class PlaybackController extends ChangeNotifier {
   void _onState(_Session session) {
     if (!_current(session)) return;
     _rememberGeometry(session);
-    if (casting || connectingCast) {
+    if (casting ||
+        connectingCast ||
+        usingSystemPip ||
+        session.pipBookmark != null) {
       _changed();
       return;
     }
@@ -1072,6 +1114,9 @@ class PlaybackController extends ChangeNotifier {
           error = failure?.message ?? '播放遇到问题，可刷新链接重试，或下载后使用其他播放器打开';
           loading = false;
           _pauseFailure(session);
+          if (failure?.decoderUnavailable == true) {
+            unawaited(_save(session));
+          }
         }
       }
       if (!session.metadataReady.isCompleted) session.metadataReady.complete();
@@ -1153,9 +1198,17 @@ class PlaybackController extends ChangeNotifier {
   }
 
   Future<void> _save(_Session session, {bool? completed}) async {
-    final state = identical(_session, session) && casting
+    if (_independentBookmark case final bookmark?) {
+      if (session.entry.key == current.key) {
+        await history.save(session.entry.key, bookmark);
+        return;
+      }
+    }
+    final state = identical(_session, session) && usingSystemPip
+        ? _pipSession!.state
+        : identical(_session, session) && casting
         ? _cast!.state
-        : session.castBookmark ?? session.backend.state;
+        : session.pipBookmark ?? session.castBookmark ?? session.backend.state;
     final finished =
         completed ?? (state.completed || session.completionHandled);
     if (!session.opened ||
@@ -1191,39 +1244,56 @@ class PlaybackController extends ChangeNotifier {
     await (session.closing ??= _retireOnce(session));
   }
 
+  Future<void> _pauseForRetirement(_Session? session) {
+    if (session == null) return Future.value();
+    return session.retirementPause ??= () async {
+      try {
+        await session.backend.pause();
+      } catch (_) {
+        // Closing still stops native I/O if the pause command fails.
+      }
+    }();
+  }
+
   Future<void> _retireOnce(_Session session) async {
     session.closed = true;
     _stopRecoveryWatch(session);
     if (!session.metadataReady.isCompleted) session.metadataReady.complete();
     session.backend.removeListener(session.listener);
-    await _save(session);
-    await session.subtitleGate.run(() async {});
+    // Stop audio before disk writes, subtitle commands or source cleanup.
+    await _pauseForRetirement(session);
+    // Capture the bookmark before releasing the backend, but do not keep a
+    // decoder and its buffers alive while the state store is writing downloads.
+    final saved = session.retirementSave ??= _save(session);
     try {
-      await session.backend.pause();
-    } catch (_) {
-      /* close still stops native I/O */
+      await session.subtitleGate.run(() async {});
+      try {
+        await session.backend.close();
+        session.nativeClosed = true;
+      } catch (_) {
+        notice = '播放器关闭未完成，临时文件已保留';
+        _changed();
+        return;
+      }
+      await session.selection.release();
+      await _releaseSafely(session.source);
+    } finally {
+      await saved;
     }
-    try {
-      await session.backend.close();
-      session.nativeClosed = true;
-    } catch (_) {
-      // The native player failed to close, so the source and its temp files may
-      // still be in use by it. Preserve the lease/source on purpose; releasing
-      // them here could delete files the backend is still reading.
-      notice = '播放器关闭未完成，临时文件已保留';
-      _changed();
-      return;
-    }
-    await session.selection.release();
-    await _releaseSafely(session.source);
   }
 
   Future<void> _command(
     Future<void> Function(PlaybackBackend backend) action, {
     String operation = 'control',
+    bool whileLoading = false,
   }) async {
     final session = _session;
-    if (session == null || closed || loading || error.isNotEmpty) return;
+    if (session == null ||
+        closed ||
+        (loading && !whileLoading) ||
+        error.isNotEmpty) {
+      return;
+    }
     try {
       await action(session.backend);
     } catch (error, stack) {
@@ -1245,6 +1315,12 @@ class PlaybackController extends ChangeNotifier {
 
   Future<void> play() async {
     if (closed) return;
+    if (usingSystemPip) {
+      sleepTimer.acknowledgePlay();
+      _playWhenReady = true;
+      await _pipSession!.playback.play();
+      return;
+    }
     if (casting) {
       sleepTimer.acknowledgePlay();
       _playWhenReady = true;
@@ -1256,7 +1332,13 @@ class PlaybackController extends ChangeNotifier {
     _externalRevision++;
     _externalScope?.cancel();
     if (_externalStream != null) await _stopExternalPlayback();
+    _independentBookmark = null;
     if (closed) return;
+    final session = _session;
+    if (session != null && session.pipBookmark != null) {
+      await _restorePipBookmark(session);
+      if (!_current(session) || !_visible) return;
+    }
     _background = false;
     _playWhenReady = true;
     _session?.playRequested = true;
@@ -1273,25 +1355,41 @@ class PlaybackController extends ChangeNotifier {
     }, operation: 'play');
   }
 
-  Future<void> pause() async {
+  Future<void> pause({bool save = true}) async {
+    if (closed) return;
+    if (usingSystemPip) {
+      _playWhenReady = false;
+      await _pipSession!.playback.pause();
+      if (save) await saveProgress();
+      return;
+    }
     if (casting && _cast!.connected) {
       _playWhenReady = false;
       await _cast!.pause();
-      await saveProgress();
+      if (save) await saveProgress();
       return;
     }
     _playWhenReady = false;
     _discardPrepared();
     _session?.aheadAttempted = false;
     _session?.playRequested = false;
+    await _command(
+      (backend) => backend.pause(),
+      operation: 'pause',
+      whileLoading: true,
+    );
     await endBoost();
-    await _command((backend) => backend.pause(), operation: 'pause');
-    await saveProgress();
+    if (save) await saveProgress();
   }
 
   Future<void> toggle() => state.playing ? pause() : play();
   Future<void> seek(Duration position) async {
     final target = clampPlaybackPosition(position, state.duration);
+    if (usingSystemPip) {
+      await _pipSession!.playback.seek(target);
+      await saveProgress();
+      return;
+    }
     if (casting) {
       await _cast!.seek(target);
       await saveProgress();
@@ -1360,7 +1458,12 @@ class PlaybackController extends ChangeNotifier {
 
   Future<void> setRate(double value) async {
     require(!casting, '电视投屏使用正常速度，倍速请在电视端调整');
+    await endBoost();
     await updatePreferences(preferences.copyWith(rate: value));
+    if (usingSystemPip) {
+      await _pipSession!.playback.setRate(effectiveRate);
+      return;
+    }
     await _command((backend) => backend.setRate(effectiveRate));
   }
 
@@ -1398,17 +1501,89 @@ class PlaybackController extends ChangeNotifier {
   }
 
   Future<void> beginBoost() async {
-    if (boosting || !ready || casting) return;
+    if (boosting || !ready || casting || usingSystemPip) return;
+    _temporaryBoostRate = preferences.boostRate;
+    boostLocked = false;
     boosting = true;
     _changed();
-    await _command((backend) => backend.setRate(effectiveRate));
+    await _syncBoostRate();
+  }
+
+  void lockBoost() {
+    if (!boosting || boostLocked || closed || casting) return;
+    boostLocked = true;
+    _changed();
+  }
+
+  Future<void> releaseBoost() async {
+    if (!boostLocked) await endBoost();
+  }
+
+  Future<void> adjustBoost(double rate) async {
+    if (!boosting || closed || casting) return;
+    final value = finiteRange(
+      rate,
+      preferences.boostRate,
+      PlaybackPreferences.minBoostRate,
+      PlaybackPreferences.maxBoostRate,
+    );
+    if (value == _temporaryBoostRate) return;
+    _temporaryBoostRate = value;
+    _changed();
+    await _syncBoostRate();
+  }
+
+  // Keep only the latest requested speed while a native command is in flight.
+  // Releasing the gesture joins this write, so the final command restores rate.
+  Future<void> _syncBoostRate() {
+    final running = _boostRateSync;
+    if (running != null) return running;
+    final done = Completer<void>();
+    _boostRateSync = done.future;
+    unawaited(() async {
+      try {
+        while (!closed) {
+          final session = _session;
+          final rate = effectiveRate;
+          await _command((backend) => backend.setRate(rate));
+          if (closed || identical(session, _session) && rate == effectiveRate) {
+            break;
+          }
+        }
+      } finally {
+        _boostRateSync = null;
+        done.complete();
+      }
+    }());
+    return done.future;
   }
 
   Future<void> endBoost() async {
     if (!boosting) return;
     boosting = false;
+    boostLocked = false;
+    _temporaryBoostRate = null;
     _changed();
-    await _command((backend) => backend.setRate(preferences.rate));
+    await _syncBoostRate();
+  }
+
+  Future<void> useSystemVolume(
+    Future<double> Function(double) control,
+    double value,
+  ) async {
+    if (closed) return;
+    final changed = systemVolumeControl != control;
+    if (changed) systemVolumeControl = control;
+    syncSystemVolume(value);
+    if (changed) await _command((backend) => backend.setVolume(100));
+  }
+
+  void syncSystemVolume(double value) {
+    if (closed || !value.isFinite || systemVolumeControl == null) return;
+    final volume = value.clamp(0, 100).toDouble();
+    if (_systemVolume == volume) return;
+    _systemVolume = volume;
+    _changed();
   }
 
   Future<void> setVolume(double value, {bool save = true}) async {
@@ -1416,9 +1591,19 @@ class PlaybackController extends ChangeNotifier {
       await _cast!.setVolume(value);
       return;
     }
-    preferences = preferences.copyWith(volume: value);
-    _changed();
-    await _command((backend) => backend.setVolume(preferences.volume));
+    if (closed) return;
+    final control = systemVolumeControl;
+    if (control != null) {
+      final volume = await control(preferences.copyWith(volume: value).volume);
+      if (closed || !identical(control, systemVolumeControl)) return;
+      syncSystemVolume(volume);
+      preferences = preferences.copyWith(volume: _systemVolume);
+      _changed();
+    } else {
+      preferences = preferences.copyWith(volume: value);
+      _changed();
+      await _command((backend) => backend.setVolume(preferences.volume));
+    }
     if (save) await updatePreferences(preferences);
   }
 
@@ -1559,25 +1744,41 @@ class PlaybackController extends ChangeNotifier {
   }
 
   Future<void> background({required bool pictureInPicture}) async {
+    if (closed) return;
+    _visible = false;
     _background = !pictureInPicture;
-    await saveProgress();
-    if (casting || connectingCast || _castTarget != null) return;
-    if (pictureInPicture) return;
-    _discardPrepared();
+    if (pictureInPicture || casting || connectingCast || _castTarget != null) {
+      await saveProgress();
+      return;
+    }
     await pause();
   }
 
   void foreground() {
+    _visible = true;
     _background = false;
     sleepTimer.checkDeadline();
+    final session = _session;
+    if (session != null && session.pipBookmark != null && !usingSystemPip) {
+      unawaited(
+        _restorePipBookmark(session).catchError((
+          Object error,
+          StackTrace stack,
+        ) {
+          DiagnosticLog.error('player.system_pip_foreground', error, stack);
+        }),
+      );
+    }
   }
 
   Future<bool> openExternalPlayer(
-    Future<bool> Function(String url, String title, Duration position) open,
-  ) async {
+    Future<bool> Function(String url, String title, Duration position) open, {
+    bool directLink = false,
+  }) async {
     require(!closed && !loading && hasVideo, '请等待视频地址准备完成');
     require(!openingExternalPlayer, '正在选择第三方播放器');
     require(!casting && !connectingCast, '请先断开电视投屏');
+    require(!usingSystemPip && !preparingSystemPip, '请先退出画中画');
     checkSource?.call();
     openingExternalPlayer = true;
     final revision = ++_externalRevision, generation = _generation;
@@ -1610,6 +1811,7 @@ class PlaybackController extends ChangeNotifier {
         unowned = await (refresh ?? prepare)(entry, scope);
       }
       check();
+      final directUrl = directLink ? _iosExternalUrl(unowned) : null;
       stream = externalStreamFactory(unowned);
       _externalStream = stream;
       _externalSource = unowned;
@@ -1619,9 +1821,9 @@ class PlaybackController extends ChangeNotifier {
       // the old audio before another app starts, so propagate a retry failure.
       if (state.playing) await backend?.pause();
       check();
-      await stream.start();
+      if (!directLink) await stream.start();
       check();
-      launched = await open(stream.url, entry.name, position);
+      launched = await open(directUrl ?? stream.url, entry.name, position);
       check();
       return launched;
     } finally {
@@ -1654,7 +1856,32 @@ class PlaybackController extends ChangeNotifier {
     }
   }
 
-  Future<void> close() => _closeFuture ??= _close();
+  bool floating = false;
+  PlaybackBookmark? _independentBookmark;
+  Future<void> saveIndependentProgress(PlaybackBookmark bookmark) async {
+    if (closed || !floating) return;
+    _independentBookmark = bookmark;
+    await history.save(current.key, bookmark);
+  }
+
+  void retireIndependentDecoder() {
+    if (closed || !floating || !playingExternally) return;
+    final session = _session;
+    if (session == null) return;
+    _session = null;
+    _saveTimer?.cancel();
+    _discardPrepared();
+    // The independent window has its own decoder. Its transport retains the
+    // source while this original decoder releases buffers and native threads.
+    _trackAhead(_retire(session));
+    _changed();
+  }
+
+  Future<void> close({bool force = false}) {
+    if (floating && !force) return Future.value();
+    return _closeFuture ??= _close();
+  }
+
   Future<void> _close() async {
     closed = true;
     sleepTimer.removeListener(_onSleepChanged);
@@ -1664,15 +1891,23 @@ class PlaybackController extends ChangeNotifier {
     ++_generation;
     _externalRevision++;
     _externalScope?.cancel();
+    _pipRevision++;
+    _pipScope?.cancel();
     _scope?.cancel();
     _subtitleScope?.cancel();
     _discardPrepared();
     _saveTimer?.cancel();
     final session = _session;
+    if (_pipSession != null) session?.pipBookmark = _pipSession!.state;
     if (_cast != null) session?.castBookmark = _cast!.state;
     _session = null;
+    unawaited(_pauseForRetirement(session));
+    // Publish the captured bookmark before the caller can open this video
+    // again. Native/cast shutdown may yield before retirement otherwise saves.
+    if (session != null) session.retirementSave ??= _save(session);
     final selection = _selection;
     _selection = null;
+    await _stopSystemPip();
     await _stopExternalPlayback();
     await _stopCast();
     await _retire(session);
