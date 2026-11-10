@@ -63,7 +63,14 @@ void main() {
 
   Future<String> saveFailure(PlatformException failure) async {
     final storage = _DenyingStorage(failure);
-    final key = LocalStateKey(directory, storage, privateBackend: false);
+    // These cases exercise the OS-storage backend on every host, including
+    // Windows where the file backend is the default.
+    final key = LocalStateKey(
+      directory,
+      storage,
+      windowsFiles: false,
+      privateBackend: false,
+    );
     try {
       await key.save(Uint8List.fromList(CryptoBox.random(32)));
       fail('keychain writes should not silently succeed');
@@ -116,6 +123,7 @@ void main() {
       LocalStateKey(
         directory,
         storage,
+        windowsFiles: false,
         privateBackend: false,
       ).save(Uint8List.fromList(CryptoBox.random(32))),
       throwsA(isA<AppException>()),
@@ -150,7 +158,12 @@ void main() {
           details: -34018,
         ),
       );
-      final localKey = LocalStateKey(directory, storage, privateBackend: true);
+      final localKey = LocalStateKey(
+        directory,
+        storage,
+        windowsFiles: false,
+        privateBackend: true,
+      );
       final key = Uint8List.fromList(CryptoBox.random(32));
       await localKey.saveFresh(key);
 
@@ -195,7 +208,12 @@ void main() {
       await File('${directory.path}/${LocalStateKey.locationName}')
           .writeAsString(jsonEncode({'namespace': namespace}));
 
-      final localKey = LocalStateKey(directory, storage, privateBackend: true);
+      final localKey = LocalStateKey(
+        directory,
+        storage,
+        windowsFiles: false,
+        privateBackend: true,
+      );
       final read = await localKey.read();
       expect(read.keys, isEmpty);
       expect(read.unavailable, isTrue);
