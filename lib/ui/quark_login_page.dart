@@ -12,6 +12,7 @@ import '../data/providers/quark_login.dart';
 import '../domain/models.dart';
 import '../platform/desktop_platform.dart';
 import 'common.dart';
+import 'cloud_login_layout.dart';
 import 'quark_sms_verification_page.dart';
 
 class QuarkLoginPage extends StatefulWidget {
@@ -496,6 +497,15 @@ class _QuarkLoginPageState extends State<QuarkLoginPage>
     }
   }
 
+  Widget _spinner({bool onPrimary = false}) => SizedBox(
+    width: 22,
+    height: 22,
+    child: CircularProgressIndicator(
+      strokeWidth: 2,
+      color: onPrimary ? Theme.of(context).colorScheme.onPrimary : null,
+    ),
+  );
+
   Widget _policies() => Wrap(
     children: [
       TextButton(
@@ -509,15 +519,6 @@ class _QuarkLoginPageState extends State<QuarkLoginPage>
     ],
   );
 
-  Widget _spinner({bool onPrimary = false}) => SizedBox(
-    width: 22,
-    height: 22,
-    child: CircularProgressIndicator(
-      strokeWidth: 2,
-      color: onPrimary ? Theme.of(context).colorScheme.onPrimary : null,
-    ),
-  );
-
   @override
   Widget build(BuildContext context) => PopScope(
     onPopInvokedWithResult: (didPop, _) {
@@ -525,247 +526,188 @@ class _QuarkLoginPageState extends State<QuarkLoginPage>
     },
     child: PageFrame(
       title: '夸克登录',
-      child: Align(
-        alignment: Alignment.topCenter,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 560),
-          child: AutofillGroup(
-            onDisposeAction: AutofillContextAction.cancel,
-            child: ListView(
-              padding: const EdgeInsets.fromLTRB(24, 28, 24, 28),
-              children: [
-                Row(
-                  children: [
-                    const PlatformMark(platform: _platform, size: 52),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            _qrMode ? '扫码登录' : '手机号验证码登录',
-                            style: const TextStyle(
-                              fontSize: 22,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                          const SizedBox(height: 5),
-                          Text(
-                            '夸克网盘',
-                            style: TextStyle(
-                              color: secondary(context),
-                              fontSize: 14,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
+      child: CloudLoginLayout(
+        platform: _platform,
+        method: _qrMode ? '扫码登录' : '手机号登录',
+        children: [
+          SegmentedButton<bool>(
+            key: const ValueKey('quark-login-method'),
+            segments: [
+              ButtonSegment(
+                value: false,
+                label: const Text('手机号登录'),
+                icon: const Icon(CupertinoIcons.phone),
+                enabled: !_smsUnavailable,
+              ),
+              const ButtonSegment(
+                value: true,
+                label: Text('扫码登录'),
+                icon: Icon(CupertinoIcons.qrcode),
+              ),
+            ],
+            selected: {_qrMode},
+            showSelectedIcon: false,
+            onSelectionChanged: (value) => _mode(value.first),
+          ),
+          if (_smsUnavailable)
+            Padding(
+              padding: const EdgeInsets.only(top: 12),
+              child: Text(
+                '当前系统没有内嵌浏览器，夸克的安全验证页无法打开，'
+                '因此手机号登录在此平台不可用。请使用扫码登录。',
+                key: const ValueKey('quark-sms-unavailable'),
+                style: TextStyle(fontSize: 13, color: secondary(context)),
+              ),
+            ),
+          const SizedBox(height: 24),
+          if (!_qrMode) ...[
+            TextField(
+              key: const ValueKey('quark-sms-mobile'),
+              controller: _mobile,
+              enabled: !_busy,
+              keyboardType: TextInputType.phone,
+              textInputAction: TextInputAction.next,
+              autofillHints: const [AutofillHints.telephoneNumberNational],
+              inputFormatters: [
+                FilteringTextInputFormatter.digitsOnly,
+                LengthLimitingTextInputFormatter(11),
+              ],
+              decoration: const InputDecoration(
+                labelText: '手机号',
+                prefixIcon: CloudLoginFieldIcon(
+                  CupertinoIcons.device_phone_portrait,
                 ),
-                const SizedBox(height: 28),
-                SegmentedButton<bool>(
-                  key: const ValueKey('quark-login-method'),
-                  segments: [
-                    ButtonSegment(
-                      value: false,
-                      label: const Text('手机号登录'),
-                      icon: const Icon(CupertinoIcons.phone),
-                      enabled: !_smsUnavailable,
-                    ),
-                    const ButtonSegment(
-                      value: true,
-                      label: Text('扫码登录'),
-                      icon: Icon(CupertinoIcons.qrcode),
-                    ),
-                  ],
-                  selected: {_qrMode},
-                  showSelectedIcon: false,
-                  onSelectionChanged: (value) => _mode(value.first),
+                prefixText: '+86 ',
+              ),
+            ),
+            const SizedBox(height: 18),
+            TextField(
+              key: const ValueKey('quark-sms-code'),
+              controller: _code,
+              enabled: !_busy,
+              keyboardType: TextInputType.number,
+              textInputAction: TextInputAction.done,
+              autofillHints: const [AutofillHints.oneTimeCode],
+              inputFormatters: [
+                FilteringTextInputFormatter.digitsOnly,
+                LengthLimitingTextInputFormatter(4),
+              ],
+              onSubmitted: (_) => _submitSms(),
+              decoration: InputDecoration(
+                labelText: '验证码',
+                prefixIcon: const CloudLoginFieldIcon(CupertinoIcons.shield),
+                suffixIcon: CloudLoginCodeAction(
+                  child: TextButton(
+                    key: const ValueKey('quark-sms-send'),
+                    onPressed: _busy || _seconds > 0 ? null : _send,
+                    child: Text(_seconds > 0 ? '${_seconds}s 后重发' : '获取验证码'),
+                  ),
                 ),
-                if (_smsUnavailable)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 12),
-                    child: Text(
-                      '当前系统没有内嵌浏览器，夸克的安全验证页无法打开，'
-                      '因此手机号登录在此平台不可用。请使用扫码登录。',
-                      key: const ValueKey('quark-sms-unavailable'),
-                      style: TextStyle(fontSize: 13, color: secondary(context)),
-                    ),
-                  ),
-                const SizedBox(height: 28),
-                if (!_qrMode) ...[
-                  TextField(
-                    key: const ValueKey('quark-sms-mobile'),
-                    controller: _mobile,
-                    enabled: !_busy,
-                    keyboardType: TextInputType.phone,
-                    textInputAction: TextInputAction.next,
-                    autofillHints: const [
-                      AutofillHints.telephoneNumberNational,
-                    ],
-                    inputFormatters: [
-                      FilteringTextInputFormatter.digitsOnly,
-                      LengthLimitingTextInputFormatter(11),
-                    ],
-                    decoration: const InputDecoration(
-                      labelText: '手机号',
-                      prefixIcon: Icon(CupertinoIcons.phone, size: 20),
-                      prefixText: '+86 ',
-                    ),
-                  ),
-                  const SizedBox(height: 18),
-                  TextField(
-                    key: const ValueKey('quark-sms-code'),
-                    controller: _code,
-                    enabled: !_busy,
-                    keyboardType: TextInputType.number,
-                    textInputAction: TextInputAction.done,
-                    autofillHints: const [AutofillHints.oneTimeCode],
-                    inputFormatters: [
-                      FilteringTextInputFormatter.digitsOnly,
-                      LengthLimitingTextInputFormatter(4),
-                    ],
-                    onSubmitted: (_) => _submitSms(),
-                    decoration: InputDecoration(
-                      labelText: '短信验证码',
-                      prefixIcon: const Icon(CupertinoIcons.lock, size: 20),
-                      suffixIcon: TextButton(
-                        key: const ValueKey('quark-sms-send'),
-                        onPressed: _busy || _seconds > 0 ? null : _send,
-                        child: Text(
-                          _seconds > 0 ? '${_seconds}s 后重发' : '获取验证码',
+              ),
+            ),
+            CloudLoginAgreement(
+              checkboxKey: const ValueKey('quark-sms-agreement'),
+              value: _agreed,
+              onChanged: _busy
+                  ? null
+                  : (value) => setState(() => _agreed = value == true),
+              onService: () => _policy(QuarkLoginService.serviceAgreement),
+              onPrivacy: () => _policy(QuarkLoginService.privacyPolicy),
+            ),
+          ] else ...[
+            Center(
+              child: SizedBox(
+                width: 248,
+                height: 248,
+                child: _qr != null && _error.isEmpty
+                    ? ColoredBox(
+                        color: Colors.white,
+                        child: QrImageView(
+                          key: const ValueKey('quark-login-qr'),
+                          data: _qr!.url,
+                          size: 248,
+                          backgroundColor: Colors.white,
+                          padding: const EdgeInsets.all(16),
+                          semanticsLabel: '夸克登录二维码',
                         ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Checkbox(
-                        key: const ValueKey('quark-sms-agreement'),
-                        value: _agreed,
-                        onChanged: _busy
-                            ? null
-                            : (value) =>
-                                  setState(() => _agreed = value == true),
-                      ),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const SizedBox(height: 8),
-                            Text(
-                              '我已阅读并同意，未注册手机号将自动注册',
-                              style: TextStyle(
-                                fontSize: 13,
+                      )
+                    : Center(
+                        child: _busy
+                            ? _spinner()
+                            : Icon(
+                                CupertinoIcons.qrcode,
+                                size: 72,
                                 color: secondary(context),
                               ),
-                            ),
-                            _policies(),
-                          ],
-                        ),
                       ),
-                    ],
-                  ),
-                ] else ...[
-                  Center(
-                    child: SizedBox(
-                      width: 248,
-                      height: 248,
-                      child: _qr != null && _error.isEmpty
-                          ? ColoredBox(
-                              color: Colors.white,
-                              child: QrImageView(
-                                key: const ValueKey('quark-login-qr'),
-                                data: _qr!.url,
-                                size: 248,
-                                backgroundColor: Colors.white,
-                                padding: const EdgeInsets.all(16),
-                                semanticsLabel: '夸克登录二维码',
-                              ),
-                            )
-                          : Center(
-                              child: _busy
-                                  ? _spinner()
-                                  : Icon(
-                                      CupertinoIcons.qrcode,
-                                      size: 72,
-                                      color: secondary(context),
-                                    ),
-                            ),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  if (_qr != null && _error.isEmpty)
-                    Text(
-                      '等待扫码确认 · ${_qrSeconds}s',
-                      key: const ValueKey('quark-qr-status'),
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: secondary(context)),
-                    ),
-                  TextButton.icon(
-                    key: const ValueKey('quark-qr-refresh'),
-                    onPressed: _busy ? null : _startQr,
-                    icon: const Icon(CupertinoIcons.arrow_clockwise, size: 18),
-                    label: Text(
-                      _qr == null && _error.isEmpty ? '获取登录二维码' : '重新获取二维码',
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  Text(
-                    '扫码并确认登录表示你已阅读并同意',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 13, color: secondary(context)),
-                  ),
-                  Center(child: _policies()),
-                ],
-                if (_error.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 18),
-                    child: Semantics(
-                      liveRegion: true,
-                      child: Text(
-                        _error,
-                        style: TextStyle(
-                          color: Theme.of(context).colorScheme.error,
-                        ),
-                      ),
-                    ),
-                  ),
-                if (!_qrMode)
-                  FilledButton(
-                    key: const ValueKey('quark-sms-submit'),
-                    onPressed: _busy ? null : _submitSms,
-                    style: FilledButton.styleFrom(
-                      minimumSize: const Size.fromHeight(50),
-                    ),
-                    child: _busy ? _spinner(onPrimary: true) : const Text('登录'),
-                  ),
-                const SizedBox(height: 16),
-                if (_status.isNotEmpty)
-                  Text(
-                    _status,
-                    textAlign: TextAlign.center,
-                    style: TextStyle(color: secondary(context), fontSize: 13),
-                  ),
-                const SizedBox(height: 14),
-                TextButton.icon(
-                  key: const ValueKey('native-login-web'),
-                  onPressed: () => _switch(widget.onUseWeb),
-                  icon: const Icon(CupertinoIcons.globe, size: 18),
-                  label: const Text('其他登录方式（网页）'),
-                ),
-                TextButton.icon(
-                  key: const ValueKey('native-login-manual'),
-                  onPressed: () => _switch(widget.onUseManual),
-                  icon: const Icon(CupertinoIcons.doc_on_clipboard, size: 18),
-                  label: const Text('手动提交登录信息'),
-                ),
-              ],
+              ),
             ),
+            const SizedBox(height: 16),
+            if (_qr != null && _error.isEmpty)
+              Text(
+                '等待扫码确认 · ${_qrSeconds}s',
+                key: const ValueKey('quark-qr-status'),
+                textAlign: TextAlign.center,
+                style: TextStyle(color: secondary(context)),
+              ),
+            TextButton.icon(
+              key: const ValueKey('quark-qr-refresh'),
+              onPressed: _busy ? null : _startQr,
+              icon: const Icon(CupertinoIcons.arrow_clockwise, size: 18),
+              label: Text(
+                _qr == null && _error.isEmpty ? '获取登录二维码' : '重新获取二维码',
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              '扫码并确认登录表示你已阅读并同意',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 13, color: secondary(context)),
+            ),
+            Center(child: _policies()),
+            const SizedBox(height: 12),
+          ],
+          if (_error.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 18),
+              child: Semantics(
+                liveRegion: true,
+                child: Text(
+                  _error,
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+              ),
+            ),
+          if (!_qrMode)
+            FilledButton(
+              key: const ValueKey('quark-sms-submit'),
+              onPressed: _busy ? null : _submitSms,
+              child: _busy ? _spinner(onPrimary: true) : const Text('登录 / 注册'),
+            ),
+          const SizedBox(height: 16),
+          if (_status.isNotEmpty)
+            Text(
+              _status,
+              textAlign: TextAlign.center,
+              style: TextStyle(color: secondary(context), fontSize: 13),
+            ),
+          CloudLoginAlternatives(
+            children: [
+              TextButton.icon(
+                key: const ValueKey('native-login-web'),
+                onPressed: () => _switch(widget.onUseWeb),
+                icon: const Icon(CupertinoIcons.globe, size: 18),
+                label: const Text('网页登录'),
+              ),
+              TextButton.icon(
+                key: const ValueKey('native-login-manual'),
+                onPressed: () => _switch(widget.onUseManual),
+                icon: const Icon(CupertinoIcons.doc_on_clipboard, size: 18),
+                label: const Text('手动提交'),
+              ),
+            ],
           ),
-        ),
+        ],
       ),
     ),
   );
