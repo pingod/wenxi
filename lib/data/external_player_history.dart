@@ -8,6 +8,7 @@ class ExternalPlayerHistory {
   static const limit = 12;
   List<String> get windows => _paths(store.data);
   List<String> get macos => _macPaths(store.data);
+  List<String> get linux => _linuxPaths(store.data);
   static bool _validMac(String path) =>
       path.length <= 4096 &&
       p.posix.isAbsolute(path) &&
@@ -29,6 +30,18 @@ class ExternalPlayerHistory {
             : const []))
       if (value is String && _valid(value)) value,
   }.take(limit).toList();
+  static bool _validLinux(String path) =>
+      path.length <= 4096 &&
+      p.posix.isAbsolute(path) &&
+      !path.endsWith('/') &&
+      !RegExp(r'[\x00-\x1f]').hasMatch(path);
+  static List<String> _linuxPaths(Json data) => <String>{
+    for (final value
+        in (data['linuxExternalPlayers'] is List
+            ? data['linuxExternalPlayers'] as List
+            : const []))
+      if (value is String && _validLinux(value)) value,
+  }.take(limit).toList();
   static bool _valid(String path) =>
       path.length <= 4096 &&
       p.windows.isAbsolute(path) &&
@@ -41,6 +54,14 @@ class ExternalPlayerHistory {
           draft['macosExternalPlayers'] = [
             path,
             ..._macPaths(draft).where((value) => value != path),
+          ].take(limit).toList();
+          return;
+        }
+        if (platform == 'linux') {
+          require(_validLinux(path), '播放器路径无效');
+          draft['linuxExternalPlayers'] = [
+            path,
+            ..._linuxPaths(draft).where((value) => value != path),
           ].take(limit).toList();
           return;
         }

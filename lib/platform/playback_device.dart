@@ -8,8 +8,9 @@ import '../domain/models.dart';
 import '../domain/playback.dart';
 import '../playback/system_pip.dart';
 import 'windows_pip.dart';
-import 'windows_external_player.dart';
+import 'linux_external_player.dart';
 import 'macos_external_player.dart';
+import 'windows_external_player.dart';
 
 abstract class PlaybackDevice extends ChangeNotifier {
   bool get isTelevision => false;
@@ -68,6 +69,7 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
        _windowsPlayer = windowsExternalPlayer ?? WindowsExternalPlayer();
   final WindowsExternalPlayer _windowsPlayer;
   final _macosPlayer = MacOSExternalPlayer();
+  final _linuxPlayer = LinuxExternalPlayer();
   final TargetPlatform _platform;
   bool get _android => _platform == TargetPlatform.android;
   bool get _ios => _platform == TargetPlatform.iOS;
@@ -85,11 +87,15 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
   bool get supportsExternalPlayer => _mobile || _desktop;
   @override
   bool get externalPlayerNeedsDirectLink => _ios;
+  /// The picker-backed launcher for this platform, or null when the platform
+  /// launches through its own channel instead (Android/iOS).
   @override
   WindowsExternalPlayer? get windowsExternalPlayer => _windows
       ? _windowsPlayer
       : _macos
       ? _macosPlayer
+      : _linux
+      ? _linuxPlayer
       : null;
   static const _channel = MethodChannel('com.asterlink.app/playback');
   static const _nativeChannel = MethodChannel('com.asterlink.app/native');
@@ -492,6 +498,7 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
     require(supportsExternalPlayer && !_closed, '当前设备不支持选择第三方播放器');
     if (_windows) return _windowsPlayer.open(url);
     if (_macos) return _macosPlayer.open(url);
+    if (_linux) return _linuxPlayer.open(url);
     try {
       return await _nativeChannel.invokeMethod<bool>('openExternalPlayer', {
             'session': _session,
@@ -500,6 +507,10 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
             'positionMs': position.inMilliseconds,
           }) ??
           false;
+    } on MissingPluginException {
+      // A runner without the handler must read as "cannot launch", not as an
+      // unhandled platform error escaping into the player UI.
+      throw const AppException('当前系统的播放器启动组件不可用，请更新应用后重试');
     } on PlatformException catch (error) {
       throw AppException(error.message ?? '无法打开第三方播放器，请重试');
     }

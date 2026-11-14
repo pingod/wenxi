@@ -195,6 +195,50 @@ static void native_method_call_cb(FlMethodChannel* channel,
       response = FL_METHOD_RESPONSE(fl_method_error_response_new(
           "foreground", "无法阻止系统休眠，传输仍会继续", nullptr));
     }
+  } else if (g_strcmp0(name, "openExternalPlayer") == 0) {
+    // Matches the macOS/Windows contract: launch the chosen player with the
+    // media URL as its only argument, detached so this process never waits on
+    // it. Only an absolute executable path and an http(s)/file URL are allowed.
+    FlValue* args = fl_method_call_get_args(method_call);
+    const gchar* application = nullptr;
+    const gchar* url = nullptr;
+    if (args != nullptr && fl_value_get_type(args) == FL_VALUE_TYPE_MAP) {
+      FlValue* value = fl_value_lookup_string(args, "application");
+      if (value != nullptr && fl_value_get_type(value) == FL_VALUE_TYPE_STRING) {
+        application = fl_value_get_string(value);
+      }
+      value = fl_value_lookup_string(args, "url");
+      if (value != nullptr && fl_value_get_type(value) == FL_VALUE_TYPE_STRING) {
+        url = fl_value_get_string(value);
+      }
+    }
+    const gboolean url_ok =
+        url != nullptr &&
+        (g_str_has_prefix(url, "http://") || g_str_has_prefix(url, "https://") ||
+         g_str_has_prefix(url, "file://"));
+    if (application == nullptr || !g_path_is_absolute(application) || !url_ok) {
+      response = FL_METHOD_RESPONSE(fl_method_error_response_new(
+          "invalid", "播放器或播放地址无效", nullptr));
+    } else if (g_file_test(application, G_FILE_TEST_IS_EXECUTABLE)) {
+      g_autoptr(GError) error = nullptr;
+      // This file is compiled as C++, so the flag bitmask needs a cast.
+      g_autoptr(GSubprocessLauncher) launcher = g_subprocess_launcher_new(
+          static_cast<GSubprocessFlags>(G_SUBPROCESS_FLAGS_STDOUT_SILENCE |
+                                        G_SUBPROCESS_FLAGS_STDERR_SILENCE));
+      GSubprocess* child = g_subprocess_launcher_spawn(
+          launcher, &error, application, url, nullptr);
+      if (child == nullptr) {
+        response = FL_METHOD_RESPONSE(fl_method_error_response_new(
+            "launch", "无法启动所选播放器", nullptr));
+      } else {
+        g_object_unref(child);
+        response = FL_METHOD_RESPONSE(fl_method_success_response_new(
+            fl_value_new_bool(TRUE)));
+      }
+    } else {
+      response = FL_METHOD_RESPONSE(fl_method_error_response_new(
+          "missing", "播放器程序不存在，请重新选择", nullptr));
+    }
   } else if (g_strcmp0(name, "downloadProtectionStatus") == 0) {
     FlValue* status = fl_value_new_map();
     fl_value_set_string_take(status, "desktop", fl_value_new_bool(TRUE));

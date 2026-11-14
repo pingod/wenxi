@@ -2806,7 +2806,11 @@ class _PlayerPageState extends State<PlayerPage>
           try {
             await ExternalPlayerHistory(controller.history.store).used(
               executable,
-              platform: Platform.isMacOS ? 'macos' : 'windows',
+              platform: Platform.isMacOS
+                  ? 'macos'
+                  : Platform.isLinux
+                  ? 'linux'
+                  : 'windows',
             );
           } catch (_) {
             // A launched player already owns the stream. A failed preference
@@ -2826,6 +2830,8 @@ class _PlayerPageState extends State<PlayerPage>
     final historyStore = ExternalPlayerHistory(controller.history.store);
     final history = Platform.isMacOS
         ? historyStore.macos
+        : Platform.isLinux
+        ? historyStore.linux
         : historyStore.windows;
     final saved = history.firstOrNull ?? '';
     if (history.isNotEmpty) {
@@ -2882,9 +2888,13 @@ class _PlayerPageState extends State<PlayerPage>
     final selected =
         await (widget.chooseExternalPlayer?.call() ??
             openFile(
-              acceptedTypeGroups: const [
-                XTypeGroup(label: '播放器程序', extensions: ['exe']),
-              ],
+              // Windows ships executables with an `.exe` suffix; Linux players
+              // are extensionless binaries, so the filter must not hide them.
+              acceptedTypeGroups: Platform.isWindows
+                  ? const [
+                      XTypeGroup(label: '播放器程序', extensions: ['exe']),
+                    ]
+                  : const [XTypeGroup(label: '播放器程序')],
               initialDirectory: saved.isNotEmpty ? p.dirname(saved) : null,
               confirmButtonText: '选择播放器',
             ));
