@@ -45,6 +45,7 @@ class AppSettings {
     this.fontScalePercent = 100,
     this.threads = 64,
     this.concurrent = 3,
+    this.crossTransferConcurrent = 3,
     this.retries = defaultDownloadRetries,
     this.speedLimit = 0,
     this.btUploadLimit = 512 * 1024,
@@ -71,7 +72,9 @@ class AppSettings {
   static const minFontScalePercent = 80;
   static const maxFontScalePercent = 180;
   static const maxConcurrentDownloads = 32;
+  static const maxConcurrentCrossTransfers = 8;
   final int threads, concurrent, retries, speedLimit;
+  final int crossTransferConcurrent;
   final int btUploadLimit;
   final Map<String, int> threadOverrides;
   final GitHubAcceleration githubAcceleration;
@@ -96,10 +99,10 @@ class AppSettings {
     'baidu': ('百度网盘', 8),
     'baidu_direct': ('百度网盘 · 账号直链', 3),
     'baidu_public': ('百度网盘 · 公益解析', 64),
-    'quark_route_1': ('夸克 · 直链', 512),
+    'quark_route_1': ('夸克 · 直链', 128),
     'quark_route_2': ('夸克 · 快传', 64),
     'uc': ('UC网盘', 512),
-    'xunlei': ('迅雷网盘', 64),
+    'xunlei': ('迅雷网盘', 8),
     'pan123': ('123网盘', 64),
     'guangya': ('光鸭云盘', 64),
     'aliyun': ('阿里云盘', 8),
@@ -162,6 +165,7 @@ class AppSettings {
     'fontScalePercent': fontScalePercent,
     'threads': threads,
     'concurrent': concurrent,
+    'crossTransferConcurrent': crossTransferConcurrent,
     'retries': retries,
     'downloadRetryPolicy': 1,
     'speedLimit': speedLimit,
@@ -199,6 +203,9 @@ class AppSettings {
         .clamp(minFontScalePercent, maxFontScalePercent),
     threads: j.integer('threads', 64).clamp(1, 512),
     concurrent: j.integer('concurrent', 3).clamp(1, maxConcurrentDownloads),
+    crossTransferConcurrent: j
+        .integer('crossTransferConcurrent', 3)
+        .clamp(1, maxConcurrentCrossTransfers),
     // Adopt the former default once; later explicit choices persist.
     retries:
         j.integer('downloadRetryPolicy') < 1 &&

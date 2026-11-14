@@ -261,6 +261,7 @@ class AppServices extends ChangeNotifier {
             (cloud.connector(CloudPlatform.tianyi) as TianyiConnector)
                 .authenticate,
       },
+      browserUa: cloud.browserUa,
     );
     favorites = CloudFavorites(store, cloud);
     backgrounds = BackgroundRepository(
@@ -324,11 +325,14 @@ class AppServices extends ChangeNotifier {
     rapidTransfers = RapidTransferManager(
       store: store,
       cloud: cloud,
+      concurrent: () => settings.crossTransferConcurrent,
       relay: CrossTransferRelay(
         cloud: cloud,
         http: transfer,
         cache: Directory('${cacheDirectory.path}/cross-transfers'),
         availableSpace: files.freeBytes,
+        engine: engine,
+        settings: () => settings,
       ),
       confirmDownload: () => mobileDataDownloads.confirm(),
       foreground: backgroundTransfers ? transferActivity.sync : null,
@@ -970,6 +974,7 @@ class AppServices extends ChangeNotifier {
       ).update(changes).toJson();
     });
     await downloads.settingsChanged();
+    rapidTransfers.settingsChanged();
   }
 
   Future<void> updateAppearance({
