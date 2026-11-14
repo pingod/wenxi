@@ -195,9 +195,16 @@ class _LoginGuidePanelState extends State<LoginGuidePanel> {
             const SizedBox(height: 4),
             Row(
               children: [
+                // The surrounding CloudLoginLayout stretches filled buttons to
+                // the full width, which is an infinite constraint inside this
+                // row; the guide owns its own compact size.
                 FilledButton.tonalIcon(
                   key: const ValueKey('login-guide-open'),
                   onPressed: _busy ? null : _openSite,
+                  style: FilledButton.styleFrom(
+                    minimumSize: const Size(0, 44),
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                  ),
                   icon: const Icon(
                     CupertinoIcons.arrow_up_right_square,
                     size: 18,
@@ -208,9 +215,11 @@ class _LoginGuidePanelState extends State<LoginGuidePanel> {
                 if (_watching)
                   TextButton(onPressed: _stop, child: const Text('停止读取剪贴板'))
                 else
-                  Text(
-                    '复制凭据后会自动提示填入',
-                    style: TextStyle(fontSize: 12, color: secondary(context)),
+                  Expanded(
+                    child: Text(
+                      '复制凭据后会自动提示填入',
+                      style: TextStyle(fontSize: 12, color: secondary(context)),
+                    ),
                   ),
               ],
             ),
