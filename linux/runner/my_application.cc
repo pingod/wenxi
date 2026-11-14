@@ -1,6 +1,7 @@
 #include "my_application.h"
 
 #include <gio/gio.h>
+#include <string.h>
 #include <unistd.h>
 
 #include <flutter_linux/flutter_linux.h>
@@ -15,9 +16,19 @@ struct _MyApplication {
   char** dart_entrypoint_arguments;
   FlMethodChannel* theme_channel;
   FlMethodChannel* native_channel;
+  FlMethodChannel* external_channel;
   GtkCssProvider* theme_provider;
   // logind inhibitor fd for the transfer keep-alive, -1 when inactive.
   gint sleep_inhibitor;
+  // Download/resolve links handed over on the command line, oldest first.
+  GQueue* pending_opens;
+  guint open_sequence;
+  // TRUE once the primary instance has created its window; later command lines
+  // arrive from `asterlink <url>` invocations and must only be queued.
+  gboolean started;
+  // Startup link kept until the first view exists; a second instance may hand
+  // over a link before Flutter has registered its channel handler.
+  gchar* queued_open;
 };
 
 G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
@@ -207,6 +218,93 @@ static void setup_native_channel(MyApplication* self, FlView* view) {
       self->native_channel, native_method_call_cb, self, nullptr);
 }
 
+// Mirrors the Windows and macOS bridges: only http(s) URLs and the app's own
+// `wenxi://download|resolve` links are accepted, so a stray argument or a file
+// path can never be handed to the downloader.
+static gboolean is_download_launch(const gchar* value) {
+  if (value == nullptr) return FALSE;
+  const gsize length = strlen(value);
+  if (length == 0 || length > 16384) return FALSE;
+  for (gsize i = 0; i < length; i++) {
+    const guchar ch = (guchar)value[i];
+    if (ch <= 0x20 || ch == 0x7f) return FALSE;
+  }
+  return g_str_has_prefix(value, "https://") ||
+         g_str_has_prefix(value, "http://") ||
+         g_str_has_prefix(value, "wenxi://download?") ||
+         g_str_has_prefix(value, "wenxi://download/?") ||
+         g_str_has_prefix(value, "wenxi://resolve?") ||
+         g_str_has_prefix(value, "wenxi://resolve/?");
+}
+
+// `asterlink <url>` or `asterlink --download <url>`, matching the Windows
+// command-line contract.
+static gchar* download_launch_argument(gchar** argv, gint argc) {
+  if (argc == 1 && is_download_launch(argv[0])) return g_strdup(argv[0]);
+  if (argc == 2 && (g_strcmp0(argv[0], "--download") == 0 ||
+                    g_strcmp0(argv[0], "--open") == 0) &&
+      is_download_launch(argv[1])) {
+    return g_strdup(argv[1]);
+  }
+  return nullptr;
+}
+
+static void queue_open(MyApplication* self, const gchar* value) {
+  if (!is_download_launch(value)) return;
+  if (g_queue_get_length(self->pending_opens) >= 16) {
+    g_free(g_queue_pop_head(self->pending_opens));
+  }
+  g_queue_push_tail(self->pending_opens, g_strdup(value));
+  // The Dart side may not have registered its handler yet; the queued copy is
+  // flushed on the next read either way, so this only shortens the wait.
+  if (self->external_channel != nullptr) {
+    fl_method_channel_invoke_method(self->external_channel,
+                                    "externalOpenAvailable", nullptr, nullptr,
+                                    nullptr, nullptr);
+  }
+}
+
+static void external_method_call_cb(FlMethodChannel* channel,
+                                    FlMethodCall* method_call,
+                                    gpointer user_data) {
+  MyApplication* self = MY_APPLICATION(user_data);
+  g_autoptr(FlMethodResponse) response = nullptr;
+  const gchar* name = fl_method_call_get_name(method_call);
+  if (g_strcmp0(name, "takeExternalOpens") != 0) {
+    response = FL_METHOD_RESPONSE(fl_method_not_implemented_response_new());
+    fl_method_call_respond(method_call, response, nullptr);
+    return;
+  }
+  FlValue* requests = fl_value_new_list();
+  gchar* value = nullptr;
+  while ((value = (gchar*)g_queue_pop_head(self->pending_opens)) != nullptr) {
+    FlValue* item = fl_value_new_map();
+    g_autofree gchar* id = g_strdup_printf("linux-%u", ++self->open_sequence);
+    fl_value_set_string_take(item, "id", fl_value_new_string(id));
+    fl_value_set_string_take(item, "launchUri", fl_value_new_string(value));
+    fl_value_append_take(requests, item);
+    g_free(value);
+  }
+  response = FL_METHOD_RESPONSE(fl_method_success_response_new(requests));
+  fl_value_unref(requests);
+  fl_method_call_respond(method_call, response, nullptr);
+}
+
+static void setup_external_channel(MyApplication* self, FlView* view) {
+  FlEngine* engine = fl_view_get_engine(view);
+  g_autoptr(FlStandardMethodCodec) codec = fl_standard_method_codec_new();
+  self->external_channel = fl_method_channel_new(
+      fl_engine_get_binary_messenger(engine), "com.asterlink.app/external_open",
+      FL_METHOD_CODEC(codec));
+  fl_method_channel_set_method_call_handler(
+      self->external_channel, external_method_call_cb, self, nullptr);
+  // A link that arrived before this point was kept in queued_open.
+  if (self->queued_open != nullptr) {
+    queue_open(self, self->queued_open);
+    g_clear_pointer(&self->queued_open, g_free);
+  }
+}
+
 // Implements GApplication::activate.
 static void my_application_activate(GApplication* application) {
   MyApplication* self = MY_APPLICATION(application);
@@ -284,6 +382,7 @@ static void my_application_activate(GApplication* application) {
 
   setup_theme_channel(self, view);
   setup_native_channel(self, view);
+  setup_external_channel(self, view);
 
   // The app defaults to the system brightness; the Dart side refines this as
   // soon as the theme resolves, including a forced light or dark setting.
@@ -296,26 +395,37 @@ static void my_application_activate(GApplication* application) {
   gtk_widget_grab_focus(GTK_WIDGET(view));
 }
 
-// Implements GApplication::local_command_line.
-static gboolean my_application_local_command_line(GApplication* application,
-                                                  gchar*** arguments,
-                                                  int* exit_status) {
+// Implements GApplication::command_line.
+// G_APPLICATION_HANDLES_COMMAND_LINE delivers every launch here, including the
+// ones D-Bus forwards from `asterlink <url>` while a window is already open.
+// That is what lets a link reuse the running instance instead of dying on the
+// data-directory lock.
+static gint my_application_command_line(GApplication* application,
+                                        GApplicationCommandLine* command_line) {
   MyApplication* self = MY_APPLICATION(application);
-  // Strip out the first argument as it is the binary name.
-  self->dart_entrypoint_arguments = g_strdupv(*arguments + 1);
-  self->sleep_inhibitor = -1;
+  gint argc = 0;
+  gchar** argv = g_application_command_line_get_arguments(command_line, &argc);
+  gchar** args = argc > 0 ? argv + 1 : argv;
+  const gint nargs = argc > 0 ? argc - 1 : 0;
 
-  g_autoptr(GError) error = nullptr;
-  if (!g_application_register(application, nullptr, &error)) {
-    g_warning("Failed to register: %s", error->message);
-    *exit_status = 1;
-    return TRUE;
+  if (!self->started) {
+    self->started = TRUE;
+    self->dart_entrypoint_arguments = g_strdupv(args);
+    self->sleep_inhibitor = -1;
+    self->pending_opens = g_queue_new();
+    self->queued_open = download_launch_argument(args, nargs);
+    g_application_activate(application);
+  } else {
+    gchar* link = download_launch_argument(args, nargs);
+    if (link != nullptr) {
+      queue_open(self, link);
+      g_free(link);
+    }
+    GList* windows = gtk_application_get_windows(GTK_APPLICATION(application));
+    if (windows != nullptr) gtk_window_present(GTK_WINDOW(windows->data));
   }
-
-  g_application_activate(application);
-  *exit_status = 0;
-
-  return TRUE;
+  g_strfreev(argv);
+  return 0;
 }
 
 // Implements GApplication::startup.
@@ -342,6 +452,12 @@ static void my_application_dispose(GObject* object) {
   release_sleep_inhibitor(self);
   g_clear_object(&self->theme_channel);
   g_clear_object(&self->native_channel);
+  g_clear_object(&self->external_channel);
+  g_clear_pointer(&self->queued_open, g_free);
+  if (self->pending_opens != nullptr) {
+    g_queue_free_full(self->pending_opens, g_free);
+    self->pending_opens = nullptr;
+  }
   g_clear_object(&self->theme_provider);
   g_clear_pointer(&self->dart_entrypoint_arguments, g_strfreev);
   G_OBJECT_CLASS(my_application_parent_class)->dispose(object);
@@ -349,8 +465,7 @@ static void my_application_dispose(GObject* object) {
 
 static void my_application_class_init(MyApplicationClass* klass) {
   G_APPLICATION_CLASS(klass)->activate = my_application_activate;
-  G_APPLICATION_CLASS(klass)->local_command_line =
-      my_application_local_command_line;
+  G_APPLICATION_CLASS(klass)->command_line = my_application_command_line;
   G_APPLICATION_CLASS(klass)->startup = my_application_startup;
   G_APPLICATION_CLASS(klass)->shutdown = my_application_shutdown;
   G_OBJECT_CLASS(klass)->dispose = my_application_dispose;
@@ -367,5 +482,6 @@ MyApplication* my_application_new() {
 
   return MY_APPLICATION(g_object_new(my_application_get_type(),
                                      "application-id", APPLICATION_ID, "flags",
-                                     G_APPLICATION_NON_UNIQUE, nullptr));
+                                     G_APPLICATION_HANDLES_COMMAND_LINE,
+                                     nullptr));
 }

@@ -91,11 +91,18 @@ class LinuxPackageTest(unittest.TestCase):
         self.assertIn('data.tar.xz', members)
         with tarfile.open(fileobj=io.BytesIO(members['data.tar.xz'])) as archive:
             entries = {member.name: member for member in archive.getmembers()}
+            desktop_entry = archive.extractfile(
+                './usr/share/applications/com.asterlink.asterlink.desktop'
+            ).read().decode()
         link = entries['./usr/bin/asterlink']
         self.assertTrue(link.issym())
         self.assertEqual(link.linkname, '/opt/asterlink/asterlink')
         self.assertEqual(entries['./opt/asterlink/asterlink'].mode & 0o777, 0o755)
         self.assertIn('./usr/share/applications/com.asterlink.asterlink.desktop', entries)
+        # A `wenxi://` link has to reach the app the same way it does on
+        # Windows and macOS, so the desktop entry claims the scheme.
+        self.assertIn('MimeType=x-scheme-handler/wenxi;', desktop_entry)
+        self.assertIn('Exec=asterlink %U', desktop_entry)
         self.assertIn('./usr/share/icons/hicolor/512x512/apps/asterlink.png', entries)
         self.assertIn('./usr/share/doc/asterlink/copyright', entries)
 

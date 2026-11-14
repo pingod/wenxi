@@ -5,6 +5,7 @@ import 'package:asterlink/app_services.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/state_store.dart';
 import 'package:asterlink/main.dart';
+import 'package:asterlink/platform/desktop_platform.dart';
 import 'package:asterlink/platform/external_open.dart';
 import 'package:asterlink/platform/native_engine.dart';
 import 'package:asterlink/ui/parse_page.dart';
@@ -17,7 +18,11 @@ void main() {
   late AppServices services;
   final incoming = <Map<String, Object?>>[];
   final events = <String>[];
-  final externalChannel = Platform.isWindows
+  // Desktop and iOS receive links on the dedicated external-open channel; the
+  // Android build reuses the native channel. Mirrors ExternalOpenInbox's own
+  // selection, so a Linux run no longer waits on a channel nothing answers.
+  final externalChannel =
+      isDesktopPlatform || Platform.isIOS
       ? windowsExternalOpenChannel
       : nativeChannel;
 

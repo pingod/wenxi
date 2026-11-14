@@ -173,6 +173,9 @@ def stage_tree(bundle, stage, version, root):
         'StartupNotify=true',
         'StartupWMClass=' + APPLICATION_ID,
         'Keywords=网盘;下载;cloud;download;torrent;',
+        # `%U` passes links on the command line, and the scheme handler makes
+        # `wenxi://` links reach the same path the Windows and macOS builds use.
+        'MimeType=x-scheme-handler/wenxi;',
         'X-GNOME-UsesNotifications=true',
         '',
     )), encoding='utf-8', newline='\n')
