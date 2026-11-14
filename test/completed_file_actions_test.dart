@@ -91,6 +91,36 @@ void main() {
   );
 
   test(
+    'Linux has no share sheet or app chooser, so both entries locate the file',
+    () async {
+      final revealed = <String>[];
+      final actions = CompletedFileActions(
+        platform: 'linux',
+        reveal: (path) async => revealed.add(path),
+      );
+      await actions.openWith('/home/u/下载/视频.mp4', '视频.mp4');
+      await actions.share('/home/u/下载/视频.mp4', '视频.mp4');
+      expect(revealed, ['/home/u/下载/视频.mp4', '/home/u/下载/视频.mp4']);
+      // Nothing reached the platform channels: Linux must not claim a share.
+      expect(calls, isEmpty);
+    },
+  );
+
+  test(
+    'Linux without a reveal action reports the unsupported platform', () async {
+      final actions = CompletedFileActions(platform: 'linux');
+      await expectLater(
+        actions.share('/home/u/下载/视频.mp4', '视频.mp4'),
+        throwsA(isA<AppException>()),
+      );
+      await expectLater(
+        actions.openWith('/home/u/下载/视频.mp4', '视频.mp4'),
+        throwsA(isA<AppException>()),
+      );
+    },
+  );
+
+  test(
     'Cancellation leaves the action reusable and permission errors are visible',
     () async {
       final actions = CompletedFileActions(platform: 'android');
