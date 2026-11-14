@@ -1,5 +1,8 @@
 #include "my_application.h"
 
+#include <gio/gio.h>
+#include <unistd.h>
+
 #include <flutter_linux/flutter_linux.h>
 #ifdef GDK_WINDOWING_X11
 #include <gdk/gdkx.h>
@@ -11,7 +14,10 @@ struct _MyApplication {
   GtkApplication parent_instance;
   char** dart_entrypoint_arguments;
   FlMethodChannel* theme_channel;
+  FlMethodChannel* native_channel;
   GtkCssProvider* theme_provider;
+  // logind inhibitor fd for the transfer keep-alive, -1 when inactive.
+  gint sleep_inhibitor;
 };
 
 G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
@@ -106,6 +112,101 @@ static void setup_theme_channel(MyApplication* self, FlView* view) {
       self->theme_channel, theme_method_call_cb, self, nullptr);
 }
 
+// Transfer keep-alive, matching the Windows `foreground` and macOS
+// `preventSleep` behaviour: while a transfer is active the machine must not
+// suspend. logind hands back a file descriptor that holds the inhibitor, so the
+// fd has to stay open for the duration of the transfer.
+static void release_sleep_inhibitor(MyApplication* self) {
+  if (self->sleep_inhibitor >= 0) {
+    close(self->sleep_inhibitor);
+    self->sleep_inhibitor = -1;
+  }
+}
+
+// `Inhibit` returns a pipe fd: "what" and "who" are written back on it, and
+// closing the fd releases the inhibitor. A session without logind (or without
+// permission) simply keeps no inhibitor; transfers still run, the machine may
+// just suspend.
+static gboolean hold_sleep_inhibitor(MyApplication* self) {
+  if (self->sleep_inhibitor >= 0) return TRUE;
+  GDBusConnection* connection = g_bus_get_sync(G_BUS_TYPE_SYSTEM, nullptr, nullptr);
+  if (connection == nullptr) return FALSE;
+  // The reply carries the fd out of band: `call_sync` with type "(h)" yields
+  // only the handle *index* into a fd list that was never received. Asking for
+  // the list explicitly is the only way to own a real descriptor, and holding
+  // it is what keeps the inhibitor alive.
+  GUnixFDList* fd_list = nullptr;
+  GVariant* reply = g_dbus_connection_call_with_unix_fd_list_sync(
+      connection, "org.freedesktop.login1", "/org/freedesktop/login1",
+      "org.freedesktop.login1.Manager", "Inhibit",
+      g_variant_new("(ssss)", "idle", "文析助手", "正在传输文件", "block"),
+      G_VARIANT_TYPE("(h)"), G_DBUS_CALL_FLAGS_NONE, -1, nullptr, &fd_list,
+      nullptr, nullptr);
+  g_object_unref(connection);
+  if (reply == nullptr) {
+    if (fd_list != nullptr) g_object_unref(fd_list);
+    return FALSE;
+  }
+  gint32 index = -1;
+  g_variant_get(reply, "(h)", &index);
+  g_variant_unref(reply);
+  gint fd = fd_list != nullptr ? g_unix_fd_list_get(fd_list, index, nullptr) : -1;
+  if (fd_list != nullptr) g_object_unref(fd_list);
+  if (fd < 0) return FALSE;
+  self->sleep_inhibitor = fd;
+  return TRUE;
+}
+
+static void native_method_call_cb(FlMethodChannel* channel,
+                                  FlMethodCall* method_call, gpointer user_data) {
+  MyApplication* self = MY_APPLICATION(user_data);
+  g_autoptr(FlMethodResponse) response = nullptr;
+  const gchar* name = fl_method_call_get_name(method_call);
+  if (g_strcmp0(name, "foreground") == 0) {
+    FlValue* args = fl_method_call_get_args(method_call);
+    gint64 active = -1;
+    if (args != nullptr && fl_value_get_type(args) == FL_VALUE_TYPE_MAP) {
+      FlValue* value = fl_value_lookup_string(args, "active");
+      if (value != nullptr && fl_value_get_type(value) == FL_VALUE_TYPE_INT) {
+        active = fl_value_get_int(value);
+      }
+    }
+    if (active < 0 || active > 10000) {
+      response = FL_METHOD_RESPONSE(fl_method_error_response_new(
+          "arguments", "下载任务状态无效", nullptr));
+    } else if (active == 0) {
+      release_sleep_inhibitor(self);
+      response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
+    } else if (hold_sleep_inhibitor(self)) {
+      response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
+    } else {
+      // Not fatal: the transfer keeps running, only the suspend block is gone.
+      response = FL_METHOD_RESPONSE(fl_method_error_response_new(
+          "foreground", "无法阻止系统休眠，传输仍会继续", nullptr));
+    }
+  } else if (g_strcmp0(name, "downloadProtectionStatus") == 0) {
+    FlValue* status = fl_value_new_map();
+    fl_value_set_string_take(status, "desktop", fl_value_new_bool(TRUE));
+    fl_value_set_string_take(status, "wakeLockHeld",
+                             fl_value_new_bool(self->sleep_inhibitor >= 0));
+    response = FL_METHOD_RESPONSE(fl_method_success_response_new(status));
+    fl_value_unref(status);
+  } else {
+    response = FL_METHOD_RESPONSE(fl_method_not_implemented_response_new());
+  }
+  fl_method_call_respond(method_call, response, nullptr);
+}
+
+static void setup_native_channel(MyApplication* self, FlView* view) {
+  FlEngine* engine = fl_view_get_engine(view);
+  g_autoptr(FlStandardMethodCodec) codec = fl_standard_method_codec_new();
+  self->native_channel = fl_method_channel_new(
+      fl_engine_get_binary_messenger(engine), "com.asterlink.app/native",
+      FL_METHOD_CODEC(codec));
+  fl_method_channel_set_method_call_handler(
+      self->native_channel, native_method_call_cb, self, nullptr);
+}
+
 // Implements GApplication::activate.
 static void my_application_activate(GApplication* application) {
   MyApplication* self = MY_APPLICATION(application);
@@ -182,6 +283,7 @@ static void my_application_activate(GApplication* application) {
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
 
   setup_theme_channel(self, view);
+  setup_native_channel(self, view);
 
   // The app defaults to the system brightness; the Dart side refines this as
   // soon as the theme resolves, including a forced light or dark setting.
@@ -201,6 +303,7 @@ static gboolean my_application_local_command_line(GApplication* application,
   MyApplication* self = MY_APPLICATION(application);
   // Strip out the first argument as it is the binary name.
   self->dart_entrypoint_arguments = g_strdupv(*arguments + 1);
+  self->sleep_inhibitor = -1;
 
   g_autoptr(GError) error = nullptr;
   if (!g_application_register(application, nullptr, &error)) {
@@ -236,7 +339,9 @@ static void my_application_shutdown(GApplication* application) {
 // Implements GObject::dispose.
 static void my_application_dispose(GObject* object) {
   MyApplication* self = MY_APPLICATION(object);
+  release_sleep_inhibitor(self);
   g_clear_object(&self->theme_channel);
+  g_clear_object(&self->native_channel);
   g_clear_object(&self->theme_provider);
   g_clear_pointer(&self->dart_entrypoint_arguments, g_strfreev);
   G_OBJECT_CLASS(my_application_parent_class)->dispose(object);

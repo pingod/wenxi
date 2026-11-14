@@ -305,10 +305,18 @@ class AppServices extends ChangeNotifier {
       lan: () => lan.activity,
       rapid: () => rapidTransfers.activity,
       publish: (activity) async {
-        if (!backgroundTransfers) return;
+        if (!backgroundTransfers || transferKeepAliveUnavailable) return;
         try {
           await nativeChannel.invokeMethod<void>('foreground', activity);
+        } on MissingPluginException {
+          // Keep-alive is best effort. A runner without the `foreground`
+          // handler (older Linux builds) must not fail the transfer, so the
+          // gate is dropped after the first miss instead of retried per task.
+          transferKeepAliveUnavailable = true;
         } on PlatformException catch (e) {
+          // A real refusal from the platform (Android declining to start the
+          // service) must still stop the task: without it the process can be
+          // killed mid-transfer.
           throw AppException(e.message ?? '后台传输服务启动失败');
         }
       },
@@ -428,6 +436,11 @@ class AppServices extends ChangeNotifier {
   final Directory dataDirectory, cacheDirectory;
   final FileAccess files;
   final bool platformFeatures;
+
+  /// Set once the runner reports no `foreground` handler. Keep-alive is a
+  /// best-effort extra, so the publish gate stays closed instead of failing
+  /// every transfer on platforms whose runner does not implement it.
+  bool transferKeepAliveUnavailable = false;
   final bool _preloadResources;
   final DateTime Function() clock;
   final RandomAccessFile? _instanceLock;

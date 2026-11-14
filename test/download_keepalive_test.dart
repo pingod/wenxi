@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:asterlink/core/json.dart';
@@ -155,6 +156,27 @@ void main() {
       await until(() => manager.activeCount == 0 && activity.last.active == 0);
       expect(manager.task(second)!.status, DownloadStatus.completed);
       expect(activity.where((state) => state.active == 0).length, 1);
+    },
+  );
+
+  test(
+    'a failing keep-alive handler never fails or pauses the transfer',
+    () async {
+      // Linux used to ship a runner without the `foreground` handler, so the
+      // publish call threw MissingPluginException on every task start and the
+      // whole Quark queue was reported as failed.
+      publish = (_) async => throw MissingPluginException(
+        'No implementation found for method foreground on channel '
+        'com.asterlink.app/native',
+      );
+      await manager.initialize();
+      final id = await manager.enqueue(_spec);
+      await until(() => native.begins.isNotEmpty);
+      native.done.add(id);
+      await until(() => manager.task(id)!.status == DownloadStatus.completed);
+      expect(manager.task(id)!.status, DownloadStatus.completed);
+      expect(manager.task(id)!.error, isEmpty);
+      expect(manager.activeCount, 0);
     },
   );
 

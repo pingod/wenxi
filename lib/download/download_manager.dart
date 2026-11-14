@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:collection/collection.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import '../core/json.dart';
 import '../core/operation_progress.dart';
@@ -489,7 +490,19 @@ class DownloadManager extends ChangeNotifier {
         _foregroundTimer?.cancel();
         _foregroundTimer = null;
       }
-      await foreground!(current);
+      try {
+        await foreground!(current);
+      } on MissingPluginException catch (error, stack) {
+        // The runner has no `foreground` handler at all: a build mismatch, not
+        // a transfer problem. Linux shipped exactly that, and the publish call
+        // failed every Quark task. Keep-alive is advisory here, so the gate is
+        // dropped and the transfer continues; real platform refusals (the
+        // Android service declining to start) still fail the task below.
+        DiagnosticLog.error('download.keep_alive_unavailable', error, stack);
+        _foregroundTimer?.cancel();
+        _foregroundTimer = null;
+        return;
+      }
       if (current.active > 0 && !_closing) {
         _foregroundTimer ??= Timer.periodic(const Duration(seconds: 2), (_) {
           if (_foregroundPublishing) return;
@@ -2657,6 +2670,13 @@ class DownloadManager extends ChangeNotifier {
             ? e.message
             : e is FileSystemException
             ? '读写文件失败，请检查存储空间和目录权限'
+            // A missing platform handler is a build problem, not a network
+            // one; saying "check your network" here sent users chasing the
+            // wrong cause.
+            : e is MissingPluginException
+            ? '当前系统的下载组件不完整，请重新安装或更新应用'
+            : e is PlatformException
+            ? '系统接口调用失败（${e.code}），请重试或更新应用'
             : '下载失败，请检查网络后重试';
         await _update(id, {
           'status': run.stopped || e is _Stopped ? 'paused' : 'failed',
