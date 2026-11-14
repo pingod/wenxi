@@ -67,6 +67,10 @@ class DownloadProtectionPlatform {
       await nativeChannel.invokeMethod<void>('downloadProtectionSettings', {
         'kind': kind,
       });
+    } on MissingPluginException {
+      // Linux has no equivalent system page; say so instead of letting an
+      // unhandled platform error escape into the settings UI.
+      throw const AppException('当前系统没有对应的后台下载设置页');
     } on PlatformException catch (error) {
       throw AppException(error.message ?? '无法打开系统后台设置');
     }

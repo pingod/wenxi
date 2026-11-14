@@ -34,6 +34,30 @@ class _Platform extends DownloadProtectionPlatform {
 }
 
 void main() {
+  test(
+    'A runner without the settings handler reports a readable message',
+    () async {
+      const channel = MethodChannel('com.asterlink.app/native');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        throw MissingPluginException('no handler for ${call.method}');
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+      await expectLater(
+        const DownloadProtectionPlatform(operatingSystem: 'linux')
+            .openSettings('battery'),
+        throwsA(
+          isA<AppException>().having(
+            (e) => e.message,
+            'message',
+            contains('没有对应的后台下载设置页'),
+          ),
+        ),
+      );
+    },
+  );
+
   testWidgets(
     'iOS explains foreground transfers without requesting Android settings',
     (tester) async {
