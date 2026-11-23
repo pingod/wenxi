@@ -2,6 +2,8 @@ import importlib.util
 import io
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -210,6 +212,95 @@ class LinuxPackageTest(unittest.TestCase):
         architecture = packages.DEB_ARCH[packages.machine_arch()]
         path = packages.build_deb(self.bundle, self.output, **self.deb_options())
         self.assertTrue(path.name.endswith('_' + architecture + '.deb'))
+
+    def appimage_runtime(self, machine=None):
+        """Build a type 2 runtime header with the host architecture's e_machine."""
+        header = bytearray(20)
+        header[0:4] = b'\x7fELF'
+        header[4] = 2  # 64-bit
+        header[5] = 1  # little endian
+        header[6] = 1
+        header[8:10] = b'AI'
+        machine = machine or packages.APPIMAGE_ELF_MACHINE[packages.machine_arch()]
+        header[18:20] = machine.to_bytes(2, 'little')
+        runtime = self.root / 'runtime-x86_64'
+        runtime.write_bytes(bytes(header) + b'type-2-runtime-fixture')
+        return runtime
+
+    @unittest.skipUnless(shutil.which('mksquashfs') and shutil.which('unsquashfs'),
+                         'squashfs-tools is required to build AppImages')
+    def test_appimage_prefixes_the_runtime_and_packages_an_appdir(self):
+        runtime = self.appimage_runtime()
+        path = packages.build_appimage(self.bundle, self.output, '1.2.3+4',
+                                       self.root, runtime)
+        self.assertEqual(
+            path.name,
+            'asterlink-1.2.3+4-linux-'
+            + packages.APPIMAGE_PLATFORM[packages.machine_arch()] + '.AppImage')
+        self.assertTrue(path.read_bytes().startswith(runtime.read_bytes()))
+        self.assertEqual(path.stat().st_mode & 0o777, 0o755)
+        extracted = self.root / 'extracted'
+        result = subprocess.run([
+            shutil.which('unsquashfs'), '-o', str(runtime.stat().st_size),
+            '-d', str(extracted), str(path),
+        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr.decode('utf-8', 'replace'))
+        for name in (
+            'AppRun',
+            'asterlink.desktop',
+            'asterlink.png',
+            'usr/bin/asterlink',
+            'usr/bin/asterlink_gopeed',
+            'usr/bin/data/icudtl.dat',
+            'usr/share/applications/com.asterlink.asterlink.desktop',
+            'usr/share/icons/hicolor/512x512/apps/asterlink.png',
+            'usr/share/metainfo/com.asterlink.asterlink.metainfo.xml',
+            'usr/share/doc/asterlink/copyright',
+        ):
+            self.assertTrue((extracted / name).is_file(), name)
+        self.assertEqual((extracted / 'AppRun').stat().st_mode & 0o777, 0o755)
+        self.assertEqual((extracted / 'usr/bin/asterlink').stat().st_mode & 0o777, 0o755)
+        app_run = (extracted / 'AppRun').read_text(encoding='utf-8')
+        # The runner resolves data/ and lib/ next to the real executable, so
+        # AppRun must exec the copy under usr/bin instead of changing cwd.
+        self.assertIn('exec "$HERE/usr/bin/asterlink" "$@"', app_run)
+        desktop = (extracted / 'asterlink.desktop').read_text(encoding='utf-8')
+        self.assertIn('Exec=asterlink %U\n', desktop)
+        self.assertIn('Icon=asterlink\n', desktop)
+        self.assertIn('MimeType=x-scheme-handler/wenxi;', desktop)
+
+    def test_appimage_refuses_a_second_build_of_the_same_version(self):
+        runtime = self.appimage_runtime()
+        if not shutil.which('mksquashfs'):
+            self.skipTest('squashfs-tools is required to build AppImages')
+        packages.build_appimage(self.bundle, self.output, '1.2.3+4', self.root, runtime)
+        with self.assertRaises(ValueError):
+            packages.build_appimage(self.bundle, self.output, '1.2.3+4', self.root, runtime)
+
+    def test_appimage_rejects_a_non_runtime_file_and_other_architectures(self):
+        wrong = self.appimage_runtime(
+            machine=0xb7 if packages.machine_arch() == 'x86_64' else 0x3e)
+        with self.assertRaises(ValueError):
+            packages.build_appimage(self.bundle, self.output, '1.2.3+4', self.root, wrong)
+        not_runtime = self.root / 'not-runtime'
+        not_runtime.write_bytes(b'not an Executable and Linkable Format file')
+        with self.assertRaises(ValueError):
+            packages.build_appimage(self.bundle, self.output, '1.2.3+4',
+                                    self.root, not_runtime)
+        with self.assertRaises(ValueError):
+            packages.build_appimage(self.bundle, self.output, '1.2.3+4',
+                                    self.root, self.root / 'missing-runtime')
+
+    def test_appimage_format_requires_a_runtime(self):
+        previous = os.environ.pop('APPIMAGE_RUNTIME', None)
+        try:
+            with self.assertRaises(SystemExit) as caught:
+                packages.main(['--format', 'appimage', '--bundle', str(self.bundle),
+                               '--version', '1.2.3+4', '--output-dir', str(self.output)])
+        finally:
+            if previous is not None:
+                os.environ['APPIMAGE_RUNTIME'] = previous
+        self.assertEqual(caught.exception.code, 1)
 
 
 if __name__ == '__main__':

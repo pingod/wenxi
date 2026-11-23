@@ -115,6 +115,17 @@ python tool/package-release.py --checksums
 
 生成 `.local/release-assets/asterlink-<版本>-linux-x64.tar.gz` 与 `SHA256SUMS.txt`。使用 tar.gz 而不是 zip，因为 zip 不保存 Unix 权限，解压后会丢失 `asterlink` 与 `asterlink_gopeed` 的可执行位。
 
+### AppImage
+
+```bash
+python tool/package-linux.py --format appimage \
+  --appimage-runtime .local/appimage/runtime-x86_64
+```
+
+生成 `.local/release-assets/asterlink-<版本>-linux-x64.AppImage`。AppImage 由固定版本的 type 2 runtime 与 squashfs 组成：`AppRun` 启动 `usr/bin/asterlink`，`data/`、`lib/` 与下载内核仍在可执行文件旁边，运行目录结构与 deb / Arch 包一致。图标、桌面文件和 AppStream 元数据放在 AppDir 根目录与 `usr/share` 下。
+
+构建需要 `squashfs-tools` 的 `mksquashfs`，并显式提供 runtime。CI 使用 [type2-runtime 20251108](https://github.com/AppImage/type2-runtime/releases/tag/20251108) 的 `runtime-x86_64`（SHA-256 `2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d`），下载后先校验再打包。没有 FUSE 的机器可用 `APPIMAGE_EXTRACT_AND_RUN=1 ./asterlink-<版本>-linux-x64.AppImage` 运行；CI 就是用这种方式冒烟启动的。
+
 ### deb 与 Arch 包
 
 ```bash
@@ -134,11 +145,11 @@ deb 的 `Depends` 由 `tool/package-linux.py` 的 `DEB_DEPENDS` 固定声明（G
 
 重新构建同一版本会报错而不是静默覆盖；先删掉旧包再出。设置 `SOURCE_DATE_EPOCH` 可以得到可复现的字节一致的包。
 
-`.github/workflows/packages.yml` 会在 push 与 PR 时构建两种包，装上 deb 后跑 `ldd` 检查缺库、再在 `dbus-run-session` + `gnome-keyring` + xvfb 里冒烟启动一次（见「已知限制」），最后把包与 `SHA256SUMS.txt` 作为 artifact 上传。Windows 侧同一条 workflow 用 Inno Setup 产出安装包。
+`.github/workflows/packages.yml` 会在 push 与 PR 时构建 AppImage、deb 与 Arch 三种包，装上 deb 后跑 `ldd` 检查缺库，再分别启动 deb 与 AppImage（`dbus-run-session` + `gnome-keyring` + xvfb）各冒烟一次（见「已知限制」），最后把包与 `SHA256SUMS.txt` 作为 artifact 上传。Windows 侧同一条 workflow 用 Inno Setup 产出安装包。
 
 ## 已知限制
 
 - 已有会话总线但没有 Secret Service 密钥环（`org.freedesktop.secrets`，由 GNOME Keyring 或 KDE Wallet 提供）时，首次启动会卡在读取本地状态密钥：`libsecret` 的 D-Bus 激活调用每次都等满 25 秒超时，重试后应用停在启动失败页。桌面发行版通常自带密钥环；完全没有任何总线的环境（例如裸 tty）不受影响，会直接退化为本地密钥。CI 的冒烟测试就是在 `dbus-run-session` 里用空密码启动 `gnome-keyring-daemon --unlock` 才跑通的。精简安装建议装上 `gnome-keyring`。
-- 未提供 AppImage / Flatpak 打包脚本；发布物是压缩后的完整运行目录，以及上面的 deb / Arch 包。
+- 提供 AppImage、deb 与 Arch 包；未提供 Flatpak 打包脚本。发布物也可以是压缩后的完整运行目录。
 - Linux 构建没有独立的 `APPLICATION_ID` 构建参数，桌面文件与 GApplication ID 固定为 `linux/CMakeLists.txt` 中的值。
 - 百度取链服务同样是可选配置：复制 `config/baidu-api.example.json` 到 `.local/baidu-api.defines.json`，`tool/build-linux.sh` 会自动加载。

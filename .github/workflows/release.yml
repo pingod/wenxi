@@ -31,6 +31,10 @@ jobs:
     uses: ./.github/workflows/checks.yml
   package:
     needs: [tag, checks]
+    # Only the upstream repository has the release environment and signing
+    # secrets for Android, Windows and macOS. Forks publish the Linux job below
+    # and reuse these upstream installers.
+    if: ${{ github.repository == 'z7786/wenxi' }}
     runs-on: ${{ matrix.runner }}
     environment: release
     permissions:
@@ -177,3 +181,80 @@ jobs:
         run: |
           rm -f "$RUNNER_TEMP/cert.p12"
           security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
+  linux:
+    needs: [tag, checks]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang cmake ninja-build pkg-config libgtk-3-dev \
+            libayatana-appindicator3-dev libsecret-1-dev libmpv-dev \
+            squashfs-tools zstd
+      - uses: ./.github/actions/setup
+      - name: Fetch the pinned AppImage runtime
+        run: |
+          runtime=.local/appimage/runtime-x86_64
+          mkdir -p .local/appimage
+          curl -fsSL -o "$runtime" \
+            https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64
+          echo "2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d  $runtime" \
+            | sha256sum --check -
+      - name: Build, test and package Linux
+        run: |
+          ./tool/build-linux.sh --build-config config/build.community.json
+          python3 tool/package-linux.py \
+            --format deb --format arch --format appimage \
+            --appimage-runtime .local/appimage/runtime-x86_64 \
+            --output-dir .local/release-assets
+          python3 tool/package-release.py --platform linux
+          cd .local/release-assets
+          sha256sum ./*.AppImage ./*.deb ./*.pkg.tar.zst ./*.tar.gz \
+            | tee SHA256SUMS-linux.txt
+      - name: Verify the AppImage and smoke-test it without FUSE
+        run: |
+          appimage="$PWD/$(ls .local/release-assets/*.AppImage)"
+          "$appimage" --appimage-extract >/dev/null
+          test -x squashfs-root/AppRun
+          test -x squashfs-root/usr/bin/asterlink
+          test -x squashfs-root/usr/bin/asterlink_gopeed
+          test -f squashfs-root/usr/bin/data/icudtl.dat
+          grep -q '^Exec=asterlink %U$' squashfs-root/asterlink.desktop
+          rm -rf squashfs-root
+          set +e
+          timeout 90 dbus-run-session -- bash -c "
+            printf '\n' | gnome-keyring-daemon --unlock --components=secrets >/dev/null 2>&1
+            exec xvfb-run --auto-servernum --server-args='-screen 0 1280x800x24' \
+              timeout 25 env APPIMAGE_EXTRACT_AND_RUN=1 '$appimage'
+          "
+          status=$?
+          set -e
+          if [[ "$status" -ne 124 ]]; then
+            echo "unexpected AppImage exit status $status"
+            exit 1
+          fi
+          log="$(find "$HOME/.local/share/com.asterlink.asterlink" -name 'app-*.jsonl' | head -1)"
+          test -n "$log"
+          grep -q '"os":"linux"' "$log"
+      - name: Save Linux release assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-linux
+          path: |
+            .local/release-assets/*.AppImage
+            .local/release-assets/*.deb
+            .local/release-assets/*.pkg.tar.*
+            .local/release-assets/*.tar.gz
+            .local/release-assets/SHA256SUMS-linux.txt
+          include-hidden-files: true
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

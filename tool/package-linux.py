@@ -2,13 +2,15 @@
 """Turn the Flutter Linux release bundle into installable packages.
 
     python tool/package-linux.py --format deb --format arch
+    python tool/package-linux.py --format appimage --appimage-runtime runtime-x86_64
     python tool/package-linux.py --format arch --compression gzip   # for tests
 
 The bundle in build/linux/x64/release/bundle is the only input: the runner finds
 data/ and lib/ next to the executable through /proc/self/exe, so the complete
 directory is installed under /opt/asterlink and /usr/bin/asterlink is a symlink
-to it. Both formats are written with the standard library alone, so the same
-code runs on the Arch-based development machine and on the Ubuntu CI runner.
+to it. AppImage packages the same tree as an AppDir instead. All formats are
+written with the standard library plus mksquashfs, so the same code runs on the
+Arch-based development machine and on the Ubuntu CI runner.
 """
 import argparse
 import gzip
@@ -87,6 +89,24 @@ ARCH_DEPENDS = (
     'gcc-libs',
     'glibc',
 )
+# The type 2 runtime is a static ELF with the AppImage magic at offset 8. Its
+# e_machine must match the host because the AppImage carries no emulator.
+APPIMAGE_ELF_MACHINE = {'x86_64': 0x3e, 'aarch64': 0xb7}
+APPIMAGE_PLATFORM = {'x86_64': 'x64', 'aarch64': 'arm64'}
+APPIMAGE_DESKTOP = 'asterlink.desktop'
+APPIMAGE_ICON = 'asterlink.png'
+APPIMAGE_METAINFO = 'usr/share/metainfo/' + APPLICATION_ID + '.metainfo.xml'
+APPIMAGE_METAINFO_TEXT = '''<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>{id}</id>
+  <name>AsterLink</name>
+  <summary>网盘解析、下载与在线播放</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>AGPL-3.0-only</project_license>
+  <url type="homepage">{homepage}</url>
+  <launchable type="desktop-id">{id}.desktop</launchable>
+</component>
+'''
 
 
 def version_of(root):
@@ -141,25 +161,8 @@ def bundle_files(bundle):
     return files
 
 
-def stage_tree(bundle, stage, version, root):
-    """Lay the bundle plus desktop integration files out for both formats."""
-    stage = Path(stage)
-    bundle = Path(bundle).resolve()
-    payload = stage / INSTALL_ROOT
-    payload.mkdir(parents=True)
-    for path, relative in bundle_files(bundle):
-        destination = payload / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, destination)
-        destination.chmod(path.stat().st_mode & 0o777)
-    # A symlink is enough: the runner resolves data/ and lib/ next to the real
-    # executable through /proc/self/exe, so nothing depends on the caller's cwd.
-    link = stage / 'usr/bin/asterlink'
-    link.parent.mkdir(parents=True, exist_ok=True)
-    link.symlink_to('/' + INSTALL_ROOT + '/asterlink')
-    desktop = stage / DESKTOP_FILE
-    desktop.parent.mkdir(parents=True, exist_ok=True)
-    desktop.write_text('\n'.join((
+def _desktop_text():
+    return '\n'.join((
         '[Desktop Entry]',
         'Type=Application',
         'Name=' + DISPLAY_NAME,
@@ -178,23 +181,149 @@ def stage_tree(bundle, stage, version, root):
         'MimeType=x-scheme-handler/wenxi;',
         'X-GNOME-UsesNotifications=true',
         '',
-    )), encoding='utf-8', newline='\n')
-    desktop.chmod(0o644)
-    icon = stage / ICON_FILE
-    icon.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(bundle / 'data/flutter_assets/assets/icons/app.png', icon)
-    copyright_file = stage / COPYRIGHT_FILE
-    copyright_file.parent.mkdir(parents=True, exist_ok=True)
+    ))
+
+
+def _write_desktop(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_desktop_text(), encoding='utf-8', newline='\n')
+    path.chmod(0o644)
+
+
+def _write_icon(bundle, path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(Path(bundle) / 'data/flutter_assets/assets/icons/app.png', path)
+
+
+def _write_copyright(stage, version, root):
+    path = Path(stage) / COPYRIGHT_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
     # The project is AGPL-3.0-only, so the licence text ships with the package.
     licence = Path(root) / 'LICENSE'
     body = licence.read_text(encoding='utf-8') if licence.is_file() else ''
-    copyright_file.write_text(
+    path.write_text(
         'AsterLink ' + version + '\n'
         'Built from the sources at ' + HOMEPAGE + '\n'
         'The download core is Gopeed (GPL-3.0-or-later); the complete\n'
         'third-party notices are installed in data/flutter_assets/assets/licenses/.\n\n'
         + body, encoding='utf-8', newline='\n')
+
+
+def _copy_bundle(bundle, destination):
+    destination = Path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    for path, relative in bundle_files(bundle):
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target)
+        target.chmod(path.stat().st_mode & 0o777)
+
+
+def stage_tree(bundle, stage, version, root):
+    """Lay the bundle plus desktop integration files out for deb and Arch."""
+    stage = Path(stage)
+    payload = stage / INSTALL_ROOT
+    payload.mkdir(parents=True)
+    _copy_bundle(bundle, payload)
+    # A symlink is enough: the runner resolves data/ and lib/ next to the real
+    # executable through /proc/self/exe, so nothing depends on the caller's cwd.
+    link = stage / 'usr/bin/asterlink'
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to('/' + INSTALL_ROOT + '/asterlink')
+    _write_desktop(stage / DESKTOP_FILE)
+    _write_icon(bundle, stage / ICON_FILE)
+    _write_copyright(stage, version, root)
     return stage
+
+
+def _appimage_runtime_machine(runtime):
+    """Read e_machine from the type 2 runtime; 0 means it is not one."""
+    try:
+        header = Path(runtime).read_bytes()[:20]
+    except OSError as error:
+        raise ValueError('AppImage runtime is unreadable: ' + str(runtime)) from error
+    if len(header) < 20 or header[:4] != b'\x7fELF' or header[8:10] != b'AI':
+        return 0
+    return int.from_bytes(header[18:20], 'little')
+
+
+def _require_appimage_runtime(runtime):
+    runtime = Path(runtime)
+    if not runtime.is_file():
+        raise ValueError('AppImage runtime is missing: ' + str(runtime))
+    expected = APPIMAGE_ELF_MACHINE[machine_arch()]
+    if _appimage_runtime_machine(runtime) != expected:
+        raise ValueError('AppImage runtime targets another architecture: '
+                         + str(runtime))
+    return runtime
+
+
+def _squashfs_tool(name):
+    path = shutil.which(name)
+    if path is None:
+        raise ValueError(name + ' is required for AppImages: install squashfs-tools')
+    return path
+
+
+def stage_appdir(bundle, stage, version, root):
+    """Lay the bundle out as an AppDir: AppRun, desktop file and icon."""
+    stage = Path(stage)
+    bundle = Path(bundle).resolve()
+    # AppRun runs usr/bin/asterlink, so data/ and lib/ stay next to the binary
+    # and the runner's /proc/self/exe lookup works unchanged inside the image.
+    _copy_bundle(bundle, stage / 'usr/bin')
+    _write_desktop(stage / DESKTOP_FILE)
+    _write_desktop(stage / APPIMAGE_DESKTOP)
+    _write_icon(bundle, stage / ICON_FILE)
+    _write_icon(bundle, stage / APPIMAGE_ICON)
+    _write_copyright(stage, version, root)
+    metainfo = stage / APPIMAGE_METAINFO
+    metainfo.parent.mkdir(parents=True, exist_ok=True)
+    metainfo.write_text(
+        APPIMAGE_METAINFO_TEXT.format(id=APPLICATION_ID, homepage=HOMEPAGE),
+        encoding='utf-8', newline='\n')
+    app_run = stage / 'AppRun'
+    app_run.write_text(
+        '#!/bin/sh\n'
+        'set -eu\n'
+        'HERE="${APPDIR:-$(dirname "$(readlink -f "$0")")}"\n'
+        'exec "$HERE/usr/bin/asterlink" "$@"\n',
+        encoding='utf-8', newline='\n')
+    app_run.chmod(0o755)
+    return stage
+
+
+def build_appimage(bundle, output_dir, version, root, runtime, compression='zstd'):
+    runtime = _require_appimage_runtime(runtime)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    epoch = epoch_of()
+    destination = output_dir / (PACKAGE + '-' + version + '-linux-'
+                                + APPIMAGE_PLATFORM[machine_arch()] + '.AppImage')
+    if destination.exists():
+        raise ValueError('An AppImage for this version already exists')
+    with tempfile.TemporaryDirectory(prefix='asterlink-appimage-') as temporary:
+        stage = Path(temporary) / 'AppDir'
+        stage.mkdir()
+        stage_appdir(bundle, stage, version, root)
+        payload = Path(temporary) / 'payload.squashfs'
+        result = subprocess.run([
+            _squashfs_tool('mksquashfs'), str(stage), str(payload),
+            '-root-owned', '-noappend', '-no-progress', '-comp', compression,
+            '-b', '131072', '-no-xattrs',
+            '-mkfs-time', str(epoch), '-all-time', str(epoch),
+        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        if result.returncode != 0:
+            raise ValueError('mksquashfs failed: '
+                             + result.stderr.decode('utf-8', 'replace').strip())
+        # A type 2 AppImage is the runtime followed by the squashfs image; the
+        # runtime finds the image at its own end, so no extra header is needed.
+        with destination.open('wb') as out, runtime.open('rb') as head, \
+                payload.open('rb') as body:
+            shutil.copyfileobj(head, out)
+            shutil.copyfileobj(body, out)
+    destination.chmod(0o755)
+    return destination
 
 
 def _tar_add(archive, path, arcname, epoch):
@@ -376,8 +505,8 @@ def build_arch(bundle, output_dir, version, pkgrel, packager, homepage, descript
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Build Linux packages from the release bundle.')
-    parser.add_argument('--format', action='append', choices=('deb', 'arch'),
-                        help='Package format to build; repeat for both (default: both).')
+    parser.add_argument('--format', action='append', choices=('deb', 'arch', 'appimage'),
+                        help='Package format to build; repeat for several (default: deb, arch).')
     parser.add_argument('--bundle', help='Release bundle (default: build/linux/x64/release/bundle).')
     parser.add_argument('--output-dir', help='Destination (default: .local/release-assets).')
     parser.add_argument('--version', help='Override the version taken from pubspec.yaml.')
@@ -386,6 +515,8 @@ def main(argv=None):
     parser.add_argument('--packager', default='AsterLink packaging <noreply@users.noreply.github.com>')
     parser.add_argument('--homepage', default=HOMEPAGE)
     parser.add_argument('--compression', default='zstd', choices=('zstd', 'gzip'))
+    parser.add_argument('--appimage-runtime',
+                        help='Type 2 AppImage runtime; required for --format appimage.')
     args = parser.parse_args(argv)
     root = Path(__file__).resolve().parent.parent
     formats = args.format or ['deb', 'arch']
@@ -404,6 +535,12 @@ def main(argv=None):
             written.append(build_arch(bundle, output_dir, version, args.pkgrel,
                                       args.packager, args.homepage, description,
                                       root, args.compression))
+        if 'appimage' in formats:
+            runtime = args.appimage_runtime or os.environ.get('APPIMAGE_RUNTIME', '')
+            if not runtime:
+                raise ValueError('--appimage-runtime is required for --format appimage')
+            written.append(build_appimage(bundle, output_dir, version, root,
+                                          runtime, args.compression))
     except (ValueError, OSError) as error:
         parser.exit(1, str(error) + '\n')
     for path in written:

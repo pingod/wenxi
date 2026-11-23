@@ -114,14 +114,14 @@ Android 可通过通知栏和传输悬浮窗查看后台任务；桌面端传输
 
 ## 下载
 
-在 [Releases](https://github.com/z7786/wenxi/releases) 页面获取安装包。当前版本为 [2.3.1+231](https://github.com/z7786/wenxi/releases/tag/v2.3.1%2B231)，附 `SHA256SUMS.txt` 校验文件。
+在 [Releases](https://github.com/z7786/wenxi/releases) 页面获取安装包。当前版本为 [2.3.5+235](https://github.com/z7786/wenxi/releases/tag/v2.3.5%2B235)，附 `SHA256SUMS.txt` 校验文件。Linux 的 AppImage、deb 与 Arch 包由 [本仓库的发布页](https://github.com/pingod/wenxi/releases) 提供。
 
 | 平台 | 安装包 | 系统要求 |
 | --- | --- | --- |
 | Android | ARM64 APK，沿用原签名 | Android 7.0 及以上，ARM64 设备 |
 | Windows x64 | 安装包、便携 ZIP | Windows 10 / 11，x64 设备；便携包解压后运行 `asterlink.exe` |
 | Windows ARM64 | ARM64 安装包 | Windows 10 / 11，ARM64 设备 |
-| Linux | 源码编译（x64 运行目录） | GTK 3 桌面，见 [Linux 编译说明](docs/BUILDING-LINUX.md) |
+| Linux | AppImage、deb、Arch 包 | x64 设备，GTK 3 桌面；AppImage 可直接运行，见 [Linux 编译说明](docs/BUILDING-LINUX.md) |
 | iOS / iPadOS | ARM64 未签名 IPA 测试包 | iOS / iPadOS 13.0 及以上，需用户自签后安装 |
 | macOS | ARM64 DMG 测试包 | macOS 11.0 及以上，Apple Silicon（M 系列） |
 
