@@ -60,7 +60,18 @@ jobs:
         if: runner.os == 'Linux'
         run: ./tool/build-native-linux.sh
       - name: Test Flutter
+        if: runner.os == 'Windows'
         run: flutter test --no-pub --concurrency=4 --reporter expanded
+      - name: Test Flutter on Linux
+        if: runner.os == 'Linux'
+        # The full matrix's goldens and real libmpv playback are authored on
+        # Windows; Linux runs the same platform suite as the CI build job.
+        run: |
+          flutter test --no-pub --concurrency=4 --reporter expanded \
+            test/native_integration_test.dart \
+            test/download_destination_native_test.dart \
+            test/linux_actions_test.dart \
+            test/linux_external_player_test.dart
       - name: Verify packaged Windows PGS and text subtitle decoding
         if: runner.os == 'Windows'
         shell: pwsh
