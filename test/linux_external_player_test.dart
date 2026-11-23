@@ -22,16 +22,23 @@ void main() {
   });
   tearDown(() => messenger.setMockMethodCallHandler(channel, null));
 
-  test('Linux launches the chosen binary with the media URL', () async {
-    final player = LinuxExternalPlayer()
-      ..executable = Platform.resolvedExecutable;
-    expect(await player.open('https://example.test/movie.mkv'), isTrue);
-    expect(calls.single.method, 'openExternalPlayer');
-    expect(calls.single.arguments, {
-      'application': Platform.resolvedExecutable,
-      'url': 'https://example.test/movie.mkv',
-    });
-  });
+  test(
+    'Linux launches the chosen binary with the media URL',
+    () async {
+      final player = LinuxExternalPlayer()
+        ..executable = Platform.resolvedExecutable;
+      expect(await player.open('https://example.test/movie.mkv'), isTrue);
+      expect(calls.single.method, 'openExternalPlayer');
+      expect(calls.single.arguments, {
+        'application': Platform.resolvedExecutable,
+        'url': 'https://example.test/movie.mkv',
+      });
+    },
+    // The launcher validates a POSIX absolute path with `path.posix`, so on
+    // Windows the test runner's own executable (C:\...) is rejected before the
+    // channel is ever called.
+    skip: Platform.isWindows ? 'Linux launcher paths are POSIX-only' : null,
+  );
 
   test('Linux reports a missing player instead of launching nothing', () async {
     final player = LinuxExternalPlayer()
@@ -73,6 +80,7 @@ void main() {
         ),
       );
     },
+    skip: Platform.isWindows ? 'Linux launcher paths are POSIX-only' : null,
   );
 
   test('Linux player history keeps absolute paths newest first', () async {
