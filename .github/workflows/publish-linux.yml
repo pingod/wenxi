@@ -45,9 +45,18 @@ jobs:
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber
-          else
-            gh release create "$TAG" dist/* \
-              --title "文析助手 ${TAG#v}" \
-              --notes-from-tag \
-              --verify-tag
+            exit 0
           fi
+          # --notes-from-tag needs a local clone, and this job has none; read
+          # the annotated tag message (or the commit message) through the API.
+          object=$(gh api "repos/$GH_REPO/git/ref/tags/$TAG")
+          sha=$(jq -r '.object.sha' <<<"$object")
+          if [[ $(jq -r '.object.type' <<<"$object") == tag ]]; then
+            notes=$(gh api "repos/$GH_REPO/git/tags/$sha" --jq '.message')
+          else
+            notes=$(gh api "repos/$GH_REPO/commits/$sha" --jq '.commit.message')
+          fi
+          gh release create "$TAG" dist/* \
+            --title "文析助手 ${TAG#v}" \
+            --notes "$notes" \
+            --verify-tag
