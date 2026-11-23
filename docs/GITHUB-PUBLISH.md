@@ -43,4 +43,4 @@ python tool/check_public_files.py --staged
 
 Secrets 中另设 `ASTERLINK_CONTROL_URL`、`UMENG_APPKEY`；Variables 中设置 `ASTERLINK_GITHUB_REPO`、`ASTERLINK_APPLICATION_ID` 和 `UMENG_CHANNEL`。正式版包名为 `com.asterlink.app`；正式配置不完整时工作流会停止，本机参数不会自动上传。
 
-修改 `pubspec.yaml` 后运行 `dart tool/sync_version.dart --write`。推送与完整版本一致的新标签，或在 Actions → Build signed release → Run workflow 选择分支，均可生成正式签名安装包。本仓库的 Linux 发布任务会在同一条工作流里下载 `release-linux` 附件并直接创建或更新 Release，标签说明即发布说明，无需本机下载后再上传；只有 macOS / Windows / Android 由上游发布，需要时再手动上传对应附件。不要覆盖已发布标签。只有正式 Release 会被备用更新识别。
+修改 `pubspec.yaml` 后运行 `dart tool/sync_version.dart --write`。推送与完整版本一致的新标签，或在 Actions → Build signed release → Run workflow 选择分支，均可生成正式签名安装包。本仓库的 Linux 发布任务会在同一条工作流里下载 `release-linux` 附件并直接创建或更新 Release，标签说明即发布说明，无需本机下载后再上传。创建附注标签时用 `git tag -a --cleanup=verbatim`，否则 Git 会去掉以 `#` 开头的标题；已有 Release 可用 `gh release edit <tag> --notes-file <file>` 修正说明。只有 macOS / Windows / Android 由上游发布，需要时再手动上传对应附件。不要覆盖已发布标签。只有正式 Release 会被备用更新识别。
