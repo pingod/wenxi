@@ -202,6 +202,8 @@ jobs:
           compression-level: 0
           retention-days: 14
   macos:
+    # macOS 包由上游 z7786/wenxi 发布，本仓库不再重复打包。
+    if: ${{ false }}
     # Apple Silicon runner: the .app and the Go download helper are both built
     # for arm64 here, so the default `build-native-darwin.sh` (GOARCH=arm64)
     # lines up with the app the Flutter toolchain produces.

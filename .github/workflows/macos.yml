@@ -11,11 +11,6 @@ on:
         description: Include the existing client parsing and search configuration.
         type: boolean
         default: true
-  push:
-    branches: ['codex/macos-arm64-*']
-  pull_request:
-    branches: [main, master]
-    paths: ['macos/**', 'lib/**', 'native/**', 'vendor_plugins/**', 'tool/**', 'pubspec*', '.github/workflows/macos.yml']
 permissions:
   contents: read
 concurrency:

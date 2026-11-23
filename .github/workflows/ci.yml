@@ -14,6 +14,8 @@ jobs:
   checks:
     uses: ./.github/workflows/checks.yml
   build:
+    # Windows / Windows ARM64 / Android 安装包由上游 z7786/wenxi 发布；本仓库只发 Linux 包。
+    if: ${{ false }}
     needs: checks
     runs-on: windows-2022
     timeout-minutes: 60
