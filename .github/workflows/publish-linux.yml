@@ -1,0 +1,53 @@
+name: Publish Linux release assets
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Tag whose release receives the assets.
+        type: string
+        required: true
+      run:
+        description: Workflow run id that holds the release-linux artifact.
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag whose release receives the assets.
+        type: string
+        required: true
+      run:
+        description: Workflow run id that holds the release-linux artifact.
+        type: string
+        required: true
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: write
+    env:
+      # gh cannot combine --notes-from-tag with --repo; the environment variable
+      # supplies the repository for every command in this job.
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download the Linux release assets
+        run: |
+          gh run download "${{ inputs.run }}" --name release-linux --dir dist
+          ls -l dist
+      - name: Create or update the GitHub release
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --title "文析助手 ${TAG#v}" \
+              --notes-from-tag \
+              --verify-tag
+          fi
