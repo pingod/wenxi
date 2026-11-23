@@ -17,6 +17,7 @@ import 'data/resource_link_checks.dart';
 import 'data/resource_link_probe.dart';
 import 'data/cloud_repository.dart';
 import 'data/cloud_favorites.dart';
+import 'data/cloud_save_locations.dart';
 import 'data/cloud_command_history.dart';
 import 'data/http.dart';
 import 'data/remote_control_http.dart';
@@ -452,6 +453,7 @@ class AppServices extends ChangeNotifier {
   late final CleanupOutbox cleanups;
   late final CloudRepository cloud;
   late final CloudFavorites favorites;
+  late final saveLocations = CloudSaveLocations(store);
   late final commandHistory = CloudCommandHistory(store);
   late final AccountLoginService login;
   late final BackupRepository backup;
@@ -778,6 +780,7 @@ class AppServices extends ChangeNotifier {
       });
       _readExternalOpensInBackground();
     }
+    await _migrateQuarkDirectConnections();
     await vault.initializeAccounts();
     DiagnosticLog.event(
       'app.accounts_ready',
@@ -810,6 +813,27 @@ class AppServices extends ChangeNotifier {
     _changed();
   }
 
+  Future<void> _migrateQuarkDirectConnections() async {
+    // Keep absent settings absent so a failed Android legacy import can retry.
+    if (store.data['settings'] is! Map ||
+        !AppSettings.needsQuarkDirectConnectionMigration(
+          store.data.obj('settings'),
+        )) {
+      return;
+    }
+    await store.change((draft) {
+      final saved = draft.obj('settings');
+      if (!AppSettings.needsQuarkDirectConnectionMigration(saved)) return;
+      draft['settings'] = {
+        ...saved,
+        'quarkDirectConnectionPolicy':
+            AppSettings.quarkDirectConnectionPolicyVersion,
+        'downloadThreadOverrides': {...saved.obj('downloadThreadOverrides')}
+          ..remove('quark_route_1'),
+      };
+    });
+  }
+
   void _readExternalOpensInBackground() {
     // Incoming files are delivered through the inbox's listener when ready.
     // Optional platform input cannot hold startup or sticky download recovery.
@@ -834,7 +858,10 @@ class AppServices extends ChangeNotifier {
   }
 
   Future<void> retryLegacyImport() async {
-    await downloads.importPausedQueue(importLegacy);
+    await downloads.importPausedQueue(() async {
+      await importLegacy();
+      await _migrateQuarkDirectConnections();
+    });
     notifyListeners();
   }
 

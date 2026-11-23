@@ -147,6 +147,7 @@ class CrossTransferDownload {
               await nativePayload.length() == total;
           if (!resume) {
             await engine.remove(id);
+            onProgress(0, total > 0 ? total : expected);
           }
           identity = probe.identity;
           await checkSpace(

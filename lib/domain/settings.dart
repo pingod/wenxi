@@ -73,6 +73,10 @@ class AppSettings {
   static const maxFontScalePercent = 180;
   static const maxConcurrentDownloads = 32;
   static const maxConcurrentCrossTransfers = 8;
+  static const quarkDirectConnectionPolicyVersion = 1;
+  static bool needsQuarkDirectConnectionMigration(Json settings) =>
+      settings.integer('quarkDirectConnectionPolicy') <
+      quarkDirectConnectionPolicyVersion;
   final int threads, concurrent, retries, speedLimit;
   final int crossTransferConcurrent;
   final int btUploadLimit;
@@ -171,6 +175,7 @@ class AppSettings {
     'speedLimit': speedLimit,
     'btUploadLimit': btUploadLimit,
     'downloadThreadOverrides': threadOverrides,
+    'quarkDirectConnectionPolicy': quarkDirectConnectionPolicyVersion,
     'githubAcceleration': githubAcceleration.toJson(),
     'githubAccelerationPolicy': 1,
     'destination': destination,
@@ -219,8 +224,12 @@ class AppSettings {
         .integer('btUploadLimit', 512 * 1024)
         .clamp(0, 10000000 * 1024),
     threadOverrides: {
+      // Adopt 512 once for legacy direct-link choices, including global
+      // inheritance. The saved policy version preserves later manual changes.
       for (final e in j.obj('downloadThreadOverrides').entries)
-        if (profiles.containsKey(e.key))
+        if (profiles.containsKey(e.key) &&
+            (e.key != 'quark_route_1' ||
+                !needsQuarkDirectConnectionMigration(j)))
           e.key: (int.tryParse('${e.value}') ?? 0).clamp(0, 512),
     },
     githubAcceleration: GitHubAcceleration.fromJson(

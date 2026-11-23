@@ -782,6 +782,14 @@ class Vault implements CredentialStore {
           (f) => f.str('platform') != platform.key || f.str('accountId') != id,
         )
         .toList();
+    if (draft['cloudSaveLocations'] is Map) {
+      draft['cloudSaveLocations'] = draft.obj('cloudSaveLocations')
+        ..removeWhere((_, value) {
+          final location = asJson(value);
+          return location.str('platform') == platform.key &&
+              location.str('accountId') == id;
+        });
+    }
   });
 
   @override

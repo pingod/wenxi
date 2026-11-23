@@ -282,6 +282,254 @@ void main() {
     );
   }
 
+  for (final style in PlaybackScreenStyle.values) {
+    for (final (size, cutouts) in [
+      (const Size(904, 407), const [Rect.fromLTWH(0, 184, 44, 40)]),
+      (const Size(904, 407), const [Rect.fromLTWH(860, 184, 44, 40)]),
+      (const Size(407, 904), const [Rect.fromLTWH(190, 0, 27, 36)]),
+    ]) {
+      testWidgets(
+        'Central camera leaves unobstructed text in its corner ($size, ${style.name}, $cutouts)',
+        (tester) async {
+          tester.view.devicePixelRatio = 1;
+          tester.view.physicalSize = size;
+          addTearDown(tester.view.resetPhysicalSize);
+          addTearDown(tester.view.resetDevicePixelRatio);
+          final fixture = PlaybackFixture(
+            suppliedEntries: const [
+              PlaybackEntry(
+                id: 'film',
+                key: 'film',
+                name:
+                    '驴得水.Mr.Donkey.2016.2160p.WEB-DL.60fps.H265.10bit.AAC.mp4',
+                video: true,
+              ),
+            ],
+            data: {
+              'playbackPreferences': {
+                'screenDisplay': {
+                  'enabled': true,
+                  'style': style.name,
+                  'items': [
+                    for (final item in PlaybackScreenItem.values) item.name,
+                  ],
+                },
+              },
+            },
+          );
+          await fixture.controller.start();
+          fixture.current.screenInfo = const PlaybackScreenInfo(
+            transport: 'direct',
+            bytesPerSecond: 5 * 1024 * 1024,
+            hardwareDecoder: 'mediacodec',
+            bufferSeconds: 16.3,
+            decoderDroppedFrames: 0,
+            outputDroppedFrames: 290,
+          );
+          await tester.pumpWidget(
+            MaterialApp(
+              home: PlayerScreenDisplay(
+                controller: fixture.controller,
+                cutouts: cutouts,
+              ),
+            ),
+          );
+          final textPadding = style == PlaybackScreenStyle.background
+              ? const EdgeInsets.symmetric(horizontal: 8, vertical: 5)
+              : const EdgeInsets.all(2);
+          for (final (corner, first, last) in [
+            ('top-left', 'title', 'resolution'),
+            ('top-right', 'time', 'time'),
+            ('bottom-left', 'video', 'progress'),
+            ('bottom-right', 'parameters', 'network'),
+          ]) {
+            final region = tester.getRect(
+              find.byKey(Key('player-screen-region-$corner')),
+            );
+            final firstText = tester.getRect(
+              find.byKey(Key('player-screen-line-$first')),
+            );
+            final lastText = tester.getRect(
+              find.byKey(Key('player-screen-line-$last')),
+            );
+            if (corner.endsWith('left')) {
+              expect(region.left, closeTo(12, .1));
+              expect(firstText.left, closeTo(12 + textPadding.left, .1));
+            } else {
+              expect(region.right, closeTo(size.width - 12, .1));
+              expect(
+                firstText.right,
+                closeTo(size.width - 12 - textPadding.right, .1),
+              );
+            }
+            if (corner.startsWith('top')) {
+              if (size.width < size.height && corner == 'top-left') {
+                // A long title on a narrow portrait screen reaches the center
+                // camera. Only that region needs to move below the cutout.
+                expect(region.top, closeTo(40, .1));
+              } else {
+                expect(region.top, closeTo(12, .1));
+              }
+              expect(firstText.top, closeTo(region.top + textPadding.top, .1));
+            } else {
+              expect(region.bottom, closeTo(size.height - 12, .1));
+              expect(
+                lastText.bottom,
+                closeTo(size.height - 12 - textPadding.bottom, .1),
+              );
+            }
+            for (final cutout in cutouts) {
+              expect(region.overlaps(cutout), isFalse, reason: corner);
+            }
+          }
+          expect(tester.takeException(), isNull);
+          await tester.pumpWidget(const SizedBox.shrink());
+          await fixture.controller.close();
+          fixture.store.dispose();
+        },
+      );
+    }
+  }
+
+  for (final (corner, cutout) in [
+    ('top-left', const Rect.fromLTWH(0, 0, 50, 36)),
+    ('top-right', const Rect.fromLTWH(854, 0, 50, 36)),
+    ('bottom-left', const Rect.fromLTWH(0, 371, 50, 36)),
+    ('bottom-right', const Rect.fromLTWH(854, 371, 50, 36)),
+  ]) {
+    testWidgets('Only the obstructed $corner moves away from a cutout', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(904, 407);
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final fixture = PlaybackFixture(
+        data: {
+          'playbackPreferences': {
+            'screenDisplay': {
+              'enabled': true,
+              'items': [
+                for (final item in PlaybackScreenItem.values) item.name,
+              ],
+            },
+          },
+        },
+      );
+      await fixture.controller.start();
+      Future<void> render(List<Rect> cutouts) => tester.pumpWidget(
+        MaterialApp(
+          home: PlayerScreenDisplay(
+            controller: fixture.controller,
+            cutouts: cutouts,
+          ),
+        ),
+      );
+      await render(const []);
+      final before = {
+        for (final id in [
+          'top-left',
+          'top-right',
+          'bottom-left',
+          'bottom-right',
+        ])
+          id: tester.getRect(find.byKey(Key('player-screen-region-$id'))),
+      };
+      await render([cutout]);
+      for (final entry in before.entries) {
+        final region = tester.getRect(
+          find.byKey(Key('player-screen-region-${entry.key}')),
+        );
+        if (entry.key == corner) {
+          expect(region, isNot(entry.value));
+          expect(region.overlaps(cutout.inflate(3.9)), isFalse);
+        } else {
+          expect(region, entry.value, reason: entry.key);
+        }
+      }
+      await render(const []);
+      expect(
+        tester.getRect(find.byKey(Key('player-screen-region-$corner'))),
+        before[corner],
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await fixture.controller.close();
+      fixture.store.dispose();
+    });
+  }
+
+  testWidgets(
+    'Screen text switches between aligned black outlines and background',
+    (tester) async {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(320, 700);
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final fixture = PlaybackFixture(
+        suppliedEntries: const [
+          PlaybackEntry(
+            id: 'long-title',
+            key: 'long-title',
+            name: '西游记修复版 · 一段需要在窄屏换行的中文标题.mp4',
+            video: true,
+          ),
+        ],
+        data: {
+          'playbackPreferences': {
+            'screenDisplay': {'enabled': true},
+          },
+        },
+      );
+      await fixture.controller.start();
+      Future<void> render() => tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData(fontFamily: fixtureFont ? 'FixtureUI' : null),
+          home: PlayerScreenDisplay(controller: fixture.controller),
+        ),
+      );
+      await render();
+      final title = find.byKey(const Key('player-screen-line-title'));
+      final outline = find.byKey(const Key('player-screen-outline-title'));
+      final region = find.byKey(const Key('player-screen-region-top-left'));
+      expect(outline, findsOneWidget);
+      expect(tester.widget<Container>(region).decoration, isNull);
+      final stroke = tester.widget<RichText>(outline);
+      expect(stroke.text.style!.foreground!.color, Colors.black);
+      expect(stroke.text.style!.foreground!.style, PaintingStyle.stroke);
+      expect(tester.getRect(outline), tester.getRect(title));
+      final semantics = tester.ensureSemantics();
+      expect(
+        find.bySemanticsLabel(fixture.controller.current.name),
+        findsOneWidget,
+      );
+      semantics.dispose();
+      final before = fixture.current;
+      await fixture.controller.updatePreferences(
+        fixture.controller.preferences.copyWith(
+          screenDisplay: fixture.controller.preferences.screenDisplay.copyWith(
+            style: PlaybackScreenStyle.background,
+          ),
+        ),
+      );
+      await render();
+      expect(outline, findsNothing);
+      expect(
+        (tester.widget<Container>(region).decoration as BoxDecoration).color,
+        const Color(0x99000000),
+      );
+      expect(fixture.current, same(before));
+      expect(
+        fixture.history.preferences.screenDisplay.style,
+        PlaybackScreenStyle.background,
+      );
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await fixture.controller.close();
+      fixture.store.dispose();
+    },
+  );
+
   testWidgets(
     'Screen text switches between aligned black outlines and background',
     (tester) async {

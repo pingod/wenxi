@@ -180,9 +180,14 @@ class _ResourcePrioritySheetState extends State<_ResourcePrioritySheet> {
                         key: ValueKey('resource-drag-${platform.key}'),
                         index: index,
                         enabled: !saving,
-                        child: const Padding(
-                          padding: EdgeInsets.all(10),
-                          child: Icon(Icons.drag_handle_rounded, size: 20),
+                        child: const Tooltip(
+                          message: '拖动排序',
+                          triggerMode: TooltipTriggerMode.manual,
+                          child: SizedBox(
+                            width: 48,
+                            height: 48,
+                            child: Icon(Icons.drag_handle_rounded, size: 20),
+                          ),
                         ),
                       ),
                     ],

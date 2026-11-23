@@ -247,8 +247,8 @@ class NativeBridge(private val context: Context, engine: FlutterEngine) {
             lanFiles.pick(activity, result)
             return
         }
-        if (call.method == "lanScanQr") {
-            lanQrScanner.scan(result)
+        if (call.method == "lanScanQr" || call.method == "scanQr") {
+            lanQrScanner.scan(result, parseShare = call.method == "scanQr")
             return
         }
         if (call.method == "openFile" || call.method == "shareFile") {

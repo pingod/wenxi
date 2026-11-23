@@ -19,6 +19,7 @@ import '../domain/github_acceleration.dart';
 import 'state_store.dart';
 import 'http.dart';
 import 'http_retry.dart';
+import 'uploads/upload_concurrency.dart';
 import 'cloud_browser_ua.dart';
 import 'cleanup_outbox.dart';
 import 'providers/baidu.dart';
@@ -46,6 +47,11 @@ import 'providers/xunlei.dart';
 import 'providers/xunlei_protocol.dart';
 import 'providers/xunlei_login.dart';
 import 'cloud_command_resolver.dart';
+
+class _CloudWriteTarget {
+  final gate = UploadWorkLimiter(1, reentrant: true);
+  int users = 0;
+}
 
 class CloudRepository {
   CloudRepository(
@@ -394,6 +400,33 @@ class CloudRepository {
   CloudConnector connector(CloudPlatform p) => connectors[p]!;
   Credential credential(CloudPlatform p) =>
       vault.credential(p) ?? (throw AccountLoginRequired('请先登录${p.label}'));
+
+  final _writeTargets = <String, _CloudWriteTarget>{};
+
+  /// One destination name across ordinary uploads, folder creation and cross-
+  /// cloud writes. Different names keep running in parallel; a queued cancel
+  /// cannot enter the provider, and nested writes reuse the existing lease.
+  Future<T> withWriteTarget<T>(
+    BrowseSession session,
+    String parent,
+    String name,
+    Future<T> Function() action,
+  ) => withSession(session, () {
+    final key = encoded([
+      session.platform.key,
+      _currentId(session.platform),
+      session.familyId,
+      session.personalSpaceId,
+      session.rootId,
+      parent,
+      name.toLowerCase(),
+    ]);
+    final target = _writeTargets.putIfAbsent(key, _CloudWriteTarget.new);
+    target.users++;
+    return target.gate.run(action).whenComplete(() {
+      if (--target.users == 0) _writeTargets.remove(key);
+    });
+  });
   Future<BrowseSession> personal(
     CloudPlatform p, {
     String? accountId,
@@ -689,27 +722,56 @@ class CloudRepository {
   Future<RapidTransferResult> rapidTransfer(
     BrowseSession session,
     String parent,
-    RapidTransferFile file,
-  ) => withSession(session, () async {
-    require(
-      session.canManageFiles &&
-          connector(session.platform).canRapidTransferTo(session),
-      '目标网盘不支持秒传',
-    );
-    final owner = credential(session.platform);
-    return RequestScope.guarded(
-      () => connector(
-        session.platform,
-      ).rapidTransfer(session, parent, file, owner),
-      () {
-        ensureAvailable(session.platform);
-        require(
-          sessionCredential(session)?.updatedAt == owner.updatedAt,
-          '目标账号已变化，请重新打开文件列表',
-        );
-      },
-    );
-  });
+    RapidTransferFile file, {
+    Future<void> Function()? beforeWrite,
+    Future<void> Function(RapidTransferResult)? onSaved,
+    Future<void> Function()? onNotSubmitted,
+  }) => withWriteTarget(
+    session,
+    parent,
+    file.name,
+    () => withSession(session, () async {
+      require(
+        session.canManageFiles &&
+            connector(session.platform).canRapidTransferTo(session),
+        '目标网盘不支持秒传',
+      );
+      final owner = credential(session.platform);
+      return RequestScope.guarded(
+        () async {
+          final attempt = WriteRequestScope();
+          RapidTransferResult result;
+          try {
+            RequestScope.checkpoint();
+            await beforeWrite?.call();
+            RequestScope.checkpoint();
+            result = await attempt.run(
+              () => connector(
+                session.platform,
+              ).rapidTransfer(session, parent, file, owner),
+            );
+          } catch (error) {
+            if (!attempt.mayHaveWritten ||
+                error is RapidTransferUnavailable && !error.mayHaveSaved) {
+              await onNotSubmitted?.call();
+            }
+            rethrow;
+          }
+          // Keep a received acknowledgement even if cancellation followed it.
+          await onSaved?.call(result);
+          RequestScope.checkpoint();
+          return result;
+        },
+        () {
+          ensureAvailable(session.platform);
+          require(
+            sessionCredential(session)?.updatedAt == owner.updatedAt,
+            '目标账号已变化，请重新打开文件列表',
+          );
+        },
+      );
+    }),
+  );
 
   Future<BrowseSession> reopenTransferSource(BrowseSession previous) =>
       withSession(previous, () async {
@@ -738,56 +800,88 @@ class CloudRepository {
     String parent,
     UploadFile source, {
     UploadProgressCallback? onProgress,
-  }) => _writeFile(session, parent, source.name, (provider, account) {
-    require(provider.canUploadTo(session, parent), '当前目录不支持上传，请先进入代码目录或发布附件');
-    return provider.upload(
-      session,
-      parent,
-      source.guarded(RequestScope.checkpoint),
-      account,
-      onProgress: onProgress,
-    );
-  });
+    Future<void> Function()? beforeWrite,
+    Future<void> Function(CloudFile)? onSaved,
+    Future<void> Function()? onNotSubmitted,
+    Future<void> Function(String)? onAcceptedId,
+  }) => _writeFile(
+    session,
+    parent,
+    source.name,
+    (provider, account) {
+      require(provider.canUploadTo(session, parent), '当前目录不支持上传，请先进入代码目录或发布附件');
+      return provider.upload(
+        session,
+        parent,
+        source.guarded(RequestScope.checkpoint),
+        account,
+        onProgress: onProgress,
+      );
+    },
+    beforeWrite: beforeWrite,
+    onSaved: onSaved,
+    onNotSubmitted: onNotSubmitted,
+    onAcceptedId: onAcceptedId,
+  );
 
   Future<CloudFile> _writeFile(
     BrowseSession session,
     String parent,
     String name,
-    Future<CloudFile> Function(CloudConnector, Credential) action,
-  ) => withSession(session, () async {
-    require(session.canManageFiles, '请在个人网盘中执行此操作');
-    require(
-      name.trim().isNotEmpty &&
-          name != '.' &&
-          name != '..' &&
-          !RegExp(r'[/\\\x00-\x1f\x7f]').hasMatch(name),
-      '文件或文件夹名称无效',
-    );
-    final account = credential(session.platform),
-        provider = connector(session.platform);
-    void guard() {
-      ensureAvailable(session.platform);
+    Future<CloudFile> Function(CloudConnector, Credential) action, {
+    Future<void> Function()? beforeWrite,
+    Future<void> Function(CloudFile)? onSaved,
+    Future<void> Function()? onNotSubmitted,
+    Future<void> Function(String)? onAcceptedId,
+  }) => withWriteTarget(
+    session,
+    parent,
+    name,
+    () => withSession(session, () async {
+      require(session.canManageFiles, '请在个人网盘中执行此操作');
       require(
-        vault.credential(session.platform)?.updatedAt == account.updatedAt,
-        '账号已变化，请重新打开文件列表',
+        name.trim().isNotEmpty &&
+            name != '.' &&
+            name != '..' &&
+            !RegExp(r'[/\\\x00-\x1f\x7f]').hasMatch(name),
+        '文件或文件夹名称无效',
       );
-    }
+      final account = credential(session.platform),
+          provider = connector(session.platform);
+      void guard() {
+        ensureAvailable(session.platform);
+        require(
+          vault.credential(session.platform)?.updatedAt == account.updatedAt,
+          '账号已变化，请重新打开文件列表',
+        );
+      }
 
-    return RequestScope.guarded(() async {
-      RequestScope.checkpoint();
-      final existing = await provider.list(session, parent, account);
-      require(
-        !existing.any(
-          (entry) => entry.name.toLowerCase() == name.toLowerCase(),
-        ),
-        '目录中已有同名项目，请更改名称后重试',
-      );
-      RequestScope.checkpoint();
-      final result = await action(provider, account);
-      RequestScope.checkpoint();
-      return result;
-    }, guard);
-  });
+      return RequestScope.guarded(() async {
+        RequestScope.checkpoint();
+        final existing = await provider.list(session, parent, account);
+        require(
+          !existing.any(
+            (entry) => entry.name.toLowerCase() == name.toLowerCase(),
+          ),
+          '目录中已有同名项目，请更改名称后重试',
+        );
+        final attempt = WriteRequestScope(onAcceptedId: onAcceptedId);
+        CloudFile result;
+        try {
+          RequestScope.checkpoint();
+          await beforeWrite?.call();
+          RequestScope.checkpoint();
+          result = await attempt.run(() => action(provider, account));
+        } catch (_) {
+          if (!attempt.mayHaveWritten) await onNotSubmitted?.call();
+          rethrow;
+        }
+        await onSaved?.call(result);
+        RequestScope.checkpoint();
+        return result;
+      }, guard);
+    }),
+  );
 
   BrowseSession _bindNewDownloadSession(BrowseSession session) {
     // A share opened before login is pinned to an empty owner. New downloads

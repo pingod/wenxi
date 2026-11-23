@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import '../core/json.dart';
+import '../core/operation_progress.dart';
 import '../data/cloud_repository.dart';
 import '../data/http.dart';
 import '../data/state_store.dart';
@@ -32,6 +33,21 @@ class _EntrySlot {
   bool acquired = false;
 }
 
+class CrossTransferCleanupResult {
+  CrossTransferCleanupResult({
+    required List<String> succeeded,
+    required Map<String, Object> failed,
+    required List<String> skipped,
+    required this.cancelled,
+  }) : succeeded = List.unmodifiable(succeeded),
+       failed = Map.unmodifiable(failed),
+       skipped = List.unmodifiable(skipped);
+
+  final List<String> succeeded, skipped;
+  final Map<String, Object> failed;
+  final bool cancelled;
+}
+
 class RapidTransferManager extends ChangeNotifier {
   RapidTransferManager({
     required this.cloud,
@@ -40,6 +56,7 @@ class RapidTransferManager extends ChangeNotifier {
     this.confirmDownload,
     this.foreground,
     this.concurrent,
+    this.confirmationWait = RequestScope.wait,
   });
   final CloudRepository cloud;
   final StateStore store;
@@ -47,6 +64,7 @@ class RapidTransferManager extends ChangeNotifier {
   final Future<void> Function()? confirmDownload;
   final Future<void> Function()? foreground;
   final int Function()? concurrent;
+  final Future<void> Function(Duration) confirmationWait;
   final _zone = Zone.current, _commands = AsyncGate(), _writes = AsyncGate();
   final _tasks = <RapidTransferTask>[];
   final _reopen = <String>{};
@@ -108,6 +126,11 @@ class RapidTransferManager extends ChangeNotifier {
         for (final entry in t.entries) {
           validateTransferName(entry.file.name);
           entry.path.forEach(validateTransferName);
+          if (entry.confirmationPending && entry.submittedParent.isEmpty) {
+            entry.submittedParent = entry.path.isEmpty
+                ? t.parent
+                : t.directories[encoded(entry.path)] ?? '';
+          }
         }
         for (final folder in t.folders) {
           folder.forEach(validateTransferName);
@@ -331,21 +354,24 @@ class RapidTransferManager extends ChangeNotifier {
     await _running[id]?.done.future;
   }
 
+  String _targetKey(RapidTransferTask task, String parent, String name) =>
+      encoded([
+        task.target.platform.key,
+        task.target.accountId,
+        task.target.familyId,
+        task.target.personalSpaceId,
+        task.target.rootId,
+        parent,
+        name.toLowerCase(),
+      ]);
+
   Future<T> _withTarget<T>(
     RapidTransferTask task,
     String parent,
     String name,
     Future<T> Function() action,
   ) async {
-    final key = encoded([
-      task.target.platform.key,
-      task.target.accountId,
-      task.target.familyId,
-      task.target.personalSpaceId,
-      task.target.rootId,
-      parent,
-      name.toLowerCase(),
-    ]);
+    final key = _targetKey(task, parent, name);
     final target = _targets.putIfAbsent(key, _TargetGate.new);
     target.users++;
     final entered = Completer<void>();
@@ -355,7 +381,7 @@ class RapidTransferManager extends ChangeNotifier {
           started = true;
           entered.complete();
           RequestScope.checkpoint();
-          return action();
+          return cloud.withWriteTarget(task.target, parent, name, action);
         })
         .whenComplete(() {
           if (--target.users == 0) _targets.remove(key);
@@ -386,14 +412,20 @@ class RapidTransferManager extends ChangeNotifier {
     final sourceOwner = cloud.sessionCredential(t.source)?.updatedAt;
     final targetOwner = cloud.sessionCredential(t.target)?.updatedAt;
     Future<void>? downloadConfirmation;
-    final speeds = <RapidTransferEntry, int>{};
-    void setSpeed(RapidTransferEntry entry, int value) {
-      if (value > 0) {
-        speeds[entry] = value;
-      } else {
-        speeds.remove(entry);
-      }
-      t.speed = speeds.values.fold(0, (sum, speed) => sum + speed);
+    final downloadSpeeds = <RapidTransferEntry, int>{};
+    final uploadSpeeds = <RapidTransferEntry, int>{};
+    void setSpeed(RapidTransferEntry entry, int value, {bool upload = false}) {
+      entry.downloadSpeed = upload ? 0 : value;
+      entry.uploadSpeed = upload ? value : 0;
+      downloadSpeeds.remove(entry);
+      uploadSpeeds.remove(entry);
+      if (value > 0) (upload ? uploadSpeeds : downloadSpeeds)[entry] = value;
+      t.downloadSpeed = downloadSpeeds.values.fold(
+        0,
+        (sum, speed) => sum + speed,
+      );
+      t.uploadSpeed = uploadSpeeds.values.fold(0, (sum, speed) => sum + speed);
+      t.speed = t.downloadSpeed + t.uploadSpeed;
     }
 
     void guard() {
@@ -494,18 +526,42 @@ class RapidTransferManager extends ChangeNotifier {
             await _transferEntries(t, scope, (entry) async {
               guard();
               final speedClock = Stopwatch();
-              var speedBytes = 0;
-              void progress(int bytes) {
+              int? speedBytes;
+              var lastProgressPaint = -250;
+              void progress(
+                int bytes, {
+                bool upload = false,
+                bool force = false,
+              }) {
                 final elapsed = speedClock.elapsedMilliseconds;
-                if (elapsed < 250) return;
-                setSpeed(
-                  entry,
-                  ((bytes - speedBytes).clamp(0, bytes) * 1000 / elapsed)
-                      .round(),
-                );
-                speedBytes = bytes;
-                speedClock.reset();
-                notifyListeners();
+                // A first snapshot may include a large resumed download. A
+                // rollback on retry also starts a new sample, never new bytes.
+                if (speedBytes == null || bytes < speedBytes!) {
+                  speedBytes = bytes;
+                  speedClock.reset();
+                  setSpeed(entry, 0);
+                } else if (elapsed >= 250) {
+                  setSpeed(
+                    entry,
+                    ((bytes - speedBytes!) * 1000 / elapsed).round(),
+                    upload: upload,
+                  );
+                  speedBytes = bytes;
+                  speedClock.reset();
+                }
+                final now = DateTime.now().millisecondsSinceEpoch;
+                if (force || now - lastProgressPaint >= 150) {
+                  lastProgressPaint = now;
+                  notifyListeners();
+                }
+              }
+
+              void resetProgress() {
+                speedBytes = null;
+                speedClock
+                  ..reset()
+                  ..start();
+                setSpeed(entry, 0);
               }
 
               try {
@@ -532,7 +588,114 @@ class RapidTransferManager extends ChangeNotifier {
                 );
                 final parent = await destination(entry.path);
                 await _withTarget(t, parent, entry.file.name, () async {
-                  final existing = await cloud.list(t.target, parent);
+                  require(
+                    entry.submittedParent.isEmpty ||
+                        entry.submittedParent == parent,
+                    '上次上传的目标目录已变化，请检查原目录后再继续',
+                  );
+                  final targetKey = _targetKey(t, parent, entry.file.name);
+                  final reconcile =
+                      entry.confirmationPending ||
+                      entry.submitted && entry.fileId.isNotEmpty;
+                  require(
+                    reconcile ||
+                        !_tasks.any(
+                          (other) => other.entries.any(
+                            (previous) =>
+                                !identical(previous, entry) &&
+                                previous.confirmationPending &&
+                                !previous.succeeded &&
+                                previous.submittedParent.isNotEmpty &&
+                                _targetKey(
+                                      other,
+                                      previous.submittedParent,
+                                      previous.file.name,
+                                    ) ==
+                                    targetKey,
+                          ),
+                        ),
+                    '同名文件的上次传输仍待确认，请先继续原任务',
+                  );
+                  var existing = await cloud.list(t.target, parent);
+                  guard();
+                  CloudFile? acknowledged(List<CloudFile> files) {
+                    final matches = files.where((remote) {
+                      if (remote.isDirectory ||
+                          t.target.platform.exactFileSize &&
+                              remote.size != entry.size) {
+                        return false;
+                      }
+                      final kind = remote.hashType?.toLowerCase().replaceAll(
+                        '-',
+                        '',
+                      );
+                      final digest = remote.hashValue?.trim().toLowerCase();
+                      final expected = kind == 'md5'
+                          ? contentMd5(entry.md5)
+                          : kind == 'sha1' &&
+                                RegExp(r'^[0-9a-f]{40}$').hasMatch(entry.sha1)
+                          ? entry.sha1
+                          : null;
+                      if (expected != null && digest != expected) return false;
+                      if (entry.fileId.isNotEmpty) {
+                        return remote.id == entry.fileId;
+                      }
+                      return remote.name.toLowerCase() ==
+                              entry.file.name.toLowerCase() &&
+                          expected != null;
+                    }).toList();
+                    return matches.length == 1 ? matches.single : null;
+                  }
+
+                  bool hasSameName(List<CloudFile> files) => files.any(
+                    (f) =>
+                        f.name.toLowerCase() == entry.file.name.toLowerCase(),
+                  );
+                  if (reconcile) {
+                    entry.checkingTarget = true;
+                    entry.status = RapidEntryStatus.processing;
+                    entry.message = '正在确认上次上传结果';
+                    resetProgress();
+                    notifyListeners();
+                    for (var attempt = 0; attempt < 8; attempt++) {
+                      final saved = acknowledged(existing);
+                      if (saved != null) {
+                        entry.status = entry.method == CrossTransferMethod.relay
+                            ? RapidEntryStatus.uploaded
+                            : RapidEntryStatus.reused;
+                        entry.fileId = saved.id;
+                        entry.confirmationPending = false;
+                        entry.message = '已确认上次传输文件';
+                        break;
+                      }
+                      if (hasSameName(existing)) {
+                        // A same-name item without a receipt or matching hash
+                        // cannot prove success. Skip it without another write.
+                        entry.status = RapidEntryStatus.duplicate;
+                        entry.confirmationPending = false;
+                        entry.message = '目标已有同名项目，已停止重复上传';
+                        break;
+                      }
+                      if (attempt + 1 < 8) {
+                        await confirmationWait(
+                          const Duration(milliseconds: 750),
+                        );
+                        guard();
+                        existing = await cloud.list(t.target, parent);
+                        guard();
+                      }
+                    }
+                    if (entry.confirmationPending ||
+                        !entry.succeeded &&
+                            entry.status != RapidEntryStatus.duplicate) {
+                      entry.confirmationPending = true;
+                      throw const AppException('上次上传结果仍待确认，请稍后继续；暂不重复上传');
+                    }
+                    entry.checkingTarget = false;
+                    await _save();
+                    notifyListeners();
+                    return;
+                  }
                   final same = existing
                       .where(
                         (f) =>
@@ -584,7 +747,6 @@ class RapidTransferManager extends ChangeNotifier {
                     if (rapid && hash != null) {
                       entry.md5 = hash;
                       entry.method = CrossTransferMethod.rapid;
-                      entry.submitted = true;
                       await _save();
                       final result = await cloud.rapidTransfer(
                         t.target,
@@ -594,6 +756,24 @@ class RapidTransferManager extends ChangeNotifier {
                           size: entry.file.size,
                           md5: hash,
                         ),
+                        beforeWrite: () async {
+                          guard();
+                          entry.submitted = true;
+                          entry.confirmationPending = true;
+                          entry.submittedParent = parent;
+                          await _save();
+                        },
+                        onSaved: (result) async {
+                          entry.fileId = result.fileId ?? '';
+                          entry.confirmationPending = result.reused;
+                          if (!result.reused) entry.submitted = false;
+                          await _save();
+                        },
+                        onNotSubmitted: () async {
+                          entry.submitted = false;
+                          entry.confirmationPending = false;
+                          await _save();
+                        },
                       );
                       guard();
                       if (result.reused) {
@@ -606,6 +786,7 @@ class RapidTransferManager extends ChangeNotifier {
                           hashValue: hash,
                         );
                         entry.status = RapidEntryStatus.reused;
+                        entry.confirmationPending = false;
                         entry.message = '秒传成功';
                       }
                     }
@@ -623,14 +804,13 @@ class RapidTransferManager extends ChangeNotifier {
                       guard();
                       entry.method = CrossTransferMethod.relay;
                       entry.submitted = false;
+                      entry.confirmationPending = false;
                       entry.status = RapidEntryStatus.downloading;
-                      if (!entry.payloadReady) entry.downloaded = 0;
+                      entry.downloadVerifying = false;
                       entry.sent = 0;
+                      entry.uploadPhase = UploadPhase.preparing;
                       entry.message = '秒传不可用，正在下载后上传';
-                      speedBytes = 0;
-                      speedClock
-                        ..reset()
-                        ..start();
+                      resetProgress();
                       await _save();
                       notifyListeners();
                       saved = await relay.transfer(
@@ -644,14 +824,32 @@ class RapidTransferManager extends ChangeNotifier {
                                 ? contentMd5(entry.file.hashValue)
                                 : null),
                         onProgress: (received, total) {
-                          entry.downloaded = received;
-                          entry.transferSize = total;
+                          guard();
+                          entry.payloadReady = false;
+                          entry.transferSize = total.clamp(0, 1 << 62);
+                          entry.downloaded = received.clamp(
+                            0,
+                            entry.size > 0 ? entry.size : 1 << 62,
+                          );
+                          entry.downloadVerifying = false;
                           progress(received);
                         },
+                        onVerifying: () {
+                          guard();
+                          entry.payloadReady = false;
+                          entry.downloadVerifying = true;
+                          entry.message = '正在校验中转文件';
+                          resetProgress();
+                          notifyListeners();
+                        },
                         upload: (file, digest) async {
+                          guard();
                           entry.payloadReady = true;
+                          entry.downloadVerifying = false;
                           entry.downloaded = file.size;
                           entry.transferSize = file.size;
+                          resetProgress();
+                          notifyListeners();
                           await _save();
                           guard();
                           final fresh = (await cloud.list(
@@ -672,32 +870,60 @@ class RapidTransferManager extends ChangeNotifier {
                             '来源文件已变化，请重新选择',
                           );
                           entry.status = RapidEntryStatus.uploading;
+                          entry.uploadPhase = UploadPhase.preparing;
                           entry.message = '下载完成，正在上传';
                           entry.md5 = digest;
+                          entry.sha1 = file.verifiedHashes['sha1'] ?? '';
                           entry.transferSize = file.size;
-                          entry.submitted = true;
-                          speedBytes = 0;
-                          speedClock.reset();
-                          setSpeed(entry, 0);
+                          resetProgress();
                           await _save();
                           notifyListeners();
                           return cloud.upload(
                             t.target,
                             parent,
                             file,
+                            beforeWrite: () async {
+                              guard();
+                              entry.submitted = true;
+                              entry.confirmationPending = true;
+                              entry.submittedParent = parent;
+                              await _save();
+                            },
+                            onSaved: (saved) async {
+                              entry.fileId = saved.id;
+                              await _save();
+                            },
+                            onAcceptedId: (id) async {
+                              entry.fileId = id;
+                              await _save();
+                            },
+                            onNotSubmitted: () async {
+                              entry.submitted = false;
+                              entry.confirmationPending = false;
+                              await _save();
+                            },
                             onProgress: (p) {
+                              guard();
+                              final changed = entry.uploadPhase != p.phase;
+                              if (changed) resetProgress();
+                              entry.uploadPhase = p.phase;
                               entry.sent = p.phase == UploadPhase.preparing
                                   ? 0
-                                  : p.sent;
+                                  : p.sent.clamp(0, file.size);
                               entry.message = p.phase == UploadPhase.preparing
                                   ? '正在准备上传'
                                   : p.phase == UploadPhase.finishing
                                   ? '正在确认保存'
                                   : '正在上传';
                               if (p.phase == UploadPhase.uploading) {
-                                progress(p.sent);
+                                progress(
+                                  entry.sent,
+                                  upload: true,
+                                  force: changed,
+                                );
                               } else {
                                 setSpeed(entry, 0);
+                                if (changed) notifyListeners();
                               }
                             },
                           );
@@ -705,6 +931,9 @@ class RapidTransferManager extends ChangeNotifier {
                       );
                       guard();
                       entry.status = RapidEntryStatus.uploaded;
+                      entry.confirmationPending = false;
+                      entry.sent = entry.size;
+                      entry.uploadPhase = UploadPhase.finishing;
                       entry.message = '下载后上传完成';
                     }
                     entry.fileId = saved!.id;
@@ -728,12 +957,16 @@ class RapidTransferManager extends ChangeNotifier {
                 entry.status = RapidEntryStatus.failed;
                 entry.message = e is AppException ? e.message : '跨盘传输失败，请稍后重试';
               } finally {
+                entry.downloadVerifying = false;
+                entry.checkingTarget = false;
                 setSpeed(entry, 0);
               }
               await _save();
               notifyListeners();
               await RequestScope.wait(const Duration(milliseconds: 150));
             });
+            guard();
+            await relay.clearEmptyTask(t.id);
             guard();
             t.status = RapidTaskStatus.completed;
           }, guard),
@@ -747,7 +980,15 @@ class RapidTransferManager extends ChangeNotifier {
         t.error = e is AppException ? e.message : '跨盘传输中断，请稍后继续';
       }
     } finally {
-      t.speed = 0;
+      t.speed = t.downloadSpeed = t.uploadSpeed = 0;
+      try {
+        await RequestScope().run(
+          () => relay.clearEmptyTask(t.id),
+          inheritGuard: false,
+        );
+      } catch (e, s) {
+        DiagnosticLog.error('cross_transfer.cache_cleanup', e, s);
+      }
       await _save();
       notifyListeners();
       if (t.succeeded > 0) completions.add(t);
@@ -851,8 +1092,13 @@ class RapidTransferManager extends ChangeNotifier {
           e.status == RapidEntryStatus.noHash) {
         e.status = RapidEntryStatus.pending;
         e.message = '';
-        if (!e.payloadReady) e.downloaded = 0;
-        e.sent = 0;
+        if (!e.confirmationPending) {
+          e.sent = 0;
+          e.uploadPhase = UploadPhase.preparing;
+        }
+        e.downloadVerifying = false;
+        e.checkingTarget = false;
+        e.downloadSpeed = e.uploadSpeed = 0;
       }
     }
     _reopen.add(t.id);
@@ -889,16 +1135,123 @@ class RapidTransferManager extends ChangeNotifier {
     await _save();
     notifyListeners();
   });
-  Future<void> clearFailed() => _commands.run(() async {
-    for (final t in List.of(_tasks.where((t) => !t.active && t.canRetry))) {
-      await _waitForRun(t.id);
-      await relay.clearTask(t.id);
-      _tasks.remove(t);
-      _reopen.remove(t.id);
-    }
-    await _save();
-    notifyListeners();
-  });
+  Future<CrossTransferCleanupResult> clearFailed({Iterable<String>? ids}) {
+    // Capture the selection before queueing; later failures need a new request.
+    final selected =
+        (ids ?? _tasks.where((t) => !t.active && t.canRetry).map((t) => t.id))
+            .toSet()
+            .toList(growable: false);
+    final succeeded = <String>[], skipped = <String>[];
+    final failed = <String, Object>{};
+    var processed = 0, cancelled = false;
+
+    bool stopped() => _closed || RequestScope.current?.isCancelled == true;
+    void report([OperationStage? activity]) => OperationProgress.reportItems((
+      processed: processed,
+      total: selected.length,
+      succeeded: succeeded.length,
+      failed: failed.length,
+      skipped: skipped.length,
+      activity: activity,
+    ));
+
+    return OperationProgress.step(
+      OperationStage.deleteCrossTransfers,
+      () {
+        report(OperationStage.waitDownloadOperation);
+        return _commands.run(() async {
+          for (final id in selected) {
+            if (stopped()) {
+              cancelled = true;
+              break;
+            }
+            RequestScope.checkpoint();
+            final t = task(id);
+            if (t == null || t.active || !t.canRetry) {
+              skipped.add(id);
+              processed++;
+              report();
+              continue;
+            }
+            var deleting = false;
+            try {
+              report(OperationStage.stopCrossTransfers);
+              // Cancelling this wait releases the command queue without
+              // deleting caches that an old execution may still be writing.
+              await RequestScope.cancellable(_waitForRun(id));
+              if (stopped()) {
+                cancelled = true;
+                break;
+              }
+              RequestScope.checkpoint();
+              if (task(id) != t || t.active || !t.canRetry) {
+                skipped.add(id);
+              } else {
+                report(OperationStage.deleteFiles);
+                deleting = true;
+                // Once deletion starts, settle its IO and record save even if
+                // the dialog is cancelled. Do not begin the next deletion.
+                await RequestScope().run(() async {
+                  await relay.clearTask(id);
+                  await _writes.run(() async {
+                    // Commit before changing the visible list; an unsuccessful
+                    // state write must leave a retryable task record in place.
+                    await store.put('rapidTransferTasks', [
+                      for (final remaining in _tasks)
+                        if (!identical(remaining, t)) remaining.toJson(),
+                    ]);
+                    _tasks.remove(t);
+                    _reopen.remove(id);
+                    _queued.remove(id);
+                    if (!_closed) notifyListeners();
+                  });
+                }, inheritGuard: false);
+                succeeded.add(id);
+              }
+            } catch (error, stack) {
+              if (!deleting && stopped()) {
+                cancelled = true;
+                break;
+              }
+              failed[id] = error;
+              DiagnosticLog.error(
+                'cross_transfer.task_cleanup_failed',
+                error,
+                stack,
+                fields: {'ref': DiagnosticLog.reference(id)},
+              );
+            }
+            processed++;
+            report();
+          }
+          cancelled |= stopped();
+          report();
+          DiagnosticLog.event(
+            'cross_transfer.task_cleanup',
+            fields: {
+              'total': selected.length,
+              'succeeded': succeeded.length,
+              'failed': failed.length,
+              'skipped': skipped.length,
+              'cancelled': cancelled,
+            },
+          );
+          return CrossTransferCleanupResult(
+            succeeded: succeeded,
+            failed: failed,
+            skipped: skipped,
+            cancelled: cancelled,
+          );
+        });
+      },
+      statusForResult: (result) => result.cancelled
+          ? OperationStepStatus.cancelled
+          : result.failed.isNotEmpty
+          ? OperationStepStatus.failed
+          : OperationStepStatus.completed,
+    );
+  }
+
   Future<void> remove(String id) => _commands.run(() async {
     require(task(id)?.active != true, '请先停止任务');
     await _waitForRun(id);

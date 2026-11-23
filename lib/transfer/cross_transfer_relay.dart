@@ -105,7 +105,16 @@ class CrossTransferRelay {
     await _discardDownload(entry);
     await _delete(entry);
     // Another file in this batch may create its cache after an emptiness check.
-    // Only clearTask, after all workers settle, may remove the parent directory.
+    // Remove the parent directory only after all file workers have settled.
+  }
+
+  /// Call only after all file workers in this batch have settled.
+  Future<void> clearEmptyTask(String taskId) async {
+    final directory = _taskDirectory(taskId);
+    if (await directory.exists() &&
+        await directory.list(followLinks: false).isEmpty) {
+      await _delete(directory);
+    }
   }
 
   Future<void> _initialize(Iterable<String>? retainedTaskIds) async {
@@ -139,6 +148,7 @@ class CrossTransferRelay {
     required String entryId,
     required String? expectedMd5,
     required void Function(int received, int total) onProgress,
+    void Function()? onVerifying,
     required Future<T> Function(UploadFile file, String md5) upload,
   }) async {
     RequestScope.checkpoint();
@@ -156,6 +166,7 @@ class CrossTransferRelay {
     try {
       if (await metadata.exists() && await payload.exists()) {
         try {
+          onVerifying?.call();
           final saved = asJson(jsonDecode(await metadata.readAsString()));
           require(
             await FileSystemEntity.type(payload.path, followLinks: false) ==
@@ -236,6 +247,7 @@ class CrossTransferRelay {
                 return refreshed;
               },
             );
+        onVerifying?.call();
         final hashes = await _hashPayload(payload, spec!, expectedMd5);
         digest = hashes.$1;
         sha1Digest = hashes.$2;

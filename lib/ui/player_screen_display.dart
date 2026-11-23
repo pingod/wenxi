@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../domain/playback.dart';
@@ -98,14 +99,72 @@ class PlayerScreenDisplay extends StatefulWidget {
     this.television = false,
     this.now = DateTime.now,
     this.insets = EdgeInsets.zero,
+    this.cutouts = const [],
   });
   final PlaybackController controller;
   final bool television;
   final DateTime Function() now;
   final EdgeInsets insets;
+  final List<Rect> cutouts;
 
   @override
   State<PlayerScreenDisplay> createState() => _PlayerScreenDisplayState();
+}
+
+class _ScreenCornerLayout extends SingleChildLayoutDelegate {
+  const _ScreenCornerLayout({required this.alignment, required this.cutouts});
+  final Alignment alignment;
+  final List<Rect> cutouts;
+
+  @override
+  BoxConstraints getConstraintsForChild(BoxConstraints constraints) =>
+      constraints.loosen();
+
+  @override
+  Offset getPositionForChild(Size size, Size childSize) {
+    final available = Offset(
+      math.max(0, size.width - childSize.width),
+      math.max(0, size.height - childSize.height),
+    );
+    final anchor = alignment.alongOffset(available);
+    final obstacles = [
+      for (final rect in cutouts)
+        if (!rect.isEmpty) rect.inflate(4),
+    ];
+    bool clear(Offset position) =>
+        !obstacles.any((rect) => rect.overlaps(position & childSize));
+    if (clear(anchor)) return anchor;
+
+    // Search only positions that stay within this corner's area. Measure the
+    // displayed child after wrapping/scaling, rather than the large area that
+    // is reserved for it, and move only when the text would touch a cutout.
+    final xs = {anchor.dx}, ys = {anchor.dy};
+    for (final rect in obstacles) {
+      for (final x in [rect.left - childSize.width, rect.right]) {
+        if (x >= 0 && x <= available.dx) xs.add(x);
+      }
+      for (final y in [rect.top - childSize.height, rect.bottom]) {
+        if (y >= 0 && y <= available.dy) ys.add(y);
+      }
+    }
+    var closest = anchor, distance = double.infinity;
+    for (final x in xs) {
+      for (final y in ys) {
+        final candidate = Offset(x, y);
+        final delta = (candidate - anchor).distanceSquared;
+        if (delta < distance && clear(candidate)) {
+          closest = candidate;
+          distance = delta;
+        }
+      }
+    }
+    return closest;
+  }
+
+  @override
+  bool shouldRelayout(_ScreenCornerLayout oldDelegate) =>
+      alignment != oldDelegate.alignment ||
+      !listEquals(cutouts, oldDelegate.cutouts);
 }
 
 class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
@@ -406,6 +465,7 @@ class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
                       context,
                       'top-left',
                       {'title', 'resolution'},
+                      bounds: bounds,
                       left: horizontal,
                       top: vertical,
                       width: math.min(tv ? 440 : 300, columnWidth),
@@ -415,6 +475,7 @@ class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
                       context,
                       'top-right',
                       {'time'},
+                      bounds: bounds,
                       right: horizontal,
                       top: vertical,
                       width: math.min(tv ? 240 : 170, columnWidth),
@@ -425,6 +486,7 @@ class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
                       context,
                       'bottom-left',
                       {'video', 'audio', 'media', 'progress'},
+                      bounds: bounds,
                       left: horizontal,
                       bottom: vertical,
                       width: math.min(tv ? 480 : 340, columnWidth),
@@ -434,6 +496,7 @@ class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
                       context,
                       'bottom-right',
                       {'parameters', 'buffer', 'dropped', 'network'},
+                      bounds: bounds,
                       right: horizontal,
                       bottom: vertical,
                       width: math.min(tv ? 460 : 320, columnWidth),
@@ -451,7 +514,9 @@ class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
   );
 
   // Anchor to the full player viewport, including letterboxing. Only device
-  // safe insets affect the corners; video fit and transforms do not.
+  // continuous edge insets affect every corner. Individual cutouts are checked
+  // against the actual text bounds so a camera in the middle of an edge does
+  // not reserve that entire edge.
   Rect _screenBounds(Size viewport) {
     final insets = widget.insets;
     return (Offset.zero & viewport).intersect(
@@ -468,6 +533,7 @@ class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
     BuildContext context,
     String id,
     Set<String> fields, {
+    required Rect bounds,
     double? left,
     double? right,
     double? top,
@@ -486,6 +552,10 @@ class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
     final background =
         widget.controller.preferences.screenDisplay.style ==
         PlaybackScreenStyle.background;
+    final origin = Offset(
+      bounds.left + (left ?? bounds.width - right! - width),
+      bounds.top + (top ?? bounds.height - bottom! - height),
+    );
     return Positioned(
       left: left,
       right: right,
@@ -493,8 +563,11 @@ class _PlayerScreenDisplayState extends State<PlayerScreenDisplay>
       bottom: bottom,
       width: width,
       height: height,
-      child: Align(
-        alignment: alignment,
+      child: CustomSingleChildLayout(
+        delegate: _ScreenCornerLayout(
+          alignment: alignment,
+          cutouts: [for (final rect in widget.cutouts) rect.shift(-origin)],
+        ),
         child: FittedBox(
           fit: BoxFit.scaleDown,
           alignment: alignment,

@@ -132,8 +132,9 @@ abstract class PlaybackBackend extends ChangeNotifier {
     Size viewport,
     double pixelRatio,
     BoxFit fit,
-    double scale,
-  ) {}
+    double scale, {
+    bool stableOrientation = false,
+  }) {}
   Future<void> initialize() async {}
   Future<void> setSubtitlePresentation({
     required double size,
@@ -315,9 +316,12 @@ class MediaKitBackend extends PlaybackBackend {
   Object? _sampledVideoFormat;
   final Map<String, String> _subtitleProperties = {};
   PlaybackDropPolicy _dropPolicy = PlaybackDropPolicy();
-  Size? _renderViewport, _renderSize;
+  Size? _renderViewport, _renderSize, _renderTarget;
   double _renderPixelRatio = 1, _renderScale = 1;
   BoxFit _renderFit = BoxFit.contain;
+  bool _renderStableOrientation = false;
+  bool _renderUpdating = false;
+  int _renderRevision = 0;
   Timer? _renderTimer;
   bool _copyDecoder = false;
   final _diagnostics = PlaybackDiagnostics();
@@ -759,12 +763,14 @@ class MediaKitBackend extends PlaybackBackend {
     Size viewport,
     double pixelRatio,
     BoxFit fit,
-    double scale,
-  ) {
+    double scale, {
+    bool stableOrientation = false,
+  }) {
     _renderViewport = viewport;
     _renderPixelRatio = pixelRatio;
     _renderFit = fit;
     _renderScale = scale;
+    _renderStableOrientation = stableOrientation;
     _scheduleRenderSize();
   }
 
@@ -781,33 +787,68 @@ class MediaKitBackend extends PlaybackBackend {
       return;
     }
     final geometry = videoGeometry;
-    if (geometry == null) return;
-    final target = playbackRenderSize(
-      source: Size(geometry.width.toDouble(), geometry.height.toDouble()),
-      viewport: _renderViewport!,
-      pixelRatio: _renderPixelRatio,
-      fit: _renderFit,
-      scale: _renderScale,
-      quality: _dropPolicy.downgraded ? .75 : 1,
-    );
-    if (target == null || target == _renderSize) return;
+    final target = geometry == null
+        ? null
+        : playbackRenderSize(
+            source: Size(geometry.width.toDouble(), geometry.height.toDouble()),
+            viewport: _renderViewport!,
+            pixelRatio: _renderPixelRatio,
+            fit: _renderFit,
+            scale: _renderScale,
+            quality: _dropPolicy.downgraded ? .75 : 1,
+            stableOrientation:
+                defaultTargetPlatform == TargetPlatform.android &&
+                _renderStableOrientation,
+          );
+    // Repeated player notifications must not postpone the same pending size.
+    // Returning to the applied size also cancels an obsolete queued resize.
+    if (target == _renderTarget) return;
+    _renderTarget = target;
+    _renderRevision++;
     _renderTimer?.cancel();
+    _renderTimer = null;
+    if (target == null || target == _renderSize) return;
+    _queueRenderSize();
+  }
+
+  void _queueRenderSize() {
+    final revision = _renderRevision, target = _renderTarget;
+    if (_closing || target == null) return;
     _renderTimer = Timer(const Duration(milliseconds: 200), () {
+      _renderTimer = null;
+      if (_closing || _renderUpdating) return;
+      _renderUpdating = true;
       unawaited(
-        _propertyGate.run(() async {
-          if (_closing) return;
-          try {
-            await _video!.setSize(
-              width: target.width.toInt(),
-              height: target.height.toInt(),
-            );
-            _renderSize = target;
-            _nativeMetrics['renderWidth'] = target.width.toInt();
-            _nativeMetrics['renderHeight'] = target.height.toInt();
-          } catch (e, stack) {
-            if (!_closing) DiagnosticLog.error('player.render_size', e, stack);
-          }
-        }),
+        _propertyGate
+            .run(() async {
+              if (_closing || revision != _renderRevision) return;
+              try {
+                await _video!.setSize(
+                  width: target.width.toInt(),
+                  height: target.height.toInt(),
+                );
+                _renderSize = target;
+                _nativeMetrics['renderWidth'] = target.width.toInt();
+                _nativeMetrics['renderHeight'] = target.height.toInt();
+              } catch (e, stack) {
+                if (revision == _renderRevision) _renderTarget = null;
+                if (!_closing) {
+                  DiagnosticLog.error('player.render_size', e, stack);
+                }
+              }
+            })
+            .whenComplete(() {
+              _renderUpdating = false;
+              // A native resize may already be running when the phone turns back.
+              // Apply the latest viewport after it completes, including when it
+              // returns to the size that was current before the resize started.
+              if (!_closing &&
+                  _renderTimer == null &&
+                  _renderTarget != null &&
+                  _renderTarget != _renderSize) {
+                _queueRenderSize();
+              }
+            }),
       );
     });
   }

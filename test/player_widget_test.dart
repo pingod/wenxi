@@ -88,11 +88,15 @@ class _SystemInsetsDevice extends FakePlaybackDevice {
   }
   final insets = <Size, EdgeInsets>{};
   final displayInsets = <Size, EdgeInsets>{};
+  final displayCutouts = <Size, List<Rect>>{};
   @override
   EdgeInsets? systemInsetsFor(MediaQueryData media) => insets[media.size];
   @override
   EdgeInsets screenDisplayInsetsFor(MediaQueryData media) =>
       displayInsets[media.size] ?? super.screenDisplayInsetsFor(media);
+  @override
+  List<Rect>? screenDisplayCutoutsFor(MediaQueryData media) =>
+      displayCutouts[media.size] ?? super.screenDisplayCutoutsFor(media);
 }
 
 class _ScreenshotActions extends PlayerScreenshotActions {
@@ -629,6 +633,110 @@ void main() {
     );
   }
 
+  for (final style in PlaybackScreenStyle.values) {
+    testWidgets(
+      'Full player keeps screenshot OSD corners with a central camera (${style.name})',
+      (tester) async {
+        const landscape = Size(904, 407), portrait = Size(407, 904);
+        final device = _SystemInsetsDevice()
+          ..insets[landscape] = const EdgeInsets.fromLTRB(44, 24, 20, 0)
+          ..insets[portrait] = const EdgeInsets.only(top: 36, bottom: 24)
+          ..displayInsets[landscape] = EdgeInsets.zero
+          ..displayInsets[portrait] = EdgeInsets.zero
+          ..displayCutouts[landscape] = const [Rect.fromLTWH(0, 183.5, 44, 40)]
+          ..displayCutouts[portrait] = const [Rect.fromLTWH(190, 0, 27, 36)];
+        final fixture = PlaybackFixture(
+          suppliedEntries: const [
+            PlaybackEntry(
+              id: 'film',
+              key: 'film',
+              name: '驴得水.Mr.Donkey.2016.2160p.WEB-DL.60fps.H265.10bit.AAC.mp4',
+              video: true,
+            ),
+          ],
+          data: {
+            'playbackPreferences': {
+              'screenDisplay': {
+                'enabled': true,
+                'style': style.name,
+                'items': [
+                  for (final item in PlaybackScreenItem.values) item.name,
+                ],
+              },
+            },
+          },
+        );
+        await render(
+          tester,
+          size: landscape,
+          suppliedFixture: fixture,
+          suppliedDevice: device,
+        );
+        fixture.current.videoSurface = true;
+        await tester.tapAt(const Offset(452, 180));
+        await tester.pumpAndSettle();
+
+        void checkCorners(Size size) {
+          expect(
+            tester.getRect(
+              find.byKey(const Key('player-screen-viewport-bounds')),
+            ),
+            Offset.zero & size,
+          );
+          for (final (id, expected) in [
+            ('top-left', Offset(12, size == portrait ? 40 : 12)),
+            ('top-right', Offset(size.width - 12, 12)),
+            ('bottom-left', Offset(12, size.height - 12)),
+            ('bottom-right', Offset(size.width - 12, size.height - 12)),
+          ]) {
+            final region = tester.getRect(
+              find.byKey(Key('player-screen-region-$id')),
+            );
+            final corner = switch (id) {
+              'top-left' => region.topLeft,
+              'top-right' => region.topRight,
+              'bottom-left' => region.bottomLeft,
+              _ => region.bottomRight,
+            };
+            expect((corner - expected).distance, lessThan(.01), reason: id);
+          }
+        }
+
+        checkCorners(landscape);
+        final backend = fixture.current;
+        await fixture.controller.updatePreferences(
+          fixture.controller.preferences.copyWith(
+            fit: PlaybackFit.cover,
+            videoScale: 1.4,
+            videoOffsetX: .3,
+          ),
+        );
+        await tester.pumpAndSettle();
+        checkCorners(landscape);
+        device.displayCutouts[landscape] = const [
+          Rect.fromLTWH(860, 183.5, 44, 40),
+        ];
+        device.notifyListeners();
+        await tester.pumpAndSettle();
+        checkCorners(landscape);
+        tester.view.physicalSize = portrait;
+        await tester.pumpAndSettle();
+        checkCorners(portrait);
+        tester.view.physicalSize = landscape;
+        await tester.pumpAndSettle();
+        checkCorners(landscape);
+        await tester.tapAt(const Offset(452, 180));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('player-screen-display')), findsNothing);
+        await tester.tapAt(const Offset(452, 180));
+        await tester.pumpAndSettle();
+        checkCorners(landscape);
+        expect(fixture.current, same(backend));
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
   testWidgets(
     'Screen corners use current Flutter padding without caching old bars',
     (tester) async {
@@ -953,6 +1061,28 @@ void main() {
       tester.widget<Slider>(horizontal).onChangeEnd!(.5);
       await tester.pumpAndSettle();
       expect(page.fixture.history.preferences.videoOffsetX, .5);
+      final rotation = find.byKey(const Key('player-video-rotation-slider'));
+      await scrollPanelTo(tester, rotation);
+      tester.widget<Slider>(rotation).onChanged!(35);
+      await tester.pump();
+      expect(controller.preferences.videoRotation, 35);
+      expect(page.fixture.history.preferences.videoRotation, 0);
+      final matrix = tester
+          .widget<Transform>(find.byKey(const Key('player-video-rotation')))
+          .transform;
+      expect(matrix.storage[0], closeTo(.819152, .000001));
+      expect(matrix.storage[1], closeTo(.573576, .000001));
+      tester.widget<Slider>(rotation).onChangeEnd!(35);
+      await tester.pumpAndSettle();
+      expect(page.fixture.history.preferences.videoRotation, 35);
+      final reset = find.byKey(const Key('player-video-transform-reset'));
+      await scrollPanelTo(tester, reset);
+      await tap(tester, reset);
+      expect(controller.preferences.videoScale, 1);
+      expect(controller.preferences.videoOffsetX, 0);
+      expect(controller.preferences.videoOffsetY, 0);
+      expect(controller.preferences.videoRotation, 0);
+      expect(page.fixture.history.preferences.videoRotation, 0);
       expect(fixture.current.lastFit, BoxFit.contain);
       expect(fixture.preparations, 1);
       expect(tester.takeException(), isNull);
@@ -1349,6 +1479,7 @@ void main() {
           videoScale: 1.5,
           videoOffsetX: .4,
           videoOffsetY: .2,
+          videoRotation: 35,
         ),
       );
       await openMenuAction(tester, find.byKey(const Key('player-pip')));
@@ -1393,6 +1524,7 @@ void main() {
       expect(backend.lastFit, BoxFit.cover);
       expect(backend.lastAspectRatio, 4 / 3);
       expect(result.fixture.controller.preferences.videoScale, 1.5);
+      expect(result.fixture.controller.preferences.videoRotation, 35);
       expect(tester.takeException(), isNull);
     },
   );
@@ -2193,17 +2325,34 @@ void main() {
     (tester) async {
       final page = await render(
         tester,
+        suppliedFixture: PlaybackFixture()
+          ..configureBackend = (backend) => backend.videoSurface = true,
         size: const Size(844, 390),
         suppliedDevice: FakePlaybackDevice()..supportsOrientation = true,
       );
       final backend = page.fixture.current;
       final position = backend.state.position;
       final preparations = page.fixture.preparations;
+      final plays = backend.plays, pauses = backend.pauses;
+      final surface = tester.element(
+        find.byKey(const Key('player-video-surface')),
+      );
       final rotation = find.byKey(const Key('player-fullscreen'));
       expect(find.byTooltip('竖屏'), findsOneWidget);
       await tester.tap(rotation);
       await tester.pump();
       expect(page.device.orientation, PlaybackOrientation.portrait);
+      expect(find.byKey(const Key('player-layout-cover')), findsNothing);
+      expect(find.byType(AppLoadingIndicator), findsNothing);
+      expect(find.byKey(const Key('player-captions')), findsOneWidget);
+      expect(
+        tester.element(find.byKey(const Key('player-video-surface'))),
+        same(surface),
+      );
+      expect(backend.plays, plays);
+      expect(backend.pauses, pauses);
+      expect(backend.seeks, isEmpty);
+      expect(backend.stableRenderOrientation, isTrue);
       tester.view.physicalSize = const Size(390, 844);
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 120));
@@ -2418,7 +2567,7 @@ void main() {
   );
 
   testWidgets(
-    'Track headers rotate before autoplay and the cover waits for stable layout',
+    'Track headers prepare direction before autoplay and running rotation retains the frame',
     (tester) async {
       final fixture = PlaybackFixture(),
           device = FakePlaybackDevice()..supportsOrientation = true;
@@ -2455,12 +2604,92 @@ void main() {
       );
       await tester.pump();
       expect(device.orientation, PlaybackOrientation.portrait);
-      expect(find.byKey(const Key('player-layout-cover')), findsOneWidget);
+      expect(find.byKey(const Key('player-layout-cover')), findsNothing);
+      expect(find.byType(AppLoadingIndicator), findsNothing);
       tester.view.physicalSize = const Size(393, 864);
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 120));
       await tester.pump();
       expect(find.byKey(const Key('player-layout-cover')), findsNothing);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'A refused rotation keeps playing and paused video visible during the timeout',
+    (tester) async {
+      final fixture = PlaybackFixture()
+        ..configureBackend = (backend) => backend.videoSurface = true;
+      final page = await render(
+        tester,
+        suppliedFixture: fixture,
+        size: const Size(844, 390),
+        suppliedDevice: FakePlaybackDevice()..supportsOrientation = true,
+      );
+      final backend = fixture.current;
+      final plays = backend.plays, pauses = backend.pauses;
+      final surface = tester.element(
+        find.byKey(const Key('player-video-surface')),
+      );
+      await tester.tap(find.byKey(const Key('player-fullscreen')));
+      await tester.pump();
+      expect(page.device.orientation, PlaybackOrientation.portrait);
+      expect(find.byKey(const Key('player-layout-cover')), findsNothing);
+      expect(find.byType(AppLoadingIndicator), findsNothing);
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(find.byKey(const Key('player-layout-cover')), findsNothing);
+      expect(backend.state.playing, isTrue);
+      expect(backend.plays, plays);
+      expect(backend.pauses, pauses);
+      await fixture.controller.pause();
+      await tester.pump();
+      expect(find.byKey(const Key('player-layout-cover')), findsNothing);
+      await tester.pump(const Duration(milliseconds: 800));
+      await tester.pump();
+      expect(backend.state.playing, isFalse);
+      expect(backend.plays, plays);
+      expect(backend.pauses, pauses + 1);
+      expect(backend.seeks, isEmpty);
+      expect(
+        tester.element(find.byKey(const Key('player-video-surface'))),
+        same(surface),
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'Running rotation releases the fullscreen button after the first matching frame',
+    (tester) async {
+      final fixture = PlaybackFixture()
+        ..configureBackend = (backend) => backend.videoSurface = true;
+      final page = await render(
+        tester,
+        suppliedFixture: fixture,
+        size: const Size(844, 390),
+        suppliedDevice: FakePlaybackDevice()..supportsOrientation = true,
+      );
+      final backend = fixture.current;
+      final plays = backend.plays, pauses = backend.pauses;
+      final fullscreenButton = find.byKey(const Key('player-fullscreen'));
+      await tester.tap(fullscreenButton);
+      await tester.pump();
+      expect(page.device.orientation, PlaybackOrientation.portrait);
+      tester.view.physicalSize = const Size(390, 844);
+      await tester.pump();
+      await tester.pump();
+      // No extra 100 ms quiet period is required for a running texture.
+      await tester.tap(fullscreenButton);
+      await tester.pump();
+      expect(page.device.orientation, PlaybackOrientation.landscape);
+      tester.view.physicalSize = const Size(844, 390);
+      await tester.pump();
+      expect(find.byKey(const Key('player-layout-cover')), findsNothing);
+      expect(find.byType(AppLoadingIndicator), findsNothing);
+      expect(backend.plays, plays);
+      expect(backend.pauses, pauses);
+      expect(backend.stableRenderOrientation, isTrue);
+      expect(backend.lastRenderViewport, const Size(844, 390));
       expect(tester.takeException(), isNull);
     },
   );

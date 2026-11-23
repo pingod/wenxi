@@ -275,7 +275,7 @@ class _PreviewPageState extends State<PreviewPage> {
       );
     }
     return PageFrame(
-      title: widget.file.name,
+      title: widget.file.displayName,
       actions: [
         IconButton(
           tooltip:
@@ -371,7 +371,7 @@ class _PreviewPageState extends State<PreviewPage> {
                 : (kind == FileKind.pdf || office) && spec != null
                 ? _onlinePreview(spec!)
                 : EmptyPanel(
-                    widget.file.name,
+                    widget.file.displayName,
                     '${formatBytes(widget.file.size)}\n此类型文件可下载后查看',
                     icon: CupertinoIcons.doc,
                     action: FilledButton.icon(
@@ -428,7 +428,7 @@ class _PreviewPageState extends State<PreviewPage> {
     final uri = _onlineViewerUri(source);
     if (uri == null) {
       return EmptyPanel(
-        widget.file.name,
+        widget.file.displayName,
         '临时链接过长或格式不受支持，请下载后查看',
         icon: CupertinoIcons.doc_text,
         action: FilledButton.icon(

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:asterlink/core/json.dart';
@@ -9,6 +10,7 @@ import 'package:asterlink/data/cleanup_outbox.dart';
 import 'package:asterlink/data/http.dart';
 import 'package:asterlink/data/legacy_import.dart';
 import 'package:asterlink/data/state_store.dart';
+import 'package:asterlink/diagnostics/app_log.dart';
 import 'package:asterlink/domain/models.dart';
 import 'package:asterlink/domain/downloads.dart';
 import 'package:asterlink/download/download_manager.dart';
@@ -1018,8 +1020,8 @@ void main() {
     () async {
       await manager.initialize();
       for (final (platform, route, fileName, expectedProfile, connections) in [
-        (CloudPlatform.quark, null, 'file.bin', 'quark_route_1', 128),
-        (CloudPlatform.quark, null, 'video.mkv', 'quark_route_1', 128),
+        (CloudPlatform.quark, null, 'file.bin', 'quark_route_1', 512),
+        (CloudPlatform.quark, null, 'video.mkv', 'quark_route_1', 512),
         (
           CloudPlatform.quark,
           'quark_route_2',
@@ -1548,6 +1550,134 @@ void main() {
     expect(manager.task(id)!.savedPath, isNull);
     expect(manager.task(id)!.error, contains('校验失败'));
   });
+  test('Checksum retry discards corrupted completed native bytes', () async {
+    final content = List<int>.of(native.content);
+    final expected = md5.convert(content).toString();
+    native.content[0] ^= 0xff;
+    final log = DiagnosticLog.open(null);
+    final previousLog = DiagnosticLog.active;
+    DiagnosticLog.active = log;
+    try {
+      await manager.initialize();
+      final id = await manager.enqueue(
+        DownloadSpec(
+          url: 'https://example.test/signed?token=private-value',
+          fileName: 'private-name.bin',
+          headers: const {'Cookie': 'private-cookie'},
+          expectedSize: content.length,
+          checksumType: 'md5',
+          checksumValue: expected,
+          profile: 'tianyi',
+        ),
+      );
+      await until(
+        () =>
+            manager.task(id)!.status == DownloadStatus.failed &&
+            manager.activeCount == 0,
+      );
+      expect(manager.task(id)!.identity.total, 0);
+      expect(manager.task(id)!.payloadReady, isFalse);
+      expect(files.savedCount, 0);
+      expect(
+        await File(
+          p.join(engine.taskDirectory(id).path, 'payload.gopeed'),
+        ).readAsBytes(),
+        native.content,
+      );
+      final diagnostic =
+          log
+                  .entries()
+                  .singleWhere(
+                    (entry) => entry.event == 'download.checksum_mismatch',
+                  )
+                  .data['fields']
+              as Map<String, dynamic>;
+      expect(diagnostic['expectedBytes'], content.length);
+      expect(diagnostic['actualBytes'], content.length);
+      expect(
+        diagnostic['expectedDigestRef'],
+        isNot(diagnostic['actualDigestRef']),
+      );
+      expect(diagnostic.toString(), isNot(contains('private-')));
+      expect(diagnostic.toString(), isNot(contains(expected)));
+      final removed = native.removedIds.length;
+      native.content.setAll(0, content);
+      await manager.resume(id);
+      await until(
+        () =>
+            manager.task(id)!.status == DownloadStatus.completed &&
+            manager.activeCount == 0,
+      );
+      expect(native.begins, hasLength(2));
+      expect(native.removedIds.length, greaterThan(removed));
+      expect(files.savedCount, 1);
+      expect(await File(manager.task(id)!.savedPath!).readAsBytes(), content);
+    } finally {
+      DiagnosticLog.active = previousLog;
+      log.dispose();
+    }
+  });
+  for (final resumeMode in ['single', 'batch', 'all']) {
+    test(
+      'Old checksum failures retry without deleting the task ($resumeMode)',
+      () async {
+        final expected = md5.convert(native.content).toString();
+        final damaged = <int>[9, 9, 9, 9];
+        const id = 'old-checksum-failure';
+        final payload = File(
+          p.join(engine.taskDirectory(id).path, 'payload.gopeed'),
+        );
+        await payload.parent.create(recursive: true);
+        await payload.writeAsBytes(damaged);
+        await store.put('tasks', [
+          DownloadTask(
+            id: id,
+            spec: DownloadSpec(
+              url: 'https://example.test/file',
+              fileName: 'file.bin',
+              expectedSize: native.content.length,
+              checksumType: 'md5',
+              checksumValue: expected,
+              profile: 'tianyi',
+            ),
+            status: DownloadStatus.failed,
+            createdAt: 1,
+            total: damaged.length,
+            downloaded: damaged.length,
+            identity: RemoteIdentity(damaged.length, '"v1"', null),
+            error: '文件校验失败，请删除此任务后重新下载',
+          ).toJson(),
+        ]);
+        await manager.initialize();
+        expect(await payload.readAsBytes(), damaged);
+        switch (resumeMode) {
+          case 'single':
+            await manager.pause(id);
+            await manager.resume(id);
+          case 'batch':
+            final result = await manager.batch([
+              id,
+            ], DownloadBatchAction.resume);
+            expect(result.succeeded, [id]);
+            expect(result.failed, isEmpty);
+          case 'all':
+            await manager.resumeAll();
+        }
+        await until(
+          () =>
+              manager.task(id)!.status == DownloadStatus.completed &&
+              manager.activeCount == 0,
+        );
+        expect(manager.tasks.single.id, id);
+        expect(manager.task(id)!.createdAt, 1);
+        expect(files.savedCount, 1);
+        expect(
+          await File(manager.task(id)!.savedPath!).readAsBytes(),
+          native.content,
+        );
+      },
+    );
+  }
   test(
     'Temporary remote cleanups are protected by task and preview leases',
     () async {

@@ -52,7 +52,7 @@ PlaybackController cloudPlayback(
         key: file.id == initial.id && initialHistoryKey != null
             ? initialHistoryKey
             : cloudPlaybackKey(session, file, revision),
-        name: file.name,
+        name: file.displayName,
         video: kind == FileKind.video,
         platform: session.platform,
         source: PlaybackSource.cloud(DownloadOrigin(session, file, revision)),
@@ -160,7 +160,7 @@ PlaybackController cloudPlayback(
         if (subtitle.parentId.isEmpty ||
             files[entry.id]!.parentId.isEmpty ||
             subtitle.parentId == files[entry.id]!.parentId)
-          PlaybackSubtitle(subtitle.id, subtitle.name),
+          PlaybackSubtitle(subtitle.id, subtitle.displayName),
     ],
     readSubtitle: (entry, subtitle, scope) => scope.run(() async {
       checkAccount();

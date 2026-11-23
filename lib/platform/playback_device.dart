@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' show DisplayFeatureType;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -20,7 +21,23 @@ abstract class PlaybackDevice extends ChangeNotifier {
   EdgeInsets? systemInsetsFor(MediaQueryData media) => null;
 
   /// Passive screen text must not reserve space for hidden system bars.
-  EdgeInsets screenDisplayInsetsFor(MediaQueryData media) => media.viewPadding;
+  EdgeInsets screenDisplayInsetsFor(MediaQueryData media) =>
+      screenDisplayCutoutsFor(media) == null
+      ? media.viewPadding
+      : EdgeInsets.zero;
+
+  /// Physical cutouts in player coordinates; null means only safe insets are
+  /// available. An empty list means the viewport has no cutouts to avoid.
+  List<Rect>? screenDisplayCutoutsFor(MediaQueryData media) {
+    final cutouts = [
+      for (final feature in media.displayFeatures)
+        if (feature.type == DisplayFeatureType.cutout &&
+            !feature.bounds.isEmpty)
+          feature.bounds,
+    ];
+    return cutouts.isEmpty ? null : List.unmodifiable(cutouts);
+  }
+
   bool get supportsPip;
   bool get supportsDesktopPip => false;
   bool get supportsIndependentPlayerWindows => false;
@@ -117,6 +134,7 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
   Size? _systemInsetsSize;
   EdgeInsets? _systemInsets;
   EdgeInsets? _screenDisplayInsets;
+  List<Rect>? _screenDisplayCutouts;
   int _systemInsetsRevision = 0;
   final _volumeGate = AsyncGate();
   String _lastUpdate = '';
@@ -159,6 +177,12 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
     }
     return _screenDisplayInsets!;
   }
+
+  @override
+  List<Rect>? screenDisplayCutoutsFor(MediaQueryData media) =>
+      systemInsetsFor(media) == null || _screenDisplayCutouts == null
+      ? super.screenDisplayCutoutsFor(media)
+      : _screenDisplayCutouts;
 
   Future<T?> _invoke<T>(String name, [Json arguments = const {}]) =>
       _channel.invokeMethod<T>(name, {'session': _session, ...arguments});
@@ -220,30 +244,57 @@ class NativePlaybackDevice extends PlaybackDevice with WidgetsBindingObserver {
     final size = Size(width, height);
     final insets = EdgeInsets.fromLTRB(sides[0], sides[1], sides[2], sides[3]);
     final cutout = bounds.obj('cutout');
-    final cutoutSides = [
-      for (final side in ['left', 'top', 'right', 'bottom'])
-        cutout.number(side, double.nan),
-    ];
-    final screenInsets =
-        cutoutSides.every((value) => value.isFinite && value >= 0) &&
-            cutoutSides[0] + cutoutSides[2] < width &&
-            cutoutSides[1] + cutoutSides[3] < height
-        ? EdgeInsets.fromLTRB(
-            cutoutSides[0],
-            cutoutSides[1],
-            cutoutSides[2],
-            cutoutSides[3],
-          )
-        : null;
+    final cutouts = _readCutoutRects(cutout['bounds'], size);
+    final screenInsets = cutouts == null
+        ? _readInsets(cutout, size)
+        : _readInsets(cutout.obj('waterfall'), size) ?? EdgeInsets.zero;
     if (size == _systemInsetsSize &&
         insets == _systemInsets &&
-        screenInsets == _screenDisplayInsets) {
+        screenInsets == _screenDisplayInsets &&
+        listEquals(cutouts, _screenDisplayCutouts)) {
       return;
     }
     _systemInsetsSize = size;
     _systemInsets = insets;
     _screenDisplayInsets = screenInsets;
+    _screenDisplayCutouts = cutouts;
     notifyListeners();
+  }
+
+  EdgeInsets? _readInsets(Json values, Size size) {
+    final sides = [
+      for (final side in ['left', 'top', 'right', 'bottom'])
+        values.number(side, double.nan),
+    ];
+    if (sides.any((value) => !value.isFinite || value < 0) ||
+        sides[0] + sides[2] >= size.width ||
+        sides[1] + sides[3] >= size.height) {
+      return null;
+    }
+    return EdgeInsets.fromLTRB(sides[0], sides[1], sides[2], sides[3]);
+  }
+
+  List<Rect>? _readCutoutRects(Object? values, Size size) {
+    if (values is! List) return null;
+    final rects = <Rect>[];
+    for (final value in values) {
+      final rect = asJson(value);
+      final sides = [
+        for (final side in ['left', 'top', 'right', 'bottom'])
+          rect.number(side, double.nan),
+      ];
+      if (sides.any((value) => !value.isFinite) ||
+          sides[0] < 0 ||
+          sides[1] < 0 ||
+          sides[2] > size.width ||
+          sides[3] > size.height ||
+          sides[2] <= sides[0] ||
+          sides[3] <= sides[1]) {
+        return null;
+      }
+      rects.add(Rect.fromLTRB(sides[0], sides[1], sides[2], sides[3]));
+    }
+    return List.unmodifiable(rects);
   }
 
   Future<void> _refreshSystemInsets() async {

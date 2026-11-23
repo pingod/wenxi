@@ -255,31 +255,33 @@ void main() {
         HttpOverrides.global = null;
       });
 
-      Future<void> transfer({bool failUpload = false}) => relay.transfer<void>(
-        session,
-        file,
-        taskId: 'task',
-        entryId: 'entry',
-        expectedMd5: null,
-        onProgress: (received, total) {
-          downloaded = received;
-        },
-        upload: (payload, digest) async {
-          final got = await payload.openRead().fold<BytesBuilder>(
-            BytesBuilder(copy: false),
-            (all, part) => all..add(part),
-          );
+      Future<void> transfer({bool failUpload = false}) => relay
+          .transfer<void>(
+            session,
+            file,
+            taskId: 'task',
+            entryId: 'entry',
+            expectedMd5: null,
+            onProgress: (received, total) {
+              downloaded = received;
+            },
+            upload: (payload, digest) async {
+              final got = await payload.openRead().fold<BytesBuilder>(
+                BytesBuilder(copy: false),
+                (all, part) => all..add(part),
+              );
 
-          expect(sha256.convert(got.takeBytes()), sha256.convert(bytes));
-          expect(digest, md5.convert(bytes).toString());
-          expect(
-            payload.verifiedHashes['sha1'],
-            sha1.convert(bytes).toString(),
-          );
-          uploads++;
-          if (failUpload) throw const AppException('fixture upload failed');
-        },
-      );
+              expect(sha256.convert(got.takeBytes()), sha256.convert(bytes));
+              expect(digest, md5.convert(bytes).toString());
+              expect(
+                payload.verifiedHashes['sha1'],
+                sha1.convert(bytes).toString(),
+              );
+              uploads++;
+              if (failUpload) throw const AppException('fixture upload failed');
+            },
+          )
+          .whenComplete(() => relay.clearEmptyTask('task'));
 
       Future<void> waitForPartial(RequestScope scope) async {
         try {
